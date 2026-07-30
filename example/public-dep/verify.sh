@@ -154,10 +154,18 @@ inject "${FORK}/CMakeLists.txt" \
   'pubdep    # harness fixture'
 
 # Patch 3 — link it into the exported library, publicly.
+#
+# The anchor is indentation-agnostic (`^[[:space:]]*`) rather than pinned to two
+# leading spaces as the upstream starter has it. GLOAM removed the
+# <PROJECT>_BUILD_LIB option, so this line is no longer nested inside an
+# `if (...)` block and is flush left — and an anchor that tracks indentation
+# turns a whitespace change into a red CI job with a confusing message. The
+# `matched 0 lines` guard below still catches genuine drift, because the anchor
+# is the statement, not its position.
 inject "${FORK}/src/lib/CMakeLists.txt" \
-  '^  target_compile_features\(\$\{PROJECT_NAME\}_lib PUBLIC cxx_std_23\)' after \
+  '^[[:space:]]*target_compile_features\(\$\{PROJECT_NAME\}_lib PUBLIC cxx_std_23\)' after \
   '
-  target_link_libraries(${PROJECT_NAME}_lib PUBLIC pubdep::pubdep)' \
+target_link_libraries(${PROJECT_NAME}_lib PUBLIC pubdep::pubdep)' \
   'target_link_libraries(${PROJECT_NAME}_lib PUBLIC pubdep::pubdep)'
 
 # Patch 4 — re-find it from the installed package config. Inserted above the
