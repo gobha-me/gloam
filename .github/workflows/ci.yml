@@ -79,61 +79,20 @@ jobs:
         # CT-05 version-parse-selftest.
         run: ctest --test-dir build --output-on-failure
 
-  # The library-disabled path, which the matrix above never exercises: every job
-  # there builds with the library ON, so nothing would catch a regression in the
-  # `if (TARGET ${PROJECT_NAME}::lib)` guards that keep -D<name>_BUILD_LIB=OFF a
-  # supported configuration. OFF removes the target outright, so the tests that
-  # call into the library cannot link — hence the documented pairing with
-  # -D<name>_TESTS=OFF, which is exactly what this job proves still works.
+  # NOTE: the starter's "library disabled" job lived here and has been removed.
   #
-  # It also installs, which it did not use to: building alone left the *install*
-  # side of the library-disabled path uncovered, and that is exactly where #33
-  # lived — the package-config rules ran unguarded, so this configuration
-  # deposited a Config.cmake with no Targets.cmake beside it.
+  # It proved that -D<name>_BUILD_LIB=OFF stayed a supported configuration:
+  # the library target vanishes, the executable still builds, and the install
+  # rules do not deposit a Config.cmake with no Targets.cmake beside it.
   #
-  # The project name is derived from the checkout directory, same as the root
-  # CMakeLists.txt does, so this stays copyable to a fork verbatim.
-  lib-off:
-    name: library disabled
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: Configure, build, and install with the library off
-        run: |
-          set -euo pipefail
-          NAME=$(basename "$GITHUB_WORKSPACE")
-          cmake -B build "-D${NAME}_BUILD_LIB=OFF" "-D${NAME}_TESTS=OFF"
-          cmake --build build --parallel
-          cmake --install build --prefix "$PWD/prefix"
+  # GLOAM has no such configuration. src/bin/ is a thin consumer of the
+  # simulation core, so a build without the library produces a link error
+  # rather than an application, and src/lib/CMakeLists.txt drops the option
+  # entirely. There is nothing left for the job to assert.
+  #
+  # If the executable ever becomes independent of the library, restore both
+  # the option and this job together — they only mean anything as a pair.
 
-          # With no library there is nothing to export, so the package config
-          # must not be installed either: a Config.cmake with no Targets.cmake
-          # beside it shadows a good install later on CMAKE_PREFIX_PATH and then
-          # sticks in the consumer's <project>_DIR cache, where re-pointing
-          # CMAKE_PREFIX_PATH does not dislodge it. cmake/install.cmake carries
-          # the reasoning; this is the check that keeps it true.
-          #
-          # To re-prove this assertion can fail, drop the `if (TARGET
-          # ${PROJECT_NAME}_lib)` guard around that file's package-config
-          # section and watch the lib/cmake branch go red.
-          #
-          # The executable check is not decoration. Without it the two absence
-          # checks below would pass just as happily against an install that did
-          # nothing at all.
-          test -x "prefix/bin/${NAME}" || {
-            echo "::error::the executable was not installed, so the absence checks below prove nothing"
-            ls -R prefix || true
-            exit 1
-          }
-          for unexpected in prefix/lib/cmake prefix/include; do
-            if [ -e "${unexpected}" ]; then
-              echo "::error::${unexpected} exists, but the library is disabled: a library-less install ships the application only"
-              ls -R prefix
-              exit 1
-            fi
-          done
 
   # The consuming-project path, which nothing else here covers: every job above
   # builds this repo as the top-level project, so a regression in the
