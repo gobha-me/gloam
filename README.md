@@ -32,7 +32,15 @@ diagnostic rather than a game. What exists is the deterministic simulation core:
 
 The terminal layer is **blocked upstream** — see [UPSTREAM.md](UPSTREAM.md).
 termforge's `draw_image` maps one image pixel to one terminal cell and takes no
-z-index, so the §4 compositor has nothing to sit on yet.
+z-index, so the §4 compositor ([#7](https://github.com/gobha-me/gloam/issues/7))
+has nothing to sit on yet.
+
+Next up, and unblocked: the
+[asset pipeline](https://github.com/gobha-me/gloam/issues/1) (the longest
+lead-time item on the critical path to the compositor), the
+[layer API and kitty call boundary](https://github.com/gobha-me/gloam/issues/2),
+the [replay harness](https://github.com/gobha-me/gloam/issues/3), and the
+[audio sink](https://github.com/gobha-me/gloam/issues/4).
 
 ## Design
 

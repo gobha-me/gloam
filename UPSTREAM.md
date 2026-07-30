@@ -82,6 +82,13 @@ design exists to avoid.
 
 ## Corrections to the design document
 
+Each of these is also a GLOAM issue, because they need a decision from the
+design owner rather than a code change:
+[#9](https://github.com/gobha-me/gloam/issues/9),
+[#10](https://github.com/gobha-me/gloam/issues/10),
+[#11](https://github.com/gobha-me/gloam/issues/11),
+[#12](https://github.com/gobha-me/gloam/issues/12).
+
 The specification was checked against termforge **v0.1.18**. The library is at
 **v0.2.2** and four claims no longer hold:
 
