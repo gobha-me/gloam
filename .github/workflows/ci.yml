@@ -1,0 +1,208 @@
+name: CI
+
+# Enforces the AGENTS.md rule: "build on both compilers, always." Every push to
+# main and every pull request builds + tests the project on GCC and Clang across
+# the default toolchain and each sanitizer, so a change that only builds on one
+# compiler fails visibly.
+#
+# This is the cpp-template family's reference workflow: it hardcodes nothing
+# project-specific. The project name is derived from the checkout directory
+# (see root CMakeLists.txt), so a fork copies this file verbatim. The fork-side
+# steps — including the README badge slug — are listed in NEW_PROJECT.md.
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-24.04   # ships GCC 13 + Clang (both C++23-capable); pinned for reproducibility
+    strategy:
+      fail-fast: false      # always show every compiler's result, not just the first failure
+      matrix:
+        include:
+          - { name: "gcc / default",   cxx: g++,     toolchain: default.cmake,   build_type: Debug }
+          - { name: "gcc / asan",      cxx: g++,     toolchain: address.cmake,   build_type: Debug }
+          - { name: "gcc / tsan",      cxx: g++,     toolchain: thread.cmake,    build_type: RelWithDebInfo }
+          - { name: "gcc / ubsan",     cxx: g++,     toolchain: undefined.cmake, build_type: Debug }
+          - { name: "clang / default", cxx: clang++, toolchain: clang.cmake,     build_type: Debug }
+          - { name: "clang / asan",    cxx: clang++, toolchain: address.cmake,   build_type: Debug }
+          - { name: "clang / tsan",    cxx: clang++, toolchain: thread.cmake,    build_type: RelWithDebInfo }
+          - { name: "clang / ubsan",   cxx: clang++, toolchain: undefined.cmake, build_type: Debug }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0    # full history + tags so cmake/version.cmake's `git describe --tags` resolves a real version
+
+      # GCC jobs use the preinstalled g++ (13). The clang jobs, however, must NOT
+      # use ubuntu-24.04's stock clang 18: its libstdc++ pairing cannot compile
+      # the C++23 std::expected example (test/20failure-testing) — the same class
+      # of compiler/stdlib break as the documented fmt-under-clang-20 issue. Pin
+      # them to a known-good Clang so "both compilers, always" stays honest. The
+      # symlinks make `clang++` resolve to the pinned version, so clang.cmake's
+      # find_program(clang++) and the sanitizer toolchains' $CXX all pick it up.
+      - name: Install Clang
+        if: ${{ startsWith(matrix.cxx, 'clang') }}
+        env:
+          CLANG_VERSION: "20"
+        run: |
+          wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
+          chmod +x /tmp/llvm.sh
+          sudo /tmp/llvm.sh "$CLANG_VERSION"
+          sudo ln -sf "/usr/bin/clang-$CLANG_VERSION"   /usr/local/bin/clang
+          sudo ln -sf "/usr/bin/clang++-$CLANG_VERSION" /usr/local/bin/clang++
+          clang++ --version
+
+      - name: Configure
+        env:
+          CXX: ${{ matrix.cxx }}   # default/sanitizer toolchains respect $CXX; clang.cmake selects clang itself
+        run: >
+          cmake -B build
+          -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain/${{ matrix.toolchain }}
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        # Runs the Catch2 suites, the sanitizer engagement smoke test, and the
+        # CT-05 version-parse-selftest.
+        run: ctest --test-dir build --output-on-failure
+
+  # The library-disabled path, which the matrix above never exercises: every job
+  # there builds with the library ON, so nothing would catch a regression in the
+  # `if (TARGET ${PROJECT_NAME}::lib)` guards that keep -D<name>_BUILD_LIB=OFF a
+  # supported configuration. OFF removes the target outright, so the tests that
+  # call into the library cannot link — hence the documented pairing with
+  # -D<name>_TESTS=OFF, which is exactly what this job proves still works.
+  #
+  # It also installs, which it did not use to: building alone left the *install*
+  # side of the library-disabled path uncovered, and that is exactly where #33
+  # lived — the package-config rules ran unguarded, so this configuration
+  # deposited a Config.cmake with no Targets.cmake beside it.
+  #
+  # The project name is derived from the checkout directory, same as the root
+  # CMakeLists.txt does, so this stays copyable to a fork verbatim.
+  lib-off:
+    name: library disabled
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Configure, build, and install with the library off
+        run: |
+          set -euo pipefail
+          NAME=$(basename "$GITHUB_WORKSPACE")
+          cmake -B build "-D${NAME}_BUILD_LIB=OFF" "-D${NAME}_TESTS=OFF"
+          cmake --build build --parallel
+          cmake --install build --prefix "$PWD/prefix"
+
+          # With no library there is nothing to export, so the package config
+          # must not be installed either: a Config.cmake with no Targets.cmake
+          # beside it shadows a good install later on CMAKE_PREFIX_PATH and then
+          # sticks in the consumer's <project>_DIR cache, where re-pointing
+          # CMAKE_PREFIX_PATH does not dislodge it. cmake/install.cmake carries
+          # the reasoning; this is the check that keeps it true.
+          #
+          # To re-prove this assertion can fail, drop the `if (TARGET
+          # ${PROJECT_NAME}_lib)` guard around that file's package-config
+          # section and watch the lib/cmake branch go red.
+          #
+          # The executable check is not decoration. Without it the two absence
+          # checks below would pass just as happily against an install that did
+          # nothing at all.
+          test -x "prefix/bin/${NAME}" || {
+            echo "::error::the executable was not installed, so the absence checks below prove nothing"
+            ls -R prefix || true
+            exit 1
+          }
+          for unexpected in prefix/lib/cmake prefix/include; do
+            if [ -e "${unexpected}" ]; then
+              echo "::error::${unexpected} exists, but the library is disabled: a library-less install ships the application only"
+              ls -R prefix
+              exit 1
+            fi
+          done
+
+  # The consuming-project path, which nothing else here covers: every job above
+  # builds this repo as the top-level project, so a regression in the
+  # PROJECT_IS_TOP_LEVEL guards, the install/export rules or the public usage
+  # requirements would go unnoticed until a downstream project hit it.
+  #
+  # example/consumer/verify.sh builds a miniature downstream project three ways —
+  # add_subdirectory, FetchContent, and an installed find_package — and runs the
+  # result each time. Both compilers, because a usage requirement can propagate
+  # on one and not the other.
+  consumer:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: "consumer / gcc",   cxx: g++ }
+          - { name: "consumer / clang", cxx: clang++ }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Same pin and rationale as the build matrix above.
+      - name: Install Clang
+        if: ${{ startsWith(matrix.cxx, 'clang') }}
+        env:
+          CLANG_VERSION: "20"
+        run: |
+          wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
+          chmod +x /tmp/llvm.sh
+          sudo /tmp/llvm.sh "$CLANG_VERSION"
+          sudo ln -sf "/usr/bin/clang-$CLANG_VERSION"   /usr/local/bin/clang
+          sudo ln -sf "/usr/bin/clang++-$CLANG_VERSION" /usr/local/bin/clang++
+
+      - name: Consume the library three ways
+        env:
+          CXX: ${{ matrix.cxx }}
+        run: example/consumer/verify.sh
+
+  # The one path this project cannot exercise as itself: a fork whose library
+  # links a FetchContent'd dependency into its own exported interface. Our
+  # library links nothing, so the harness synthesises such a fork and asserts
+  # that the install/export files survive being copied into it (#29).
+  #
+  # One compiler on purpose. The failure this guards against happens during
+  # CMake generation, before a translation unit is compiled, so a matrix would
+  # buy nothing; the per-compiler half of consuming this project is already
+  # covered by the two jobs above. Its own job rather than a step in those, so a
+  # red check names the cause without opening a log.
+  public-dep:
+    name: public dependency
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Consume a fork that has a public dependency
+        run: example/public-dep/verify.sh
+
+  # Fast, dependency-free guard: the git-describe version parser self-test on its
+  # own (no compiler, no network). It also runs inside every build job above via
+  # ctest; this job gives quick, isolated feedback.
+  version-selftest:
+    name: version parser self-test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run version_selftest.cmake
+        run: cmake -P cmake/version_selftest.cmake

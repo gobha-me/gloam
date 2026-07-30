@@ -1,0 +1,48 @@
+# Build directories, root only — narrowed so files like docs/building.md,
+# src/rebuild.cpp, buildinfo.hpp aren't silently excluded (CT-07 / #8).
+/build*/
+# CTest's output dir at repo root (the in-build-tree Testing/ is covered by /build*/).
+/Testing/
+# Generated at build time from include/version.hpp.in.cmake — never commit.
+include/version.hpp
+# Machine-local agent state, root only. Shared agent config that a team may want
+# tracked (.claude/settings.json, agents/, commands/, skills/) stays trackable on
+# purpose — a bare /.claude/ would repeat the overbroad-pattern bug of CT-07 / #8.
+/.claude/worktrees/
+/.claude/settings.local.json
+# clangd's index dir, written at the root of whatever tree you open (.clangd is
+# committed, so this appears for anyone using a clangd-backed editor).
+/.cache/
+
+# Prerequisites
+*.d
+
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.obj
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+*.dll
+
+# Fortran module files
+*.mod
+*.smod
+
+# Compiled Static libraries
+*.lai
+*.la
+*.a
+*.lib
+
+# Executables
+*.exe
+*.out
+*.app
