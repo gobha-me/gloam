@@ -44,10 +44,18 @@ the [replay harness](https://github.com/gobha-me/gloam/issues/3), and the
 
 ## Design
 
-The full specification lives in the design project as `GLOAM Design Document`.
-Section numbers throughout this codebase (§3, §6.2, §11 …) refer to it, and every
-non-obvious constant carries the sentence it came from. The rule the code follows:
-if a number appears here, the reason it has that value appears next to it.
+The full specification is [`design/SPEC.md`](design/SPEC.md), vendored from the
+design project that owns it — see [`design/README.md`](design/README.md) for the
+provenance and for which copy wins. Section numbers throughout this codebase
+(§3, §6.2, §11 …) refer to it, and every non-obvious constant carries the sentence
+it came from. The rule the code follows: if a number appears here, the reason it
+has that value appears next to it.
+
+`design/` also carries the slices pulled out for specific jobs —
+[`BUDGETS.md`](design/BUDGETS.md), [`SCHEMAS.md`](design/SCHEMAS.md),
+[`TEST-PLAN.md`](design/TEST-PLAN.md), [`BUILD-ORDER.md`](design/BUILD-ORDER.md) —
+and the rune data. `UPSTREAM.md` is where the design document's own staleness is
+tracked; the snapshot is not patched in place.
 
 Three commitments shape almost every file:
 
