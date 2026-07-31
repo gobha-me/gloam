@@ -12,6 +12,29 @@
 /// Everything that touches a terminal lives in `src/bin/` and links termforge.
 /// If you find yourself wanting to include a driver header from this library,
 /// that is the design telling you the code belongs on the other side.
+///
+///
+/// WHAT THIS UMBRELLA DELIBERATELY LEAVES OUT
+///
+/// Four headers ship in `include/gloam/` and are NOT included below. That is a
+/// decision, not an oversight, and it is written down here so the next person
+/// does not helpfully "fix" it:
+///
+///   budgets.hpp  §11's numbers, as constants and assertions
+///   layer.hpp    §4.5's compositing bands and the z-index policy over them
+///   emit.hpp     the byte sink §13.4's budget counters wrap around
+///   kitty.hpp    the kitty call boundary — every escape sequence, one module
+///
+/// All four are render-side. They are inside `gloam::lib` because they are pure
+/// — integers and bytes, no clock, no file descriptor, no global, nothing beyond
+/// the standard library — and because tests link only `${PROJECT_NAME}::lib`.
+/// PRODUCING bytes is not the same as needing a terminal; WRITING them is, and
+/// that write lives in `src/bin/`.
+///
+/// But they are not the simulation, and this header is the simulation's public
+/// surface. Pulling an escape-sequence emitter into every consumer's translation
+/// unit — including the headless diagnostic in `src/bin/main.cpp` — is the wrong
+/// default. Include them by name when you want them.
 
 #include <cstdint>
 

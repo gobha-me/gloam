@@ -14,8 +14,11 @@
 
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 
 #include "gloam/budgets.hpp"
+#include "gloam/emit.hpp"
+#include "gloam/layer.hpp"
 #include "gloam/noise.hpp"
 #include "gloam/perception.hpp"
 #include "gloam/tuning.hpp"
@@ -70,9 +73,14 @@ TEST_CASE("§11 byte budgets are declared and ordered sanely", "[budget]") {
   CHECK(budget::kIdleFrameBytes < budget::kMaxAnimationFrameBytes);
   CHECK(budget::kMaxAnimationFrameBytes < budget::kMaxRecompositionBytes);
 
-  // PENDING M0: measured by the replay byte counter, which wraps the emit path
-  // so it counts what actually left the process rather than what the compositor
-  // thinks it produced (§13.4). Blocked on the terminal layer — UPSTREAM.md.
+  // The idle row is now measured, not merely declared — see the §4.6 case below,
+  // which runs a frame through gloam::emit::ByteSink. §13.4 wants the counter to
+  // wrap the emit path so it reports what actually left the process rather than
+  // what the compositor believed it produced, and ByteSink is that counter.
+  //
+  // PENDING M0: the animation, recomposition and sustained-p95 rows need a
+  // compositor producing real placement lists to measure against — G-6, and
+  // through it the §4 compositor, which is still blocked upstream (UPSTREAM.md).
 }
 
 TEST_CASE("§11 timing budgets are declared", "[budget]") {
@@ -140,16 +148,33 @@ TEST_CASE("§11's simulation tick budget, measured", "[budget]") {
   CHECK(per_tick_us < budget::kMaxSimulationTickMs * 1000);
 }
 
-TEST_CASE("§4.5's below-background threshold appears exactly once, behind a name", "[budget]") {
-  // §19 step 2's acceptance criterion is a grep test: "-1073741825 appears
-  // exactly once in the tree". The grep itself lives in cmake/check_layer_z.cmake
-  // and runs as its own ctest case; this asserts the value, so that the constant
-  // and the grep cannot drift apart.
-  CHECK(budget::kBelowBackgroundZ == -1073741825);
+TEST_CASE("§4.5's below-background threshold is reachable only through the layer API", "[budget]") {
+  // The threshold's value is asserted in test/06layer/, next to the constant it
+  // pins. This case deliberately does NOT spell the literal: two tests asserting
+  // the same number in two files is two places for it to drift.
+  //
+  // What §11 needs from §4.5 is weaker and worth stating on its own — that the
+  // back of the compositor is reachable through the named band API, and that it
+  // really is below kitty's cell background rather than merely negative.
+  CHECK(layer::image_z(layer::Band::BelowBackground, 0) == layer::kBelowBackgroundZ);
+  CHECK(layer::kBelowBackgroundZ < -(std::int32_t{1} << 30));
+}
 
-  // And that it is reachable only through the named constant: no application
-  // code should ever spell the literal. Asserting the arithmetic identity keeps
-  // the meaning attached — it is one below the minimum 32-bit z-index kitty
-  // will accept above the background.
-  CHECK(budget::kBelowBackgroundZ < 0);
+TEST_CASE("§4.6's idle frame costs zero bytes, measured at the sink", "[budget]") {
+  // §11's headline row, and the first one that stops being a declaration and
+  // becomes a measurement. A frame in which the compositor placed nothing must
+  // put nothing on the wire — not "almost nothing", not "a cursor move".
+  emit::ByteSink sink;
+  sink.clear();
+
+  CHECK(sink.size() == budget::kIdleFrameBytes);
+  CHECK(sink.total() == budget::kIdleFrameBytes);
+
+  // An idle frame is still a frame. If clear() did not count it, a run of idle
+  // frames would be indistinguishable from no frames at all and this row would
+  // be unmeasurable rather than merely trivially met.
+  CHECK(sink.frames() == 1);
+
+  // PENDING M0: the sustained p95 row (kMaxSustainedBytesPerSecond) needs a
+  // scripted replay to measure against — TEST-PLAN.md §4, G-6.
 }

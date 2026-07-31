@@ -36,6 +36,16 @@ add_test(
           ${PROJECT_SOURCE_DIR}/cmake/check_layer_z.cmake
 )
 
+# SPEC §19 step 2, the other half — "every escape sequence GLOAM emits goes
+# through one module". The z threshold check above proves no application code
+# hand-writes a z-index; this proves no application code hand-writes a kitty
+# command. §16's "a vendored driver is a swap and not a rewrite" needs both.
+add_test(
+  NAME kitty-boundary-single-module
+  COMMAND ${CMAKE_COMMAND} -DPROJECT_ROOT=${PROJECT_SOURCE_DIR} -P
+          ${PROJECT_SOURCE_DIR}/cmake/check_kitty_boundary.cmake
+)
+
 file(GLOB TEST_DIRS ${CMAKE_CURRENT_LIST_DIR}/*)
 
 # Say this once, at configure time, instead of letting it surface as a link error

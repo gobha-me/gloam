@@ -11,9 +11,16 @@ protocol. Bootstrapped from the same author's CMake starter, so the build
 machinery, toolchain files and testing conventions below are inherited on
 purpose — treat them as decided unless there is a GLOAM-specific reason.
 
-The design is a formal written specification. Section markers throughout the
-code (§3, §6.2, §11 …) refer to it, and they are not decoration — they are how
-you find out *why* a number is what it is before changing it.
+The design is a formal written specification, and it is in the tree:
+`design/SPEC.md`. Section markers throughout the code (§3, §6.2, §11 …) refer to
+it, and they are not decoration — they are how you find out *why* a number is what
+it is before changing it. **Read the section before changing the number.**
+
+`design/` is a snapshot of the design project that owns the document, not the
+original — `design/README.md` says which copy wins and how to re-sync. Do not
+patch `design/SPEC.md` to reflect something you learned about termforge; that
+belongs in `UPSTREAM.md`'s "Corrections to the design document", mirrored as an
+issue so the call gets made rather than absorbed.
 
 ### Three rules that outrank ordinary judgement here
 
@@ -23,6 +30,18 @@ you find out *why* a number is what it is before changing it.
    needs a terminal, it belongs in `src/bin/`. If you find yourself adding an
    include that breaks this, the design is telling you the code is in the wrong
    place.
+
+   One clarification, because the sentence above gets misread: **producing bytes
+   is not needing a terminal — writing them is.** `include/gloam/kitty.hpp` and
+   `src/lib/kitty.cpp` construct kitty escape sequences, and they belong in the
+   library: the function is `(Placement, CellPixelSize) → bytes appended to a
+   caller-owned buffer`, which reaches no clock, no file descriptor and no
+   global, so §5.1's rationale is untouched. The `write` that puts those bytes on
+   a terminal stays in `src/bin/`, and that one line is the whole terminal-facing
+   surface. Do not move `kitty.cpp` out on the strength of its name. The same
+   reasoning covers `budgets.hpp`, `layer.hpp` and `emit.hpp`, all four of which
+   are deliberately excluded from the `gloam/gloam.hpp` umbrella — that header
+   says so, and says why.
 
 2. **No floating point in simulation state.** §6 is explicit: "Every number
    below is an integer." Where the design prose says a multiplier — creep is

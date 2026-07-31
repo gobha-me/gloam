@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "GLOAM valid-combination table",
+  "description": "Authoring form for spells.data. Read by BOTH the spell resolver and the level generator's inscription placement, from one file, so a level can never teach a rune whose partners are unreachable. Absent rows are invalid by definition.",
+  "type": "object",
+  "required": [
+    "version",
+    "rulesetHash",
+    "spells"
+  ],
+  "properties": {
+    "version": {
+      "type": "integer"
+    },
+    "rulesetHash": {
+      "type": "string",
+      "description": "u64 hex. Covers every tunable integer in SPEC §6 and §8. A replay recorded against a different hash is rejected at load."
+    },
+    "spells": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "power",
+          "element",
+          "effect",
+          "dangerClass"
+        ],
+        "properties": {
+          "power": {
+            "type": "string",
+            "enum": [
+              "KAI",
+              "TOR",
+              "PEL",
+              "DUN",
+              "BRAM",
+              "GOTH"
+            ]
+          },
+          "element": {
+            "type": "string",
+            "enum": [
+              "SIL",
+              "SHOR",
+              "FEN",
+              "VAST",
+              "THULE",
+              "HESH"
+            ]
+          },
+          "form": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "LOM",
+              "REND",
+              "WYRD",
+              "YARN",
+              "MOTE",
+              "NIL",
+              null
+            ]
+          },
+          "modifier": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "ARR",
+              "ESK",
+              "ITH",
+              "OTH",
+              "UMBRA",
+              "YRN",
+              null
+            ]
+          },
+          "effect": {
+            "type": "string",
+            "description": "effect_id symbol resolved by the pure resolver function"
+          },
+          "params": {
+            "type": "array",
+            "maxItems": 4,
+            "items": {
+              "type": "integer"
+            },
+            "description": "integers only — no floats reach simulation state"
+          },
+          "dangerClass": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 3,
+            "description": "0 inert, 1 backfires on caster, 2 on party, 3 on level"
+          },
+          "note": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  }
+}

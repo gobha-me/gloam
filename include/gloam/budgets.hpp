@@ -90,15 +90,16 @@ static_assert(resident_images_full() == 246, "§4.2's full-game total");
 static_assert(resident_images_full() <= kMaxResidentImages,
               "§4.2's own inventory must fit §11's cap, or the art plan is already over budget");
 
-/// §4.5 — the below-background z threshold.
-///
-/// §4.5: "That threshold integer must appear EXACTLY ONCE in the codebase,
-/// inside a named layer API." This is that once. `test/10budgets/` greps the
-/// tree to enforce it (§19 step 2's acceptance criterion), and no application
-/// code should ever hand-write the literal.
-///
-/// termforge has no layer API today and no z-index parameter at all — see
-/// UPSTREAM.md, GL-B2.
-inline constexpr std::int32_t kBelowBackgroundZ = -1073741825;
+// ── §4.5 The compositing bands ──────────────────────────────────────────────
+//
+// The below-background z threshold used to live here, because there was nothing
+// better to hold it. §4.5 asks for it "inside a named layer API", and that API
+// now exists: see `gloam::layer::kBelowBackgroundZ` in `include/gloam/layer.hpp`,
+// which is also where `cmake/check_layer_z.cmake` expects to find it.
+//
+// This comment deliberately describes the number instead of spelling it. That
+// checker counts FILES containing the literal and requires exactly one, so a
+// comment here quoting the value would make this file a second hit and fail the
+// build — the same discipline AGENTS.md sets out for `check_artifacts.cmake`.
 
 }  // namespace gloam::budget

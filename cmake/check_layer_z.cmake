@@ -5,10 +5,14 @@
 # inside a named layer API, so that no application code hand-writes it. This is
 # that enforcement.
 #
-# Scope is the SHIPPED code — include/ and src/. test/10budgets/ names the
+# Scope is the SHIPPED code — include/ and src/. test/06layer/ names the
 # literal on purpose (it asserts the constant's value, so that the constant and
 # this check cannot drift apart), and this file necessarily contains it too.
 # Counting either would make the check assert its own text.
+#
+# design/ is also out of scope: it is the vendored specification, and §4.5's own
+# table states the threshold. A design document quoting the number it specifies
+# is not application code hand-writing it.
 #
 # Run standalone:  cmake -P cmake/check_layer_z.cmake
 
@@ -19,7 +23,7 @@ if (NOT DEFINED PROJECT_ROOT)
 endif ()
 
 set(THRESHOLD "-1073741825")
-set(CANONICAL_HOME "include/gloam/budgets.hpp")
+set(CANONICAL_HOME "include/gloam/layer.hpp")
 
 file(GLOB_RECURSE SHIPPED_SOURCES
   "${PROJECT_ROOT}/include/*.hpp"

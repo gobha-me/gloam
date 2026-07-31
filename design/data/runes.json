@@ -1,0 +1,221 @@
+{
+  "$comment": "GLOAM rune vocabulary. Original syllables — do not import from another game. The grammar is a discovery mechanic (SPEC §8.1): the initial consonant class encodes the slot, and nothing in the game ever tells the player so.",
+  "version": 1,
+  "slots": [
+    {
+      "slot": 1,
+      "name": "power",
+      "required": true,
+      "phonology": "stop onset (k t p d b g)",
+      "role": "sets mana cost and magnitude"
+    },
+    {
+      "slot": 2,
+      "name": "element",
+      "required": true,
+      "phonology": "fricative onset (s sh f v th h)",
+      "role": "the substance of the effect"
+    },
+    {
+      "slot": 3,
+      "name": "form",
+      "required": false,
+      "phonology": "liquid or nasal onset (l r w y m n)",
+      "role": "shapes it"
+    },
+    {
+      "slot": 4,
+      "name": "modifier",
+      "required": false,
+      "phonology": "vowel onset",
+      "role": "alters delivery or duration"
+    }
+  ],
+  "runes": [
+    {
+      "id": 0,
+      "slot": "power",
+      "name": "KAI",
+      "mana": 1,
+      "magnitude": 1,
+      "gloss": "a flicker"
+    },
+    {
+      "id": 1,
+      "slot": "power",
+      "name": "TOR",
+      "mana": 2,
+      "magnitude": 2,
+      "gloss": "slight"
+    },
+    {
+      "id": 2,
+      "slot": "power",
+      "name": "PEL",
+      "mana": 3,
+      "magnitude": 3,
+      "gloss": "ordinary"
+    },
+    {
+      "id": 3,
+      "slot": "power",
+      "name": "DUN",
+      "mana": 5,
+      "magnitude": 5,
+      "gloss": "strong"
+    },
+    {
+      "id": 4,
+      "slot": "power",
+      "name": "BRAM",
+      "mana": 8,
+      "magnitude": 8,
+      "gloss": "severe"
+    },
+    {
+      "id": 5,
+      "slot": "power",
+      "name": "GOTH",
+      "mana": 13,
+      "magnitude": 13,
+      "gloss": "ruinous"
+    },
+    {
+      "id": 6,
+      "slot": "element",
+      "name": "SIL",
+      "substance": "light",
+      "note": "also refuels a lamp"
+    },
+    {
+      "id": 7,
+      "slot": "element",
+      "name": "SHOR",
+      "substance": "cold",
+      "note": "slows, and quiets"
+    },
+    {
+      "id": 8,
+      "slot": "element",
+      "name": "FEN",
+      "substance": "rot",
+      "note": "over time, not at once"
+    },
+    {
+      "id": 9,
+      "slot": "element",
+      "name": "VAST",
+      "substance": "stone",
+      "note": "walls, doors, weight"
+    },
+    {
+      "id": 10,
+      "slot": "element",
+      "name": "THULE",
+      "substance": "void",
+      "note": "silence — acts as a noise sink"
+    },
+    {
+      "id": 11,
+      "slot": "element",
+      "name": "HESH",
+      "substance": "flame",
+      "note": "loud, bright, obvious"
+    },
+    {
+      "id": 12,
+      "slot": "form",
+      "name": "LOM",
+      "shape": "bolt",
+      "note": "travels the corridor"
+    },
+    {
+      "id": 13,
+      "slot": "form",
+      "name": "REND",
+      "shape": "touch",
+      "note": "adjacent cell only"
+    },
+    {
+      "id": 14,
+      "slot": "form",
+      "name": "WYRD",
+      "shape": "ward",
+      "note": "persistent barrier on a cell edge"
+    },
+    {
+      "id": 15,
+      "slot": "form",
+      "name": "YARN",
+      "shape": "field",
+      "note": "fills a cell and its neighbours"
+    },
+    {
+      "id": 16,
+      "slot": "form",
+      "name": "MOTE",
+      "shape": "mote",
+      "note": "a placed object that persists"
+    },
+    {
+      "id": 17,
+      "slot": "form",
+      "name": "NIL",
+      "shape": "self",
+      "note": "the caster"
+    },
+    {
+      "id": 18,
+      "slot": "modifier",
+      "name": "ARR",
+      "alters": "extend",
+      "note": "duration x3, cost x2"
+    },
+    {
+      "id": 19,
+      "slot": "modifier",
+      "name": "ESK",
+      "alters": "quieten",
+      "note": "cast noise halved"
+    },
+    {
+      "id": 20,
+      "slot": "modifier",
+      "name": "ITH",
+      "alters": "split",
+      "note": "two targets, half magnitude"
+    },
+    {
+      "id": 21,
+      "slot": "modifier",
+      "name": "OTH",
+      "alters": "delay",
+      "note": "fires 10 ticks later"
+    },
+    {
+      "id": 22,
+      "slot": "modifier",
+      "name": "UMBRA",
+      "alters": "invert",
+      "note": "the effect runs the other way"
+    },
+    {
+      "id": 23,
+      "slot": "modifier",
+      "name": "YRN",
+      "alters": "bind",
+      "note": "attaches to an object, not a place"
+    }
+  ],
+  "rules": {
+    "combinationSpace": 1764,
+    "targetValidCount": [
+      60,
+      80
+    ],
+    "invalidCostsMana": true,
+    "someInvalidAreDangerous": true,
+    "castNoise": "10 * power.mana, halved by ESK",
+    "canonicalDangerousExample": "GOTH HESH with no form — all that power, nowhere to go"
+  }
+}
