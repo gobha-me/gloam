@@ -27,7 +27,11 @@ named bug class, an acceptance test, and the mutation that proves the test bites
 | GL-A4 | Residency accounting and quota query | [#112](https://github.com/gobha-me/termforge/issues/112) |
 | GL-A5 | Documented image lifecycle across alt-screen / resize / reattach | [#113](https://github.com/gobha-me/termforge/issues/113) |
 
-**GL-A1 is the hard blocker.** `KittyDriver` tracks 16 region slots keyed on
+**GL-A1 and [#137](https://github.com/gobha-me/termforge/issues/137) are the hard blockers.** See "What #83 landing changed"
+below — the cell rect arrived, and with it a stretch-to-fill contract that a
+pre-dithered plate cannot survive.
+
+**GL-A1's own detail:** `KittyDriver` tracks 16 region slots keyed on
 `(x, y, w, h)` and evicts the least-recently-drawn past that, recycling ids
 (`src/lib/drivers/kitty_driver.cpp:173-201`). Moving a sprite one cell allocates
 a new slot; `gc_regions()` drops anything not redrawn in the last frame. For a
@@ -39,10 +43,11 @@ design exists to avoid.
 
 | | Need | Issue |
 | --- | --- | --- |
-| GL-B1 | `draw_image` takes a cell rect | **[#83](https://github.com/gobha-me/termforge/issues/83)** — already open, commented as a consumer |
+| GL-B1 | `draw_image` takes a cell rect | **[#83](https://github.com/gobha-me/termforge/issues/83) — LANDED in v0.3.0** |
 | GL-B2 | Named layer API over raw z-index | [#114](https://github.com/gobha-me/termforge/issues/114) |
 | GL-B3 | Sub-cell pixel offset (`X=`/`Y=`) and source crop | [#115](https://github.com/gobha-me/termforge/issues/115) |
-| GL-B4 | Query the terminal's cell pixel size | **[#100](https://github.com/gobha-me/termforge/issues/100)** — already open, commented as a consumer |
+| GL-B4 | Query the terminal's cell pixel size | **[#100](https://github.com/gobha-me/termforge/issues/100) — LANDED in v0.3.0** |
+| GL-B5 | **Opt out of stretch-to-fill — place a pre-rendered image at 1:1** | [#137](https://github.com/gobha-me/termforge/issues/137) — **the compositor's blocker** |
 
 ### GL-C · Terminal-side animation
 
@@ -57,7 +62,7 @@ design exists to avoid.
 | --- | --- | --- |
 | GL-D1 | Kitty keyboard protocol — key release and repeat | **[#60](https://github.com/gobha-me/termforge/issues/60) — LANDED in v0.2.2** |
 | GL-D2 | Declare a capability floor and refuse to start below it | **[#91](https://github.com/gobha-me/termforge/issues/91)** — commented as a consumer |
-| GL-D3 | Virtual `setup`/`teardown` hooks for app-owned resources | **[#97](https://github.com/gobha-me/termforge/issues/97)** — commented as a consumer |
+| GL-D3 | Virtual `setup`/`teardown` hooks for app-owned resources | **[#97](https://github.com/gobha-me/termforge/issues/97)** — in progress; lands as `on_start`/`on_stop` |
 
 ### GL-E · Determinism and replay
 
@@ -80,6 +85,45 @@ design exists to avoid.
   offline dither pipeline, the `replay.gloam` container. None of these are a TUI
   framework's business.
 
+## What #83 landing changed
+
+Read against termforge **v0.6.2** (2026-07-31). #83 and #100 both closed in
+v0.3.0, and the compositor is **no closer**.
+
+`draw_image` now takes a cell rect and cell pixel size is queryable and
+re-pushed on every `SIGWINCH` — both real wins. But #83's resolution made
+scaling the written contract:
+
+> Stretch-to-fill, nearest neighbour. No letterbox or fit modes… Scaling is the
+> contract, so it is not a degradation and raises no event.
+> — `include/termforge/drivers/terminal_driver.hpp`
+
+`place_classic` emits `c=`/`r=` on every placement, with no path that omits
+them. That is in direct opposition to SPEC §3.2:
+
+> **Kitty's `c=`/`r=` cell scaling is never used** — it resamples, and
+> resampling a pre-dithered plate is exactly the dither crawl §4.3 exists to
+> avoid.
+
+The arithmetic makes it unavoidable rather than merely likely. `image_cell_extent`
+uses ceiling division, so at the 9×18 px cells termforge measured on real
+hardware a 480 px plate is 53.3 cells → 54 → stretched to 486 px. At the 8×16 px
+nominal fallback, 360 px becomes 368 px vertically. No plate size survives,
+because the cell geometry belongs to the terminal.
+
+**Scoring the compositor's four needs against v0.6.2: none are met.** Exact
+placement ([#137](https://github.com/gobha-me/termforge/issues/137)), sub-cell
+offsets ([#115](https://github.com/gobha-me/termforge/issues/115)), z-order
+([#114](https://github.com/gobha-me/termforge/issues/114)), residency
+([#109](https://github.com/gobha-me/termforge/issues/109) — still 16 slots,
+still keyed on the destination rect, so moving one cell is still a full
+re-upload).
+
+#137 asks for an **opt-out, not a reversal**: stretch-to-fill stays the default
+and stays right for widgets, which generate their images and can re-rasterize at
+`preferred_pixel_extent()`. A pre-rendered image cannot, and that is the
+distinction the API is missing.
+
 ## Corrections to the design document
 
 Each of these is also a GLOAM issue, because they need a decision from the
@@ -90,7 +134,7 @@ design owner rather than a code change:
 [#12](https://github.com/gobha-me/gloam/issues/12).
 
 The specification was checked against termforge **v0.1.18**. The library is at
-**v0.2.2** and four claims no longer hold:
+**v0.6.2** and four claims no longer hold:
 
 1. **#60 has landed.** The design gates §7.4's hold-a-number-to-aim on the kitty
    keyboard protocol and says M2 combat cannot start without it. It shipped in
