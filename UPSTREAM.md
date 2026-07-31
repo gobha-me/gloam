@@ -142,12 +142,19 @@ distinction the API is missing.
 
 ## Corrections to the design document
 
-Each of these is also a GLOAM issue, because they need a decision from the
+Each of these was also a GLOAM issue, because they needed a decision from the
 design owner rather than a code change:
 [#9](https://github.com/gobha-me/gloam/issues/9),
 [#10](https://github.com/gobha-me/gloam/issues/10),
 [#11](https://github.com/gobha-me/gloam/issues/11),
-[#12](https://github.com/gobha-me/gloam/issues/12).
+[#12](https://github.com/gobha-me/gloam/issues/12),
+[#13](https://github.com/gobha-me/gloam/issues/13).
+
+**All five are now decided** — see "Decisions taken" at the end of this section.
+`design/SPEC.md` is deliberately NOT edited to match: it is a snapshot of the
+design project that owns it, and patching it in place would fork the two copies.
+This section is the amendment record, and it wins over the snapshot wherever they
+disagree.
 
 The specification was checked against termforge **v0.1.18**. The library is at
 **v0.6.2** and four claims no longer hold:
@@ -174,6 +181,32 @@ One more, which is a design question rather than a factual error:
    that these are "animation registrations, not placements". Encoded that way in
    `include/gloam/budgets.hpp`, with the arithmetic asserted, because the naive
    reading does not blow the 256 cap and would therefore fail silently.
+
+### Decisions taken
+
+Amendments to `design/SPEC.md`, decided 2026-07-31. The snapshot is not edited;
+these rows are the amendment, and the code implements them.
+
+| | Decision | Effect |
+| --- | --- | --- |
+| [#9](https://github.com/gobha-me/gloam/issues/9) | **§7.4's fallback is dropped.** #60 landed, so bind 1–4, hold to surface options, release to commit — as originally designed, no timing heuristic. | §14.2's GL-D1 row is landed. **M2 has no upstream blocker.** No code today; M2 combat has not started. |
+| [#11](https://github.com/gobha-me/gloam/issues/11) | **YRN is renamed URN.** §8.1 lists Y among the liquids and never among the vowels, so a Modifier opening on Y was a vocabulary bug, not a rule with an exception. | `Modifier::Urn`, inscription `"URN"`. `slot_from_inscription` now returns `Form` for Y, and the grammar is **exact over all 24 runes** — `test/05spells/` asserts it exhaustively. Enum value unchanged (5), so `ruleset_hash` is untouched and no replay is invalidated. |
+| [#12](https://github.com/gobha-me/gloam/issues/12) | **§6.1 gains a LOST_TRACK → HUNTING row, with its own tell.** Condition is the same `saw` as SEARCHING → HUNTING. The tell is the head snapping mid-cast-about and an immediate close, with **no audio sting**. | `Tell::SnapsBack`. The sting is reserved for a first sighting: it means "found you", and its absence here means "never lost you". Tell selection is now keyed on the `(before, next)` pair, because two transitions land on HUNTING and §6.1 requires them to read differently. |
+| [#10](https://github.com/gobha-me/gloam/issues/10) | **Confirmed:** transition sequences are animation registrations, not resident images. | Already encoded; no change. |
+| [#13](https://github.com/gobha-me/gloam/issues/13) | **Recorded, deliberately not built.** Capacity from (carry − equipped), over-capacity as a noise penalty, multiplicative rather than subtractive noise reduction, armour **classes** not slots, enchantments derived from URN bindings, and the bag is **silent, not weightless**. | No code. §19 is explicit that nothing in §7 or §8 makes M0's question easier to answer and building either first makes it more expensive to act on the answer. Implement at M1, when the party exists. |
+
+Two notes worth carrying forward from #12's implementation:
+
+- **Re-acquisition is checked before the forget timer.** On the exact tick the
+  LOST_TRACK timer expires, a monster that can see the party hunts rather than
+  forgets. Losing someone on the frame they walked into your light is the worst
+  available reading.
+- **The condition is `saw`, not `hit`.** Re-acquiring by ear alone would put a
+  hole in §6.3's pillar exactly where it matters most — you have just broken
+  line of sight and doused. Note that §6.3 makes a doused party visible **at an
+  adjacent cell**; dousing buys invisibility *beyond* adjacent cells, which is
+  what keeps it a decision rather than a dominant strategy. Both sides of that
+  boundary are pinned in `test/04perception/`.
 
 ## Working around an open request
 

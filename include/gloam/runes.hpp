@@ -59,7 +59,7 @@ enum class Modifier : std::uint8_t {
   Ith = 2,    ///< split — two targets, half magnitude
   Oth = 3,    ///< delay — fires 10 ticks later
   Umbra = 4,  ///< invert — the effect runs the other way
-  Yrn = 5,    ///< bind — attaches to an object, not a place
+  Urn = 5,    ///< bind — attaches to an object, not a place
   None = 6,   ///< the slot is left empty
 };
 
@@ -158,7 +158,7 @@ struct RuneSeq {
     case Modifier::Ith: return "ITH";
     case Modifier::Oth: return "OTH";
     case Modifier::Umbra: return "UMBRA";
-    case Modifier::Yrn: return "YRN";
+    case Modifier::Urn: return "URN";
     case Modifier::None: return {};
   }
   return {};
@@ -168,8 +168,11 @@ struct RuneSeq {
 
 /// What §8.1's phonetic rule alone can tell you about an inscription.
 ///
-/// `Ambiguous` is not a defect in this function — it is a property of the
-/// authored vocabulary, and it is load-bearing. See `slot_from_inscription`.
+/// `Ambiguous` is not a defect in this function — it would be a property of the
+/// authored vocabulary. No shipped inscription produces it today (see
+/// `slot_from_inscription`), and it is kept so that a future rune which
+/// reintroduced a collision has somewhere honest to land rather than being
+/// silently filed under the wrong slot.
 enum class SlotHint : std::uint8_t { Power, Element, Form, Modifier, Ambiguous, Unknown };
 
 /// Infers a rune's slot from its opening sound, exactly as a player would.
@@ -178,17 +181,19 @@ enum class SlotHint : std::uint8_t { Power, Element, Form, Modifier, Ambiguous, 
 /// be TESTED — a level that teaches the grammar is only teaching it if the
 /// grammar actually holds over the shipped vocabulary.
 ///
-/// It does not hold completely, and that is worth knowing rather than papering
-/// over: `Y` is listed both as a liquid opening a Form (YARN) and as a vowel
-/// opening a Modifier (YRN), so those two inscriptions are indistinguishable by
-/// §8.1's rule alone. Every other opening is unambiguous. Whether that single
-/// collision is intended texture — a rule with one exception is more interesting
-/// to discover than a rule without — or a vocabulary bug is a design call, not
-/// a code call, so this reports it rather than resolving it.
+/// It holds over the whole shipped vocabulary: all 24 runes report their own
+/// slot, with no exceptions. That is a stronger claim than it looks, and
+/// `test/05spells/` asserts it exhaustively rather than by sampling — the rule
+/// is the ONLY teaching mechanism in the game (§17 rules out a spell list, a
+/// known-spells screen and autocomplete), so a player who infers it and gets a
+/// wrong answer has been actively mistaught by the one system meant to teach
+/// them, with no way to discover they were misled.
+///
+/// It did not always hold. The vocabulary shipped with a Modifier opening on Y
+/// (YRN) beside the Form YARN, and §8.1 lists Y among the liquids — so YRN was
+/// simply not obeying its own slot's phonology. Resolved by renaming it to URN
+/// (gloam#11) rather than by documenting an exception, because the exception
+/// would have cost the rule its only job.
 [[nodiscard]] auto slot_from_inscription(std::string_view inscription) -> SlotHint;
-
-/// The one collision, named so a test can assert it stays the only one.
-inline constexpr std::string_view kAmbiguousFormInscription = "YARN";
-inline constexpr std::string_view kAmbiguousModifierInscription = "YRN";
 
 }  // namespace gloam

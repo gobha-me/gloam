@@ -88,7 +88,7 @@ auto resolve(RuneSeq seq, const CasterState& caster, const WorldState& world,
     case Modifier::Umbra:  // invert: the effect runs the other way
       out.inverted = true;
       break;
-    case Modifier::Yrn:  // bind: attaches to an object, not a place
+    case Modifier::Urn:  // bind: attaches to an object, not a place
       out.bound = true;
       break;
     case Modifier::None:
@@ -158,7 +158,7 @@ auto m0_seed_table() -> SpellTable {
       {Power::Tor, Element::Thule, Form::Nil, Modifier::Esk, 0x0502, DangerClass::Inert},
       // HESH — flame: loud, bright, obvious.
       {Power::Dun, Element::Hesh, Form::Lom, Modifier::None, 0x0601, DangerClass::Inert},
-      {Power::Kai, Element::Hesh, Form::Mote, Modifier::Yrn, 0x0602, DangerClass::Inert},
+      {Power::Kai, Element::Hesh, Form::Mote, Modifier::Urn, 0x0602, DangerClass::Inert},
       // One row with an empty form slot, so the table proves that "no form" is
       // not automatically invalid — it is only invalid when nothing in the
       // table claims it.

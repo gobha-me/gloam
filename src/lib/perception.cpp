@@ -118,14 +118,25 @@ auto step(Perception& p, const Senses& senses, const MonsterKind& kind, const Tu
       break;
 
     case Awareness::LostTrack:
-      // NOTE: §6.1's table has no LOST_TRACK -> HUNTING row, so a monster that
-      // re-acquires the party while casting about must run the timer out and
-      // re-enter through SUSPICIOUS. That is implemented here exactly as
-      // specified rather than "fixed", because §6.1 is explicit that every
-      // transition needs an authored tell and inventing one in code would ship
-      // a state change the player has no way to read. Flagged as an open
-      // design question, not a bug.
-      if (p.ticks_in_state >= tuning.lost_track_ticks) next = Awareness::Unaware;
+      // Re-acquisition, ordered BEFORE the timer so a monster that can see the
+      // party does not spend a tick deciding to forget them.
+      //
+      // §6.1's table shipped without this row, which meant a monster casting
+      // about at the last known position could be looking straight at a lit,
+      // adjacent party and do nothing for 43+ ticks — the full LOST_TRACK timer
+      // plus the climb back through SUSPICIOUS and SEARCHING. That reads to a
+      // player as broken AI, and it undercuts the tension the whole §6 model
+      // exists to produce.
+      //
+      // Added by design decision on gloam#12, WITH its own tell — see
+      // Tell::SnapsBack. §6.1 is explicit that a transition without an authored
+      // tell is the failure mode, which is why this was left unimplemented
+      // rather than quietly patched until the tell was decided.
+      if (saw) {
+        next = Awareness::Hunting;
+      } else if (p.ticks_in_state >= tuning.lost_track_ticks) {
+        next = Awareness::Unaware;
+      }
       break;
   }
 
@@ -134,12 +145,20 @@ auto step(Perception& p, const Senses& senses, const MonsterKind& kind, const Tu
   p.state = next;
   p.ticks_in_state = 0;
 
+  // Keyed on the PAIR, not the destination. Two paths now reach HUNTING and
+  // §6.1's "every transition has an authored tell" means they must not read
+  // alike: SEARCHING -> HUNTING is a discovery and gets the sting, LOST_TRACK ->
+  // HUNTING is a re-acquisition and pointedly does not.
+  if (next == Awareness::Hunting) {
+    return before == Awareness::LostTrack ? Tell::SnapsBack : Tell::GaitChanges;
+  }
+
   switch (next) {
     case Awareness::Suspicious: return Tell::PatrolRhythmBreaks;
     case Awareness::Searching: return Tell::LeavesPatrolRoute;
-    case Awareness::Hunting: return Tell::GaitChanges;
     case Awareness::LostTrack: return Tell::CastsAbout;
     case Awareness::Unaware: return Tell::ResumesPatrol;
+    case Awareness::Hunting: return Tell::GaitChanges;  // handled above
   }
   return Tell::None;
 }

@@ -29,11 +29,17 @@ auto opening_class(std::string_view s) -> SlotHint {
     // Vowels.
     case 'A': case 'E': case 'I': case 'O': case 'U':
       return SlotHint::Modifier;
-    // Y is listed by §8.1 as BOTH a liquid (opening a Form) and a vowel
-    // (opening a Modifier). The shipped vocabulary uses it for one of each —
-    // YARN and YRN — so the rule cannot separate them.
+    // §8.1 lists Y explicitly among the liquids and nasals — "(l, r, w, y, m,
+    // n)" — and never among the vowels. So Y opens a Form, full stop.
+    //
+    // This used to return Ambiguous, because the shipped vocabulary had a
+    // Modifier opening on Y (YRN) alongside the Form YARN, which made the two
+    // indistinguishable by §8.1's rule. That was a vocabulary bug rather than a
+    // rule with an exception: YRN simply did not obey its own slot's phonology.
+    // Renamed to URN by design decision on gloam#11, and the rule is now exact
+    // over all 24 runes — `test/05spells/` asserts that exhaustively.
     case 'Y':
-      return SlotHint::Ambiguous;
+      return SlotHint::Form;
     default:
       return SlotHint::Unknown;
   }
