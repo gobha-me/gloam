@@ -38,11 +38,27 @@ enum class Tell : std::uint8_t {
   /// known position.
   LeavesPatrolRoute = 2,
   /// SEARCHING -> HUNTING: gait changes, direct pursuit, one audio sting.
+  ///
+  /// The sting means "found you", and it is reserved for a FIRST sighting —
+  /// see SnapsBack for why that reservation is load-bearing.
   GaitChanges = 3,
   /// HUNTING -> LOST_TRACK: casts about at the last position, turning in place.
   CastsAbout = 4,
   /// LOST_TRACK -> UNAWARE: walks back to the patrol route and resumes.
   ResumesPatrol = 5,
+  /// LOST_TRACK -> HUNTING: the head snaps to you mid-cast-about and it closes
+  /// immediately, with NO audio sting.
+  ///
+  /// Two paths now reach HUNTING and they must not read alike. The sting says
+  /// "found you"; its ABSENCE here says "never lost you", which is the honest
+  /// report — this monster was already searching the right place. Silence is
+  /// the tell, and it is a worse thing to hear than the sting.
+  ///
+  /// Added by design decision on gloam#12. §6.1's table shipped without a
+  /// LOST_TRACK -> HUNTING row, which made a monster ignore a lit, adjacent
+  /// party for 43+ ticks while it ran the timer out — legible to a player as
+  /// broken AI, not as tension.
+  SnapsBack = 6,
 };
 
 /// A monster's perception profile. §6.3's `sees_unlit` monster arrives at M2 and

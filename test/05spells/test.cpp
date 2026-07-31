@@ -8,6 +8,7 @@
 #include <set>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "gloam/runes.hpp"
 #include "gloam/spells.hpp"
@@ -150,11 +151,11 @@ TEST_CASE("§8.2's modifier arithmetic", "[spells]") {
       resolve({Power::Pel, Element::Sil, Form::Mote, Modifier::Oth}, rich, WorldState{}, table, t);
   CHECK(oth.delay_ticks == 10);
 
-  // UMBRA — invert, YRN — bind.
+  // UMBRA — invert, URN — bind.
   CHECK(resolve({Power::Pel, Element::Sil, Form::Mote, Modifier::Umbra}, rich, WorldState{}, table,
                 t)
             .inverted);
-  CHECK(resolve({Power::Pel, Element::Sil, Form::Mote, Modifier::Yrn}, rich, WorldState{}, table, t)
+  CHECK(resolve({Power::Pel, Element::Sil, Form::Mote, Modifier::Urn}, rich, WorldState{}, table, t)
             .bound);
 }
 
@@ -200,37 +201,76 @@ TEST_CASE("§8.1's phonetic rule classifies every rune in the vocabulary", "[run
   for (int f = 0; f < kFormCount - 1; ++f) {
     const auto n = name(static_cast<Form>(f));
     INFO(n);
-    const auto hint = slot_from_inscription(n);
-    CHECK((hint == SlotHint::Form || n == kAmbiguousFormInscription));
+    CHECK(slot_from_inscription(n) == SlotHint::Form);
   }
   for (int m = 0; m < kModifierCount - 1; ++m) {
     const auto n = name(static_cast<Modifier>(m));
     INFO(n);
-    const auto hint = slot_from_inscription(n);
-    CHECK((hint == SlotHint::Modifier || n == kAmbiguousModifierInscription));
+    CHECK(slot_from_inscription(n) == SlotHint::Modifier);
   }
 }
 
-TEST_CASE("Y is the grammar's one ambiguity, and it is the only one", "[runes]") {
-  // §8.1 lists Y as a liquid (opening a Form) AND says modifiers open on a
-  // vowel; YARN and YRN take one each, so the phonetic rule cannot separate
-  // them. Every other opening is unambiguous.
+TEST_CASE("the grammar has no exceptions at all", "[runes][property]") {
+  // This case used to assert the OPPOSITE: that YARN and YRN were both
+  // Ambiguous, and were the only two. §8.1 lists Y among the liquids and never
+  // among the vowels, so YRN — a Modifier — was simply not obeying its own
+  // slot's phonology. Renamed to URN by design decision on gloam#11.
   //
-  // Pinned as a test rather than silently resolved, because whether this is
-  // intended texture or a vocabulary bug is a design call. If it is a bug, the
-  // fix is to rename one rune — and this test is what will notice.
-  CHECK(slot_from_inscription("YARN") == SlotHint::Ambiguous);
-  CHECK(slot_from_inscription("YRN") == SlotHint::Ambiguous);
-
+  // Resolved rather than documented, because §17 rules out a spell list, a
+  // known-spells screen and autocomplete: the phonetic rule is the ONLY
+  // teaching mechanism in the game. A player who infers it, tries it on the
+  // exception and gets a wrong answer has been mistaught by the one system
+  // meant to teach them — and has no way to find out they were misled. A rule
+  // with one exception is more interesting to discover only if discovering the
+  // exception is possible.
   int ambiguous = 0;
-  const auto count = [&ambiguous](std::string_view n) {
-    if (slot_from_inscription(n) == SlotHint::Ambiguous) ++ambiguous;
+  int unknown = 0;
+  const auto tally = [&](std::string_view n) {
+    INFO(n);
+    const auto hint = slot_from_inscription(n);
+    CHECK(hint != SlotHint::Ambiguous);
+    CHECK(hint != SlotHint::Unknown);
+    if (hint == SlotHint::Ambiguous) ++ambiguous;
+    if (hint == SlotHint::Unknown) ++unknown;
   };
-  for (int i = 0; i < kPowerCount; ++i) count(name(static_cast<Power>(i)));
-  for (int i = 0; i < kElementCount; ++i) count(name(static_cast<Element>(i)));
-  for (int i = 0; i < kFormCount - 1; ++i) count(name(static_cast<Form>(i)));
-  for (int i = 0; i < kModifierCount - 1; ++i) count(name(static_cast<Modifier>(i)));
-  CHECK(ambiguous == 2);
+  for (int i = 0; i < kPowerCount; ++i) tally(name(static_cast<Power>(i)));
+  for (int i = 0; i < kElementCount; ++i) tally(name(static_cast<Element>(i)));
+  for (int i = 0; i < kFormCount - 1; ++i) tally(name(static_cast<Form>(i)));
+  for (int i = 0; i < kModifierCount - 1; ++i) tally(name(static_cast<Modifier>(i)));
+  CHECK(ambiguous == 0);
+  CHECK(unknown == 0);
+
+  // Y now belongs to exactly one class, as §8.1 always said it did.
+  CHECK(slot_from_inscription("YARN") == SlotHint::Form);
+  CHECK(slot_from_inscription("URN") == SlotHint::Modifier);
+
+  // Every modifier opens on a true vowel — the claim §8.1 actually makes, and
+  // the one YRN was breaking.
+  for (int m = 0; m < kModifierCount - 1; ++m) {
+    const auto n = name(static_cast<Modifier>(m));
+    INFO(n);
+    REQUIRE_FALSE(n.empty());
+    CHECK(std::string_view{"AEIOU"}.find(n.front()) != std::string_view::npos);
+  }
+}
+
+TEST_CASE("no two runes share an inscription", "[runes][property]") {
+  // A rename is exactly the edit that could collide two runes on one written
+  // form, and an inscription that means two things breaks discovery outright.
+  std::vector<std::string_view> all;
+  for (int i = 0; i < kPowerCount; ++i) all.push_back(name(static_cast<Power>(i)));
+  for (int i = 0; i < kElementCount; ++i) all.push_back(name(static_cast<Element>(i)));
+  for (int i = 0; i < kFormCount - 1; ++i) all.push_back(name(static_cast<Form>(i)));
+  for (int i = 0; i < kModifierCount - 1; ++i) all.push_back(name(static_cast<Modifier>(i)));
+
+  CHECK(all.size() == 24);
+  for (std::size_t i = 0; i < all.size(); ++i) {
+    CHECK_FALSE(all[i].empty());
+    for (std::size_t j = i + 1; j < all.size(); ++j) {
+      INFO(all[i] << " vs " << all[j]);
+      CHECK(all[i] != all[j]);
+    }
+  }
 }
 
 TEST_CASE("the digraphs are classified by their sound, not their first letter", "[runes]") {

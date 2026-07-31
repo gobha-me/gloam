@@ -276,15 +276,12 @@ TEST_CASE("a doused party breaks the escalation at the sight step", "[perception
   for (const auto tell : tells) CHECK(tell == Tell::None);
 }
 
-TEST_CASE("LOST_TRACK has no route back to HUNTING — an open design question, pinned",
-          "[perception]") {
-  // §6.1's table lists LOST_TRACK -> UNAWARE and nothing else, so a monster
-  // that re-acquires the party while casting about must run the 40-tick timer
-  // out and come back round through SUSPICIOUS.
-  //
-  // This test does not claim that is good. It claims it is what §6.1 specifies,
-  // so that changing it is a deliberate design decision with an authored tell
-  // rather than a quiet edit to a switch statement.
+TEST_CASE("a monster casting about re-acquires a party it can see, immediately", "[perception]") {
+  // This case used to pin the OPPOSITE behaviour, as an open design question:
+  // §6.1's table shipped with no LOST_TRACK -> HUNTING row, so a monster
+  // looking straight at a lit, adjacent party did nothing for 43+ ticks. The
+  // decision on gloam#12 added the row with its own tell; this is that decision
+  // made executable.
   const MonsterKind kind{Acuity::Keen, false};
   const Tuning& t = kDefaultTuning;
 
@@ -297,12 +294,113 @@ TEST_CASE("LOST_TRACK has no route back to HUNTING — an open design question, 
   obvious.range = 1;
   obvious.lamp_level = kLampLevelMax;
 
+  // One tick, not forty-three.
+  CHECK(step(p, obvious, kind, t) == Tell::SnapsBack);
+  CHECK(p.state == Awareness::Hunting);
+}
+
+TEST_CASE("the two paths into HUNTING carry different tells", "[perception]") {
+  // §6.1: "every transition has an authored tell, and the tell is the
+  // deliverable". Two transitions now land on HUNTING, so the tell has to be
+  // keyed on the pair rather than the destination — otherwise re-acquiring
+  // someone you were already hunting reads exactly like spotting them fresh,
+  // and the audio sting stops meaning anything.
+  const MonsterKind kind{Acuity::Keen, false};
+  const Tuning& t = kDefaultTuning;
+
+  Senses obvious{};
+  obvious.heard = true;
+  obvious.los_clear = true;
+  obvious.range = 1;
+  obvious.lamp_level = kLampLevelMax;
+
+  Perception searching{};
+  searching.state = Awareness::Searching;
+  CHECK(step(searching, obvious, kind, t) == Tell::GaitChanges);
+  CHECK(searching.state == Awareness::Hunting);
+
+  Perception lost{};
+  lost.state = Awareness::LostTrack;
+  CHECK(step(lost, obvious, kind, t) == Tell::SnapsBack);
+  CHECK(lost.state == Awareness::Hunting);
+
+  // The distinction is the whole point of the decision.
+  CHECK(Tell::SnapsBack != Tell::GaitChanges);
+}
+
+TEST_CASE("re-acquisition needs sight, not merely noise", "[perception]") {
+  // The new row's condition is `saw` — §6.3's one and only illumination test —
+  // and NOT `hit`. Getting that wrong would let a monster re-acquire a doused
+  // party by ear alone, which is a hole in §6.3's pillar at exactly the moment
+  // the pillar matters most: you have just broken line of sight and doused.
+  //
+  // Range is deliberately beyond adjacent. §6.3 makes a doused party visible at
+  // an adjacent cell — "effectively invisible BEYOND adjacent cells" — so a
+  // range of 1 here would be testing the wrong claim and would pass for the
+  // wrong reason. (It caught exactly that mistake when this case was written.)
+  const MonsterKind kind{Acuity::Keen, false};
+  const Tuning& t = kDefaultTuning;
+  const std::int32_t beyond_adjacent = kAdjacentRange + 2;
+  REQUIRE(beyond_adjacent <= t.sight_distance(Acuity::Keen));
+
+  Perception p{};
+  p.state = Awareness::LostTrack;
+
+  Senses loud_but_dark{};
+  loud_but_dark.heard = true;
+  loud_but_dark.los_clear = true;
+  loud_but_dark.range = beyond_adjacent;
+  loud_but_dark.lamp_level = 0;  // doused
+
   for (int i = 0; i < t.lost_track_ticks - 1; ++i) {
-    CHECK(step(p, obvious, kind, t) == Tell::None);
+    INFO("tick " << i);
+    REQUIRE(step(p, loud_but_dark, kind, t) == Tell::None);
     REQUIRE(p.state == Awareness::LostTrack);
   }
-  CHECK(step(p, obvious, kind, t) == Tell::ResumesPatrol);
+  // It still forgets on the timer, exactly as before the new row was added.
+  CHECK(step(p, loud_but_dark, kind, t) == Tell::ResumesPatrol);
   CHECK(p.state == Awareness::Unaware);
+}
+
+TEST_CASE("a doused party IS re-acquired at an adjacent cell", "[perception]") {
+  // The other side of the boundary above, stated on purpose so nobody "fixes"
+  // it. §6.3 is explicit that dousing buys invisibility BEYOND adjacent cells,
+  // not inside them — standing next to a monster in the dark is still standing
+  // next to a monster. Dousing is a decision, not a dominant strategy.
+  const MonsterKind kind{Acuity::Keen, false};
+  const Tuning& t = kDefaultTuning;
+
+  Perception p{};
+  p.state = Awareness::LostTrack;
+
+  Senses adjacent_and_dark{};
+  adjacent_and_dark.los_clear = true;
+  adjacent_and_dark.range = kAdjacentRange;
+  adjacent_and_dark.lamp_level = 0;
+
+  CHECK(step(p, adjacent_and_dark, kind, t) == Tell::SnapsBack);
+  CHECK(p.state == Awareness::Hunting);
+}
+
+TEST_CASE("re-acquisition is checked before the forget timer", "[perception]") {
+  // Ordering inside the LOST_TRACK arm. On the exact tick the timer expires, a
+  // monster that can see the party must hunt rather than forget — losing them
+  // on the frame you walked into its light would be the worst possible reading.
+  const MonsterKind kind{Acuity::Keen, false};
+  const Tuning& t = kDefaultTuning;
+
+  Perception p{};
+  p.state = Awareness::LostTrack;
+  p.ticks_in_state = t.lost_track_ticks;
+
+  Senses obvious{};
+  obvious.heard = true;
+  obvious.los_clear = true;
+  obvious.range = 1;
+  obvious.lamp_level = kLampLevelMax;
+
+  CHECK(step(p, obvious, kind, t) == Tell::SnapsBack);
+  CHECK(p.state == Awareness::Hunting);
 }
 
 TEST_CASE("tick counters saturate rather than wrapping", "[perception]") {
