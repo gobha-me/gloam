@@ -49,6 +49,22 @@ design exists to avoid.
 | GL-B4 | Query the terminal's cell pixel size | **[#100](https://github.com/gobha-me/termforge/issues/100) — LANDED in v0.3.0** |
 | GL-B5 | **Opt out of stretch-to-fill — place a pre-rendered image at 1:1** | [#137](https://github.com/gobha-me/termforge/issues/137) — **the compositor's blocker** |
 
+**GL-B2 now exists GLOAM-side and is available to lift.** `include/gloam/layer.hpp`
+is the named layer API §4.5 asks for: `gloam::layer::Band` over the six
+compositing bands, `image_z(band, rank)` as the only route to a z-index, and the
+below-background threshold behind a name rather than hand-written at a call site.
+The whole header depends on `<cstdint>` and `<optional>` and nothing else — it is
+deliberately a leaf, so #114 can take it whole. `cmake/check_layer_z.cmake` and
+`test/06layer/` are the acceptance test and the mutation that proves it bites.
+
+**GL-B3 and GL-B5 are what `gloam::kitty::Placement` is written against.** It
+carries a source crop and a sub-cell `X=`/`Y=` offset — #115's shape — and it has
+no destination cell-rect field at all, so it structurally cannot emit the `c=`/`r=`
+that §3.2 rules out and #137 asks to opt out of. When both land, this module
+should **shrink** rather than change shape. Until then GLOAM constructs the
+placement bytes itself, behind the boundary `cmake/check_kitty_boundary.cmake`
+enforces.
+
 ### GL-C · Terminal-side animation
 
 | | Need | Issue |
@@ -166,7 +182,23 @@ real progress, the work stops and the blocker is escalated to termforge rather
 than routed around — a workaround that survives long enough becomes the reason
 the upstream fix never lands.
 
-What that means today: the entire §4 compositor is blocked on GL-A1 and #83, and
-`gloam::lib` therefore contains no rendering code at all. The deterministic core
-underneath it — geometry, noise, perception, light, runes, budgets — has no
-terminal dependency by design and is complete and tested.
+What that means today: the entire §4 compositor is still blocked on GL-A1 and
+GL-B5 (#137). The deterministic core underneath it — geometry, noise, perception,
+light, runes, budgets — has no terminal dependency by design and is complete and
+tested.
+
+**One correction to an earlier version of this paragraph, because it is the
+sentence someone would cite to undo build-order step 2.** It used to read
+"`gloam::lib` therefore contains no rendering code at all". That is no longer
+true, and the distinction matters more than the fact:
+
+- The library contains the code that **constructs** escape sequences —
+  `layer.hpp`, `emit.hpp`, `kitty.hpp`/`kitty.cpp`. Those are pure functions from
+  integers to bytes in a caller-owned buffer. No clock, no file descriptor, no
+  global, nothing beyond the standard library, and therefore no threat to §5.1's
+  replayability, which is what the rule is actually protecting.
+- The code that **writes** those bytes to a terminal stays in `src/bin/`.
+
+§16 is the reason this was built before its blocker cleared: "keep all kitty calls
+behind GLOAM's own layer API from day one, so a vendored driver is a swap and not
+a rewrite". A boundary built after the driver arrives is not insurance.

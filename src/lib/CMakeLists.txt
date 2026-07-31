@@ -27,6 +27,7 @@
 # whole replay story rests on.
 add_library(${PROJECT_NAME}_lib STATIC
   gloam.cpp
+  kitty.cpp
   level.cpp
   noise.cpp
   perception.cpp

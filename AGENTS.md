@@ -31,6 +31,18 @@ issue so the call gets made rather than absorbed.
    include that breaks this, the design is telling you the code is in the wrong
    place.
 
+   One clarification, because the sentence above gets misread: **producing bytes
+   is not needing a terminal — writing them is.** `include/gloam/kitty.hpp` and
+   `src/lib/kitty.cpp` construct kitty escape sequences, and they belong in the
+   library: the function is `(Placement, CellPixelSize) → bytes appended to a
+   caller-owned buffer`, which reaches no clock, no file descriptor and no
+   global, so §5.1's rationale is untouched. The `write` that puts those bytes on
+   a terminal stays in `src/bin/`, and that one line is the whole terminal-facing
+   surface. Do not move `kitty.cpp` out on the strength of its name. The same
+   reasoning covers `budgets.hpp`, `layer.hpp` and `emit.hpp`, all four of which
+   are deliberately excluded from the `gloam/gloam.hpp` umbrella — that header
+   says so, and says why.
+
 2. **No floating point in simulation state.** §6 is explicit: "Every number
    below is an integer." Where the design prose says a multiplier — creep is
    "× 0.5", ESK is "cast noise halved" — it is spelled as an explicit

@@ -29,17 +29,26 @@ diagnostic rather than a game. What exists is the deterministic simulation core:
 | Light, sight and the doused-party pillar | §6.3 |
 | Rune grammar, spell resolver, danger classes | §8 |
 | Budgets, wired as assertions before the code they constrain | §11 |
+| The compositing bands, and the kitty call boundary over them | §4.5, §16 |
 
-The terminal layer is **blocked upstream** — see [UPSTREAM.md](UPSTREAM.md).
-termforge's `draw_image` maps one image pixel to one terminal cell and takes no
-z-index, so the §4 compositor ([#7](https://github.com/gobha-me/gloam/issues/7))
-has nothing to sit on yet.
+The **compositor** is still blocked upstream — see [UPSTREAM.md](UPSTREAM.md).
+termforge stretches a placed image to fill its cell rect and states that scaling
+is the contract, which §3.2 rules out by name because resampling a pre-dithered
+plate reintroduces the dither crawl the whole pipeline exists to avoid. So
+[#7](https://github.com/gobha-me/gloam/issues/7) has nothing to sit on yet.
+
+The layer API is built anyway, and deliberately so: §16's mitigation for that
+exact risk is to keep every kitty call behind GLOAM's own boundary from day one,
+"so a vendored driver is a swap and not a rewrite". A boundary built after the
+driver arrives is not insurance. Two ctest cases keep it honest —
+`layer-z-single-definition` (no code hand-writes a z-index) and
+`kitty-boundary-single-module` (no code outside `src/lib/kitty.cpp` writes an
+escape sequence).
 
 Next up, and unblocked: the
 [asset pipeline](https://github.com/gobha-me/gloam/issues/1) (the longest
 lead-time item on the critical path to the compositor), the
-[layer API and kitty call boundary](https://github.com/gobha-me/gloam/issues/2),
-the [replay harness](https://github.com/gobha-me/gloam/issues/3), and the
+[replay harness](https://github.com/gobha-me/gloam/issues/3), and the
 [audio sink](https://github.com/gobha-me/gloam/issues/4).
 
 ## Design
@@ -72,12 +81,21 @@ Three commitments shape almost every file:
 ## Layout
 
 ```
-include/gloam/    the deterministic core's public headers
+design/           the specification the code cites — a snapshot; see design/README.md
+include/gloam/    the deterministic core's public headers, plus the render-side four
 src/lib/          its implementation — standard library only, no I/O, no clock
 src/bin/          the diagnostic binary; termforge lands here, not in the lib
 test/             property tests (§13.3) and budget assertions (§11)
 cmake/            the template's build machinery, plus check_layer_z.cmake (§4.5)
+                  and check_kitty_boundary.cmake (§16)
 ```
+
+Four headers in `include/gloam/` are render-side rather than simulation —
+`budgets.hpp`, `layer.hpp`, `emit.hpp`, `kitty.hpp` — and are deliberately left
+out of the `gloam/gloam.hpp` umbrella. They live inside the standard-library-only
+boundary anyway, because **producing** bytes is not the same as needing a
+terminal; the `write` that puts them on one is in `src/bin/`. `gloam.hpp` says so
+at the top, so the exclusion does not read as an oversight.
 
 `gloam::lib` links nothing beyond the standard library, and that is a hard
 architectural boundary rather than a coincidence: a simulation that can reach a
