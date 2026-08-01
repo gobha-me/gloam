@@ -16,25 +16,39 @@
 ///
 /// WHAT THIS UMBRELLA DELIBERATELY LEAVES OUT
 ///
-/// Four headers ship in `include/gloam/` and are NOT included below. That is a
+/// Ten headers ship in `include/gloam/` and are NOT included below. That is a
 /// decision, not an oversight, and it is written down here so the next person
 /// does not helpfully "fix" it:
 ///
-///   budgets.hpp  §11's numbers, as constants and assertions
-///   layer.hpp    §4.5's compositing bands and the z-index policy over them
-///   emit.hpp     the byte sink §13.4's budget counters wrap around
-///   kitty.hpp    the kitty call boundary — every escape sequence, one module
+///   budgets.hpp    §11's numbers, as constants and assertions
+///   layer.hpp      §4.5's compositing bands and the z-index policy over them
+///   emit.hpp       the byte sink §13.4's budget counters wrap around
+///   kitty.hpp      the kitty call boundary — every escape sequence, one module
+///   dither.hpp     §4.3's fixed ordered matrix, and the one comparison
+///   plate.hpp      §10's palette, as two bit-packed planes over a caller's blob
+///   lightfield.hpp §4.4's six full-frame screen-door fields
+///   pack.hpp       §12's `pack.manifest`, and the bytes it describes
+///   sha256.hpp     the digest §10 makes a startup gate
+///   assets.hpp     the pack's content manifest — what actually goes in it
 ///
-/// All four are render-side. They are inside `gloam::lib` because they are pure
-/// — integers and bytes, no clock, no file descriptor, no global, nothing beyond
-/// the standard library — and because tests link only `${PROJECT_NAME}::lib`.
-/// PRODUCING bytes is not the same as needing a terminal; WRITING them is, and
-/// that write lives in `src/bin/`.
+/// The first four are render-side; the last six are the offline asset pipeline
+/// (§10). All ten are inside `gloam::lib` because they are pure — integers and
+/// bytes, no clock, no file descriptor, no global, nothing beyond the standard
+/// library — and because tests link only `${PROJECT_NAME}::lib`. PRODUCING bytes
+/// is not the same as needing a terminal; WRITING them is, and that write lives
+/// in `src/bin/`.
 ///
-/// But they are not the simulation, and this header is the simulation's public
-/// surface. Pulling an escape-sequence emitter into every consumer's translation
-/// unit — including the headless diagnostic in `src/bin/main.cpp` — is the wrong
-/// default. Include them by name when you want them.
+/// The pipeline six earn their place the same way and one way more: none of
+/// them OWNS a plate. Every entry point takes a caller-owned span and says how
+/// large to make it, so the "image ownership" objection `kitty.hpp` raises
+/// against a transmit path does not apply — the buffers live in
+/// `src/bin/bake.cpp`, which holds the pipeline's only file descriptor.
+///
+/// But none of them is the simulation, and this header is the simulation's
+/// public surface. Pulling an escape-sequence emitter or a dither matrix into
+/// every consumer's translation unit — including the headless diagnostic in
+/// `src/bin/main.cpp` — is the wrong default. Include them by name when you want
+/// them.
 
 #include <cstdint>
 

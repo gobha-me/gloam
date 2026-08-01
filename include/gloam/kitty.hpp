@@ -170,19 +170,32 @@ struct EmitResult {
 // ── §4.1 Transmit — deliberately not here yet ───────────────────────────────
 //
 // The startup upload (`a=t`, base64, chunked at 4096 bytes) belongs in this
-// module and will be added to `src/lib/kitty.cpp`. It is not here yet for three
-// reasons, written down so the next person adds it HERE rather than inventing a
-// second emitter in `src/bin/`:
+// module and will be added to `src/lib/kitty.cpp`. It is not here yet, and the
+// three reasons this note used to give have now had two of them answered by
+// gloam#1's first slice. Recorded, because how they came out constrains what
+// the transmit path is allowed to look like — and recorded HERE so that the
+// next person adds transmit to this module rather than inventing a second
+// emitter in `src/bin/`, which now holds two binaries and is the obvious wrong
+// place to put one. `cmake/check_kitty_boundary.cmake` enforces the letter of
+// that; the reasons below are the spirit, and only one of them is mechanical:
 //
-//   1. It needs a pixel source, and the pixel source is the asset pipeline
-//      (G-1, gloam#1), which does not exist. Writing an encoder against a
-//      payload format nobody has decided is how you get a rewrite, not a shrink.
-//   2. It would drag image OWNERSHIP — a buffer of plate data — into
-//      `gloam::lib`. That is the first thing in the library that looks like an
-//      asset, and it is a boundary argument worth having once, with the pack
-//      format (§12) actually in hand.
-//   3. Transmit is the one command whose size is enormous (§11's 1.2 MB cold
-//      start). A byte-count assertion for it is only meaningful against a real
-//      plate.
+//   1. ANSWERED. The pixel source exists: `pack.hpp` is the payload format and
+//      `plate.hpp` is what a plate's bytes ARE — two bit-packed planes, index
+//      and stencil, in a caller-owned blob. There is a format to encode against
+//      now, so this can be a shrink rather than a rewrite.
+//   2. ANSWERED, and the answer is that ownership never arrived. Every pipeline
+//      entry point takes a caller-owned span and reports the size it needs; the
+//      buffers live in `src/bin/bake.cpp`, which holds the pipeline's only file
+//      descriptor. Transmit must be written the same way — `(a plate's bytes, an
+//      image id) -> bytes appended to a ByteSink` — and must NOT grow a cache, a
+//      registry or an owning handle. The moment it does, the boundary argument
+//      this note was reserving has been lost rather than settled.
+//   3. STILL OPEN, and now with a number. §11 budgets 1.2 MB of BASE64, and a
+//      480x360 plate expanded to `f=32` RGBA is 691,200 B before base64 adds a
+//      third — the six light fields alone are roughly 5.5 MB on the wire against
+//      388,800 B in the pack. So the first transmit implementation cannot be the
+//      naive one: it needs `pack::Codec::Png` (upstream #163's `f=100` path),
+//      `o=z`, or GL-A3's shared-memory transfer. See UPSTREAM.md, and the note
+//      in `test/10budgets/` that keeps this from reading as met.
 
 }  // namespace gloam::kitty

@@ -25,13 +25,24 @@
 # see the note at the top of include/gloam/gloam.hpp. Nothing here may grow a
 # dependency on termforge, a clock or a terminal — that is the property the
 # whole replay story rests on.
+#
+# The offline asset pipeline (§10) is here too — plate.cpp, dither (header-only),
+# lightfield.cpp, pack.cpp and sha256.cpp. Same argument as kitty.cpp: producing
+# bytes is not needing a terminal, and none of them reaches a clock, a file
+# descriptor or a global. The buffers they write into are owned by their caller,
+# and the only `open` in the pipeline is in src/bin/bake.cpp.
 add_library(${PROJECT_NAME}_lib STATIC
+  assets.cpp
   gloam.cpp
   kitty.cpp
   level.cpp
+  lightfield.cpp
   noise.cpp
+  pack.cpp
   perception.cpp
+  plate.cpp
   runes.cpp
+  sha256.cpp
   spells.cpp
 )
 

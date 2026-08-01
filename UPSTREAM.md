@@ -172,7 +172,7 @@ The specification was checked against termforge **v0.1.18**. The library is at
    own suite relies on that — but not a supported extension point, which is what
    GL-E1 asks for.
 
-One more, which is a design question rather than a factual error:
+Two more, which are design questions rather than factual errors:
 
 5. **§4.2's slot inventory excludes transition sequences from the resident image
    count.** Summing every row of the table gives 71 + 3 = 74 for M0 and
@@ -181,6 +181,52 @@ One more, which is a design question rather than a factual error:
    that these are "animation registrations, not placements". Encoded that way in
    `include/gloam/budgets.hpp`, with the arithmetic asserted, because the naive
    reading does not blow the 256 cap and would therefore fail silently.
+
+6. **`SCHEMAS.md` §1 does not fully specify `pack.manifest`, and the pack as
+   built deviates from it in one place.** Mirrored as
+   [#16](https://github.com/gobha-me/gloam/issues/16). Four items, three of them
+   gaps rather than disagreements:
+
+   - **A `codec:u8` field is ADDED to the record.** This is the deviation.
+     termforge [#163](https://github.com/gobha-me/termforge/issues/163) landed a
+     verbatim transmit path that takes pre-encoded bytes, and §11's cold-start
+     budget will eventually need it (see the next item but one). A one-byte
+     discriminant now means PNG lands as a new codec value rather than a format
+     version bump. `Codec::Png` already parses and is refused, so the door is a
+     door and not a hole. It sits at record offset +6 beside the other `u8`s, so
+     the record is still 52 bytes.
+   - **Endianness and packing were unstated.** Little-endian, fields serialized
+     one at a time, never a `memcpy` of a compiler struct — so ABI padding cannot
+     reach the digest. Asserted by literal in `test/12pack/`.
+   - **Where the pixels live was unstated.** `offset`/`length` imply a blob
+     region; SCHEMAS.md never says whether it is the same file. It is: two files
+     lets the manifest be fresher than the pixels, and §10's "a mismatched hash
+     refuses to launch" needs one atomic object to hash.
+   - **"Four colours plus transparent" is five states and does not fit in two
+     bits.** Resolved as two planes — a 2-bit index plane and a 1-bit stencil —
+     rather than by spending a palette entry, which would cost 25% of a palette
+     that is the whole art direction. See `include/gloam/plate.hpp`.
+
+   Also noted there and not yet answered: `replay.gloam` carries `pack_hash:u64`
+   while the manifest carries `pack_sha256:[32]u8`. Presumably a truncation, but
+   it is not written down, and G-3 needs the answer.
+
+7. **§11's cold-start payload row measures the base64 TRANSMIT payload, not the
+   pack — and on the current numbers it is unreachable.** Mirrored as
+   [#17](https://github.com/gobha-me/gloam/issues/17). `BUDGETS.md` says
+   "Cold-start payload, base64 | ≤ 1.2 MB | manifest test", but a manifest test
+   can only measure the pack. Those differ by more than an order of magnitude:
+   kitty is handed pixels, so a 480×360 plate stored at 2 bits per pixel expands
+   to 691,200 B at `f=32` before base64 adds a third. **The six light fields
+   alone are 388,800 B in the pack and roughly 5.5 MB on the wire — about 4.6×
+   over budget before a single wall plate exists.**
+
+   The escapes are `pack::Codec::Png` (termforge #163's `f=100`), kitty's `o=z`,
+   or GL-A3 / [#111](https://github.com/gobha-me/termforge/issues/111)'s
+   shared-memory transfer. `test/10budgets/` asserts the pack size as an
+   explicitly-labelled *necessary condition* rather than as the row, because a
+   green test measuring the wrong quantity is what `budgets.hpp`'s opening
+   paragraph exists to prevent.
 
 ### Decisions taken
 
