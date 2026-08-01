@@ -31,8 +31,18 @@
 # bytes is not needing a terminal, and none of them reaches a clock, a file
 # descriptor or a global. The buffers they write into are owned by their caller,
 # and the only `open` in the pipeline is in src/bin/bake.cpp.
+#
+# audio.cpp is here on the same argument once more, and it is the one most worth
+# stating because the file's name argues against it. §9's SINK is a device and
+# lives in src/bin/; what is here is the SPSC ring, the command type and the
+# gain/pan derivation — integers, atomics and a call into propagate_noise, with
+# no RtAudio, no clock and no stream. Producing a voice command is not needing a
+# device; playing it is. Keeping the ring on this side is also what puts it under
+# the sanitizer matrix, which is the only automated auditor a lock-free queue
+# ever gets.
 add_library(${PROJECT_NAME}_lib STATIC
   assets.cpp
+  audio.cpp
   gloam.cpp
   kitty.cpp
   level.cpp

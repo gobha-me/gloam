@@ -31,6 +31,7 @@ diagnostic rather than a game. What exists is the deterministic simulation core:
 | Budgets, wired as assertions before the code they constrain | §11 |
 | The compositing bands, and the kitty call boundary over them | §4.5, §16 |
 | `replay.gloam`, the world hash, and the golden-replay harness | §12, §13.2 |
+| The voice ring, the gain/pan mix, and the wall the sim talks through | §9.2, §9.3 |
 
 The **compositor** is still blocked upstream — see [UPSTREAM.md](UPSTREAM.md).
 termforge stretches a placed image to fill its cell rect and states that scaling
@@ -82,8 +83,45 @@ not open §7's party or §8's magic; BUILD-ORDER step 10 is explicit that those
 wait for the M0 gate. The budget case now calls the same `advance()` the replay
 does, so the measured tick and the replayed tick cannot drift apart.
 
-Still unblocked and unstarted: the
-[audio sink](https://github.com/gobha-me/gloam/issues/4).
+The **audio sink** ([#4](https://github.com/gobha-me/gloam/issues/4)) has landed
+its first half, and it is the half that makes the subsystem safe. Build-order
+step 9's acceptance criterion is *`--mute` and unmuted runs produce identical
+replays*, and `audio-mute-identical` is the ctest case that records and replays
+the same session both ways in separate processes and compares the bytes as well
+as the hashes — while also insisting the unmuted run actually made a sound, because
+an identity proved over silence is not evidence.
+
+That property holds by construction rather than by care. `Sink::play` returns
+`void` and takes scalars by value, so there is no expression in `advance` that
+can read anything back; §9.2's *"Audio → sim is nothing. Ever."* is closed by the
+type system. `World` gains no field, so `kWorldHashVersion` does not move and
+**no recorded replay is invalidated** — `ruleset_hash`, the golden world hash and
+`replay.gloam`'s bytes are all unchanged from the commit before.
+
+What is in `gloam::lib` is the SPSC ring, the `VoiceCommand` type and the
+arithmetic that turns §6.2's propagation into a gain and a pan — integers and
+atomics, no device. That placement is the point: the ring is lock-free between a
+simulation thread and a real-time callback, and keeping it library-side is what
+puts it under the sanitizer matrix. Weakening the release store in `try_push`
+turns `15voicering-test` into a reported data race under TSan; that was checked,
+not assumed.
+
+§9.3's *"one clever part"* is real and now load-bearing: gain comes from the
+**same** `propagate_noise` monsters hear through, so retuning `atten_closed_door`
+moves the stealth model and the mix together. The first implementation propagated
+once per stinging monster and cost **13.6 ms** on a tick where all sixteen sting,
+against §11's 4 ms budget. §9.3's actual wording — *evaluated from the party's
+position instead of the monster's* — is one field per tick rather than one per
+monster, and noise cost is symmetric, so the two readings agree; that is 0.97 ms,
+and `test/10budgets/` measures exactly that tick.
+
+Still unstarted: the **RtAudio device** — the stream, the resident PCM and the
+mixer. It is deliberately a separate change, because neither a GitHub runner nor
+this project's dev box has an audio device, so it can be compiled but not
+observed. §11's tick-to-first-sample row stays `PENDING` until it lands, and says
+so rather than reporting a number it cannot measure. Also unstarted: monster
+footfalls, which §9 names first and which need §6.4's patrols to exist — monsters
+do not move yet.
 
 ## Design
 
@@ -116,20 +154,20 @@ Three commitments shape almost every file:
 
 ```
 design/           the specification the code cites — a snapshot; see design/README.md
-include/gloam/    the deterministic core's public headers, plus nine off-umbrella
+include/gloam/    the deterministic core's public headers, plus ten off-umbrella
 src/lib/          its implementation — standard library only, no I/O, no clock
 src/bin/          the diagnostic binary, gloam_bake and gloam_replay; termforge
                   lands here too
 test/             property tests (§13.3) and budget assertions (§11)
 cmake/            the template's build machinery, plus check_layer_z.cmake (§4.5),
-                  check_kitty_boundary.cmake (§16), check_pack_repro.cmake (§10)
-                  and check_replay_determinism.cmake (§12)
+                  check_kitty_boundary.cmake (§16), check_pack_repro.cmake (§10),
+                  check_replay_determinism.cmake (§12) and check_audio_mute.cmake (§9)
 ```
 
-Nine headers in `include/gloam/` are not simulation and are deliberately left out
+Ten headers in `include/gloam/` are not simulation and are deliberately left out
 of the `gloam/gloam.hpp` umbrella: four render-side (`budgets.hpp`, `layer.hpp`,
-`emit.hpp`, `kitty.hpp`) and five for the offline pipeline (`dither.hpp`,
-`plate.hpp`, `lightfield.hpp`, `pack.hpp`, `assets.hpp`). They live inside the
+`emit.hpp`, `kitty.hpp`), `audio.hpp` for §9, and five for the offline pipeline
+(`dither.hpp`, `plate.hpp`, `lightfield.hpp`, `pack.hpp`, `assets.hpp`). They live inside the
 standard-library-only boundary anyway, because **producing** bytes is not the
 same as needing a terminal; the `write` that puts them on one is in `src/bin/`,
 and so is the only `open` in the pipeline. None of the pipeline five owns a

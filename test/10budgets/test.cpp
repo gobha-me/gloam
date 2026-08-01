@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "gloam/assets.hpp"
+#include "gloam/audio.hpp"
 #include "gloam/budgets.hpp"
 #include "gloam/emit.hpp"
 #include "gloam/layer.hpp"
@@ -32,6 +33,28 @@
 #include "gloam/world.hpp"
 
 using namespace gloam;
+
+// Is this build sanitized?
+//
+// Written as nested `#if`s rather than one expression, because the obvious
+// one-liner does not work: `defined(__has_feature) && __has_feature(...)` is NOT
+// short-circuited by the preprocessor — GCC, which has no `__has_feature`, still
+// has to parse the second operand and reports "missing binary operator before
+// token '('". That failure is a compile error on the exact configuration the
+// guard exists to serve, so it is worth the four extra lines. (Measured: it
+// broke the GCC 13 build and left the ASan build silently running a stale
+// binary.)
+//
+// Clang spells it `__has_feature`; GCC spells it `__SANITIZE_ADDRESS__` and
+// `__SANITIZE_THREAD__`. UBSan is deliberately absent — it is recoverable and
+// barely affects timing, so the absolute budget stays asserted there.
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+#define GLOAM_TEST_SANITIZED 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
+#define GLOAM_TEST_SANITIZED 1
+#endif
+#endif
 
 TEST_CASE("§4.2's slot inventory fits §11's residency cap", "[budget]") {
   CHECK(budget::resident_images_m0() == 71);
@@ -102,7 +125,42 @@ TEST_CASE("§11 timing budgets are declared", "[budget]") {
   //             which measures what exists (§19 step 5) and says plainly why
   //             that is not this row.
   // PENDING M0: compose+diff+emit needs the compositor (§19 step 6).
-  // PENDING M2: audio latency needs the sink (§19 step 9).
+  // PENDING M2: the END-TO-END audio row needs a DEVICE. §19 step 9 landed the
+  //             ring, not the RtAudio stream, and "tick -> first sample" cannot
+  //             be measured without something producing samples. The part that
+  //             is decidable without a device — whether §9.2's chosen buffer can
+  //             fit inside the budget at all — is asserted in the case below
+  //             rather than left as prose. Narrowing this marker instead of
+  //             deleting it is the point: the row is not met yet.
+}
+
+TEST_CASE("§9.2's audio buffer choice fits §11's latency budget", "[budget]") {
+  // Not the end-to-end row — that needs a device — but the half of it that is
+  // fixed by §9.2's own numbers and would silently break the budget if either
+  // moved. "One output stream. 48 kHz, float32, 256-frame buffer (~5.3 ms)."
+  //
+  // Triple-buffered worst case: a command that just missed the current period
+  // waits one period to be picked up, one to be mixed and one to reach the
+  // device. 3 x 5.33 ms = 16 ms, against a 20 ms budget — so the choice leaves
+  // about 4 ms for everything else in the chain, and there is no room to grow
+  // the buffer to 512 without blowing the row.
+  constexpr int kSampleRateHz = 48'000;
+  constexpr int kBufferFrames = 256;
+  constexpr int kWorstCasePeriods = 3;
+
+  const int period_us = kBufferFrames * 1'000'000 / kSampleRateHz;
+  INFO("one period is " << period_us << " us");
+  CHECK(period_us == 5'333);
+
+  const int worst_case_ms = kWorstCasePeriods * period_us / 1000;
+  INFO("worst case " << worst_case_ms << " ms against a budget of "
+                     << budget::kMaxAudioLatencyMs << " ms");
+  CHECK(worst_case_ms <= budget::kMaxAudioLatencyMs);
+
+  // And the headroom is genuinely thin. Pinned so that doubling the buffer is a
+  // decision taken here, against this row, rather than a tweak in src/bin/.
+  CHECK(kWorstCasePeriods * (kBufferFrames * 2) * 1000 / kSampleRateHz >
+        budget::kMaxAudioLatencyMs);
 }
 
 TEST_CASE("§11's residency cap, measured against a real manifest", "[budget]") {
@@ -200,7 +258,62 @@ TEST_CASE("§9.2's dropped-voice-command budget is zero", "[budget]") {
   // not "few".
   CHECK(budget::kMaxDroppedVoiceCommands == 0);
   CHECK(budget::kDroppedVoiceCommandWindowTicks == 1000);
-  // PENDING M2: needs the SPSC ring (§19 step 9).
+}
+
+TEST_CASE("§9.2's dropped-voice-command budget, measured over its own window", "[budget]") {
+  // §19 step 9 landed the ring, so this row stops declaring its constant and
+  // starts measuring against it.
+  //
+  // THE DRAIN CADENCE IS THE WORST CASE, DELIBERATELY. §9.2's 256-frame buffer
+  // at 48 kHz means the real consumer wakes roughly EIGHTEEN times per simulated
+  // tick; this drains ONCE per tick. If the budget holds when the audio thread
+  // gets a single look per tick, it holds comfortably at the cadence the device
+  // actually runs at — and a test written at the real cadence would pass on a
+  // ring far too small.
+  const Tuning& t = kDefaultTuning;
+
+  Level level{16, 3};
+  level.carve(Coord{0, 1}, Dir::East, 16);
+  std::vector<Monster> monsters;
+  for (int m = 0; m < 8; ++m) {
+    monsters.push_back(Monster{Coord{4 + m, 1}, MonsterKind{Acuity::Keen, false}, {}});
+  }
+
+  auto world = make_world(0xA0D10ULL, std::move(level), std::move(monsters));
+  world.party = Coord{1, 1};
+  world.armour = Armour::Plate;   // loudest emitter, so every tick has a voice
+  world.lamp_level = kLampLevelMax;
+
+  audio::RecordingSink<> sink;
+  audio::Command drained{};
+
+  for (int tick = 0; tick < budget::kDroppedVoiceCommandWindowTicks; ++tick) {
+    world.pending_noise = step_noise(world.armour, world.creeping, t);
+    advance(world, t, &sink);
+    while (sink.ring().try_pop(drained)) {}  // the audio thread's one look
+  }
+
+  // The window must have carried real traffic. Without this the row below is
+  // satisfied by a ring nothing was ever pushed to — the same vacuous pass
+  // test/16audiosim/ guards against, and the reason `pushed()` exists.
+  INFO("voices pushed over the window: " << sink.ring().pushed());
+  CHECK(sink.ring().pushed() >= static_cast<std::uint64_t>(
+                                   budget::kDroppedVoiceCommandWindowTicks));
+
+  INFO("dropped " << sink.ring().dropped() << " of " << sink.ring().pushed());
+  CHECK(sink.ring().dropped() ==
+        static_cast<std::uint64_t>(budget::kMaxDroppedVoiceCommands));
+}
+
+TEST_CASE("the drop counter is not merely stuck at zero", "[budget]") {
+  // The row above passes if `dropped()` can never increment for any reason —
+  // a counter wired to nothing reports a perfect budget forever. This drives
+  // the ring past capacity with no consumer at all and requires the number to
+  // move, which is what makes the zero above mean something.
+  audio::Ring<4> ring;
+  for (int i = 0; i < 16; ++i) static_cast<void>(ring.try_push(audio::Command{}));
+  CHECK(ring.dropped() == 12);
+  CHECK(ring.dropped() > static_cast<std::uint64_t>(budget::kMaxDroppedVoiceCommands));
 }
 
 TEST_CASE("§11's simulation tick budget, measured", "[budget]") {
@@ -263,6 +376,219 @@ TEST_CASE("§11's simulation tick budget, measured", "[budget]") {
   INFO("per-tick " << per_tick_us << " us against a budget of "
                    << budget::kMaxSimulationTickMs * 1000 << " us");
   CHECK(per_tick_us < budget::kMaxSimulationTickMs * 1000);
+}
+
+TEST_CASE("§11's tick budget still holds with the audio sink attached", "[budget]") {
+  // THE ROW MOST AT RISK FROM §19 STEP 9, AND THE REASON THIS CASE EXISTS.
+  //
+  // The party's footfall is free — it reads the field `advance` already
+  // propagated. A monster's sting is NOT: it is sourced at the monster, so it
+  // needs its own `propagate_noise` from the other end. That is the same
+  // function `noise.hpp` insists on rather than a second path, but it is not
+  // free, and a tick in which every monster transitions at once pays for one
+  // propagation per monster.
+  //
+  // §6.1 makes that pathological — a sting is reserved for a FIRST sighting, so
+  // in play it fires once per monster per encounter. But "rare" is not a budget
+  // argument, and the honest way to hold this row is to measure the worst case
+  // rather than to assume the common one. Same level size and monster count as
+  // the case above, so the two numbers are directly comparable.
+  const Tuning& t = kDefaultTuning;
+
+  constexpr int kSide = 32;
+  Level level{kSide, kSide};
+  for (int y = 0; y < kSide; ++y) level.carve(Coord{0, y}, Dir::East, kSide);
+  for (int x = 0; x < kSide; ++x) level.carve(Coord{x, 0}, Dir::South, kSide);
+
+  constexpr int kMonsters = 16;
+  std::vector<Monster> monsters;
+  for (int m = 0; m < kMonsters; ++m) {
+    monsters.push_back(
+        Monster{Coord{2 + m % 28, 2 + m / 4}, MonsterKind{Acuity::Normal, false}, {}});
+  }
+
+  auto world = make_world(0xB0DEB0DEULL, std::move(level), std::move(monsters));
+  world.party = Coord{1, 1};
+  world.armour = Armour::Plate;
+  world.lamp_level = kLampLevelMax;  // lit and in the open: every monster can escalate
+
+  audio::RecordingSink<> sink;
+  audio::Command drained{};
+
+  constexpr int kTicks = 100;
+  const auto start = std::chrono::steady_clock::now();
+  for (int tick = 0; tick < kTicks; ++tick) {
+    world.pending_noise = step_noise(world.armour, world.creeping, t);
+    advance(world, t, &sink);
+    while (sink.ring().try_pop(drained)) {}
+  }
+  const auto elapsed = std::chrono::steady_clock::now() - start;
+  const auto per_tick_us =
+      std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count() / kTicks;
+
+  // The stings must actually have fired, or this is timing the footfall path
+  // twice and calling it a worst case.
+  INFO("voices over " << kTicks << " ticks: " << sink.ring().pushed());
+  CHECK(sink.ring().pushed() > static_cast<std::uint64_t>(kTicks));
+
+  INFO("per-tick with audio " << per_tick_us << " us against a budget of "
+                              << budget::kMaxSimulationTickMs * 1000 << " us");
+  CHECK(per_tick_us < budget::kMaxSimulationTickMs * 1000);
+}
+
+TEST_CASE("§11's tick budget holds when EVERY monster stings on one tick", "[budget]") {
+  // THE ACTUAL WORST CASE, CONSTRUCTED RATHER THAN WAITED FOR.
+  //
+  // The case above is honest about cost but not about concurrency: escalation
+  // takes several ticks and §6.1 advances at most one state per tick, so its
+  // stings arrive a few at a time and no single tick pays for many
+  // propagations. That measures the common case and calls it worst.
+  //
+  // This puts every monster one step below HUNTING and then satisfies §6.1's
+  // sighting condition for all of them simultaneously, so ONE tick performs one
+  // sting propagation per monster. If audio can blow the tick budget, it blows
+  // it here and nowhere else.
+  const Tuning& t = kDefaultTuning;
+
+  constexpr int kSide = 32;
+  Level level{kSide, kSide};
+  for (int y = 0; y < kSide; ++y) level.carve(Coord{0, y}, Dir::East, kSide);
+  for (int x = 0; x < kSide; ++x) level.carve(Coord{x, 0}, Dir::South, kSide);
+
+  // Within sight distance of the party and in clear line of sight, so the
+  // SEARCHING -> HUNTING row fires for each of them on the same tick.
+  constexpr int kMonsters = 16;
+  const Coord party{16, 16};
+
+  // One step below HUNTING, looking in the right place. Re-applied before every
+  // timed tick below, so each one is a fresh worst case.
+  const auto searching_mind = [](Coord seen_at) {
+    Perception p{};
+    p.state = Awareness::Searching;
+    p.has_last_known = true;
+    p.last_known = seen_at;
+    return p;
+  };
+
+  std::vector<Monster> monsters;
+  for (int m = 0; m < kMonsters; ++m) {
+    monsters.push_back(Monster{Coord{14 + m % 5, 14 + m / 5},
+                               MonsterKind{Acuity::Normal, false}, searching_mind(party)});
+  }
+
+  auto world = make_world(0xC0FFEEULL, std::move(level), std::move(monsters));
+  world.party = party;
+  world.armour = Armour::Plate;
+  world.lamp_level = kLampLevelMax;
+  world.pending_noise = step_noise(world.armour, world.creeping, t);
+
+  // REPEATED AND AVERAGED, not measured once.
+  //
+  // A single-sample timing assertion is a flaky test wearing a budget's clothes:
+  // the first `advance` pays for every first-touch page and every container's
+  // initial allocation, and there is nothing to average that against. Measured —
+  // one cold tick reported 4324 us under ASan on CI against a 4 ms budget, and
+  // 973 us warm on a developer box. The row was not close to being blown; the
+  // measurement was wrong.
+  //
+  // Averaging over repeats is also what the neighbouring case does, so the two
+  // numbers stay directly comparable. Each repeat resets every monster to
+  // SEARCHING outside the timed region, so every timed tick is a fresh worst
+  // case rather than a monster that is already hunting.
+  audio::RecordingSink<> sink;
+  audio::Command drained{};
+  constexpr int kRepeats = 50;
+
+  const auto rearm = [&] {
+    for (auto& m : world.monsters) m.mind = searching_mind(party);
+    world.pending_noise = step_noise(world.armour, world.creeping, t);
+  };
+
+  const auto time_ticks = [&](audio::Sink* voices) {
+    rearm();
+    advance(world, t, voices);  // warm-up, deliberately untimed
+    if (voices != nullptr) {
+      while (sink.ring().try_pop(drained)) {}
+      sink.ring().reset_counters();
+    }
+
+    std::chrono::steady_clock::duration total{};
+    for (int r = 0; r < kRepeats; ++r) {
+      rearm();
+      const auto start = std::chrono::steady_clock::now();
+      advance(world, t, voices);
+      total += std::chrono::steady_clock::now() - start;
+      if (voices != nullptr) {
+        while (sink.ring().try_pop(drained)) {}
+      }
+    }
+    return std::chrono::duration_cast<std::chrono::microseconds>(total).count() / kRepeats;
+  };
+
+  const auto silent_us = time_ticks(nullptr);
+  const auto tick_us = time_ticks(&sink);
+
+  // Every monster really did sting on every one of those ticks: 16 stings plus
+  // one footfall, each repeat. Without this the average could be taken over
+  // ticks that were never the worst case at all.
+  const auto hunting = std::count_if(world.monsters.begin(), world.monsters.end(),
+                                     [](const Monster& m) {
+                                       return m.mind.state == Awareness::Hunting;
+                                     });
+  INFO("monsters that reached HUNTING on the last tick: " << hunting);
+  CHECK(hunting == kMonsters);
+  INFO("voices over " << kRepeats << " worst-case ticks: " << sink.ring().pushed());
+  CHECK(sink.ring().pushed() ==
+        static_cast<std::uint64_t>(kRepeats) * (static_cast<std::uint64_t>(kMonsters) + 1));
+
+  // ── What audio COSTS, which is the durable form of the question ──────────
+  //
+  // The same worst-case tick timed with and without the sink. This ratio is what
+  // this case actually exists to police, and it is the assertion that survives
+  // every build configuration: a sanitizer slows both measurements equally, so
+  // the ratio does not move, while an absolute microsecond budget under ASan is
+  // mostly measuring ASan.
+  //
+  // It is also the STRONGER check. Reverting to a propagation per stinging
+  // monster costs 16x here and would be caught on any machine; against the
+  // absolute budget alone, a fast enough unsanitized box could fit sixteen
+  // propagations inside 4 ms and wave the regression through.
+  //
+  // The shared field means audio adds ONE propagation to a tick that already did
+  // one — but not an equal one: the sting propagates at `kStingEmission` (90)
+  // where the footfall propagates at a plate step (44), so it reaches further
+  // and touches more cells. A little over 2x is therefore the honest expectation,
+  // not 2x exactly.
+  //
+  // Measured across the matrix: 1.2x (clang), 1.6x (gcc), 1.9x (ubsan),
+  // 2.2x (asan), 2.3x (tsan). The sanitizers sit highest because the extra field
+  // is an allocation and they tax allocation hardest. Four leaves real headroom
+  // above the worst observed reading while still catching the regression this
+  // exists for by a factor of three or more.
+  REQUIRE(silent_us > 0);
+  INFO("worst-case tick: " << silent_us << " us silent, " << tick_us << " us with audio");
+  CHECK(tick_us < silent_us * 4);
+
+  // ── And the absolute row, where microseconds mean something ──────────────
+  //
+  // §11's 4 ms is a budget for the simulation, not for a build that is
+  // deliberately three to five times slower. Measured on one box: 917 us
+  // unsanitized, 3195 us under GCC 13 + ASan — the second number is 80% of the
+  // budget and tells you nothing about whether the game is fast enough, but it
+  // would fail the build on a busy runner. That is a flaky test, not a budget.
+  //
+  // So the row is asserted where it is meaningful, and the ratio above carries
+  // the sanitizer builds. NOT skipped silently: a dropped assertion that
+  // announces nothing is indistinguishable from one that ran.
+#if defined(GLOAM_TEST_SANITIZED)
+  WARN("§11's absolute tick budget is not asserted under a sanitizer — it would be measuring "
+       "the sanitizer. The audio-cost ratio above is what covers this build; the absolute row "
+       "runs in the default and ubsan configurations.");
+#else
+  INFO("worst-case tick " << tick_us << " us against a budget of "
+                          << budget::kMaxSimulationTickMs * 1000 << " us");
+  CHECK(tick_us < budget::kMaxSimulationTickMs * 1000);
+#endif
 }
 
 TEST_CASE("§4.5's below-background threshold is reachable only through the layer API", "[budget]") {

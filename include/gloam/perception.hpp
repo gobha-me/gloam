@@ -67,6 +67,8 @@ enum class Tell : std::uint8_t {
 struct MonsterKind {
   Acuity acuity{Acuity::Normal};
   bool sees_unlit{false};
+
+  [[nodiscard]] auto operator==(const MonsterKind&) const -> bool = default;
 };
 
 /// Range within which an unlit party is still visible to a `sees_unlit = false`

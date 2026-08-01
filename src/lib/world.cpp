@@ -2,6 +2,12 @@
 
 #include <type_traits>
 
+// `world.hpp` only forward-declares `audio::Sink`, which is all a pointer
+// parameter needs. `advance` CALLS through that pointer, so the definition has
+// to arrive somewhere — here, in the one translation unit that needs it, rather
+// than in the header where it would reach every consumer.
+#include "gloam/audio.hpp"
+
 #include "bytes.hpp"
 
 namespace gloam {
@@ -189,8 +195,53 @@ auto apply(World& w, replay::Event event, std::uint16_t payload, const Tuning& t
   }
 }
 
-auto advance(World& w, const Tuning& tuning) -> void {
+auto advance(World& w, const Tuning& tuning, audio::Sink* voices) -> void {
   const auto field = propagate_noise(w.level, w.party, w.pending_noise, tuning);
+
+  if (voices != nullptr) {
+    voices->note_tick(w.tick);
+
+    // THE PARTY'S OWN FOOTFALL, READ OUT OF THE FIELD THE MONSTERS ARE ABOUT TO
+    // BE TESTED AGAINST. Source is the listener, so it is unattenuated and dead
+    // centre — and it costs no second propagation. §9.3's "one system read from
+    // two positions", in one call.
+    //
+    // Derived from `pending_noise` rather than emitted beside `apply`, which is
+    // the non-obvious half. `apply` already refuses to emit when a step runs
+    // into an impassable edge ("you did not take a step"), and it already takes
+    // the MAX of two footfalls sharing a tick rather than their sum. Reading the
+    // state instead of intercepting the event inherits both rules for free
+    // instead of restating them somewhere they could drift.
+    if (w.pending_noise > 0) {
+      const auto mix =
+          audio::mix_at(field, w.level, w.party, w.facing, w.party, w.pending_noise);
+      voices->play(audio::SoundId::PartyFootfall, mix.gain, mix.pan);
+    }
+  }
+
+  // ONE FIELD FOR EVERY STING THIS TICK, NOT ONE PER MONSTER.
+  //
+  // §9.3 says the mix is the propagation "evaluated from the party's position
+  // instead of the monster's", and that is meant literally: this field is rooted
+  // at the party and read at each monster that sounds. Noise cost is symmetric
+  // (see `audio::mix_reciprocal`), so the answer equals what a field rooted at
+  // the monster would have given, and the cost stops scaling with the monster
+  // count.
+  //
+  // That is not a micro-optimisation. Measured at §11's own reference scale —
+  // 32x32 cells, 16 monsters, every one of them stinging on the same tick — a
+  // propagation per monster cost 13.6 ms against a 4 ms tick budget, and the
+  // shared field costs 0.97 ms. The obvious implementation was over budget by
+  // 3.4x, so this is what keeps §11's row true rather than a tidy-up.
+  // `test/10budgets/` measures exactly that tick, and would go red again.
+  //
+  // Built LAZILY: most ticks contain no sting at all, and an eagerly built field
+  // would put the cost back on every tick instead of taking it off the rare one.
+  // Seeded with `kStingEmission` exactly, which is the sizing rule
+  // `audio::mix_reciprocal` documents — a smaller seed truncates the field early
+  // and would silence a sting that should have been heard.
+  NoiseField sting_field{};
+  bool sting_field_built = false;
 
   for (auto& m : w.monsters) {
     Senses senses{};
@@ -200,22 +251,48 @@ auto advance(World& w, const Tuning& tuning) -> void {
     senses.range = range_between(m.at, w.party);
     senses.lamp_level = w.lamp_level;
     senses.party_position = w.party;
-    static_cast<void>(step(m.mind, senses, m.kind, tuning));
+
+    // The tell used to be discarded here. §6.1 calls it "the deliverable, not
+    // the state machine", and this is the line that finally makes that true.
+    const Tell tell = step(m.mind, senses, m.kind, tuning);
+
+    // §6.1: "gait changes, direct pursuit, ONE AUDIO STING."
+    //
+    // KEYED ON THE TELL, NOT ON THE STATE, and the difference is the whole
+    // point. `Tell::SnapsBack` also arrives at HUNTING and pointedly gets
+    // NOTHING — `perception.hpp` spells out why: the sting means "found you",
+    // and its absence means "never lost you", which is the honest report from a
+    // monster that was already searching the right place. Silence is the tell,
+    // and it is the worse thing to hear.
+    //
+    // Writing this as `m.mind.state == Awareness::Hunting` passes every other
+    // test in the suite and breaks that distinction. `test/16audiosim/` is what
+    // catches it.
+    if (voices != nullptr && tell == Tell::GaitChanges) {
+      if (!sting_field_built) {
+        sting_field = propagate_noise(w.level, w.party, audio::kStingEmission, tuning);
+        sting_field_built = true;
+      }
+      const auto mix = audio::mix_reciprocal(sting_field, w.level, w.party, w.facing, m.at,
+                                             audio::kStingEmission);
+      voices->play(audio::SoundId::HuntingSting, mix.gain, mix.pan);
+    }
   }
 
   w.pending_noise = 0;
   ++w.tick;
 }
 
-auto play(World& w, std::span<const replay::Record> records, const Tuning& tuning) -> void {
+auto play(World& w, std::span<const replay::Record> records, const Tuning& tuning,
+          audio::Sink* voices) -> void {
   for (const auto& record : records) {
-    while (w.tick < record.tick) advance(w, tuning);
+    while (w.tick < record.tick) advance(w, tuning, voices);
     apply(w, record.event, record.payload, tuning);
   }
   // The last tick's inputs have been applied but not yet simulated. Without
   // this the final world hash would be taken from a world that had heard
   // nothing the player just did.
-  advance(w, tuning);
+  advance(w, tuning, voices);
 }
 
 }  // namespace gloam

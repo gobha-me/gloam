@@ -56,6 +56,24 @@
 #include "gloam/sha256.hpp"
 #include "gloam/tuning.hpp"
 
+namespace gloam::audio {
+
+/// SPEC §9.3's `Sink`, forward-declared rather than included.
+///
+/// `advance` takes one BY POINTER, and a pointer parameter needs no definition.
+/// That keeps `gloam/audio.hpp` — and with it a lock-free ring and a
+/// `std::atomic` — out of every translation unit that merely ticks a world,
+/// including the headless diagnostic in `src/bin/main.cpp`. `gloam.hpp`'s
+/// umbrella rule is "include them by name when you want them", and this is what
+/// honouring it costs: one line.
+///
+/// Deliberately NOT the `sha256.hpp` situation that header describes. That one
+/// arrives transitively because `world_hash` names `hash::Digest` BY VALUE and
+/// there is no way around it. A pointer has a way around it.
+class Sink;
+
+}  // namespace gloam::audio
+
 namespace gloam {
 
 /// One monster: where it is, what it is, and what it currently believes.
@@ -148,7 +166,30 @@ auto apply(World& w, replay::Event event, std::uint16_t payload, const Tuning& t
 ///
 /// Named `advance` and not `tick` because `World::tick` is the counter it
 /// increments, and a verb that shadows its own noun reads badly at both.
-auto advance(World& w, const Tuning& tuning) -> void;
+///
+///
+/// `voices` IS SPEC §9's ONE-WAY WALL, AND `nullptr` IS `--mute`
+///
+/// Passing a sink changes what is HEARD and nothing that is HASHED. §19 step 9's
+/// acceptance criterion — "`--mute` and unmuted runs produce identical replays"
+/// — holds here by construction rather than by care, on five structural facts:
+///
+///   1. `audio::Sink::play` returns void and takes scalars by value, so there is
+///      no expression in `advance` that can read anything back from a sink.
+///      §9.2's "Audio -> sim is nothing. Ever." is closed by the type system.
+///   2. `World` gains no field, so `world_hash`'s coverage cannot grow and
+///      `kWorldHashVersion` does not move. Every `replay.gloam` recorded before
+///      §9 existed stays valid — checkable in one `git diff` of `world.cpp`.
+///   3. Everything handed to `play` is derived from state that is already final
+///      for the tick, through const-qualified reads.
+///   4. No `Tuning` field moved, so `ruleset_hash` is unchanged and the §12 load
+///      gate cannot start refusing files it used to accept.
+///   5. The only thing a non-null sink changes is work performed — extra
+///      propagations — never a byte written into `w`.
+///
+/// `test/16audiosim/` proves it empirically as well, including against a sink
+/// that deliberately allocates and thrashes inside `play`.
+auto advance(World& w, const Tuning& tuning, audio::Sink* voices = nullptr) -> void;
 
 /// Run a whole input log: every record applied on its own tick, ticks in
 /// between advanced empty, ending on the tick of the last record.
@@ -156,6 +197,13 @@ auto advance(World& w, const Tuning& tuning) -> void;
 /// `records` must be ordered by tick — `replay::verify` is what guarantees it,
 /// and `play` assumes it rather than re-checking, so that a caller cannot get a
 /// silently different answer by skipping the load gate.
-auto play(World& w, std::span<const replay::Record> records, const Tuning& tuning) -> void;
+///
+/// `voices` is forwarded to every `advance`, so a replayed session and a live
+/// one emit the same voices through the same seam. That is deliberate and it is
+/// why the footfall is derived inside `advance` rather than beside `apply`: one
+/// emission path means a replay cannot sound different from the session it
+/// recorded, and there is no second path to keep in step.
+auto play(World& w, std::span<const replay::Record> records, const Tuning& tuning,
+          audio::Sink* voices = nullptr) -> void;
 
 }  // namespace gloam
