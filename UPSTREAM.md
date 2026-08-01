@@ -281,6 +281,49 @@ Two more, which are design questions rather than factual errors:
    green test measuring the wrong quantity is what `budgets.hpp`'s opening
    paragraph exists to prevent.
 
+9. **§9.3 does not say how loud a sting is, or whether it is diegetic at all.**
+   Mirrored as [#22](https://github.com/gobha-me/gloam/issues/22). §9.3 derives
+   gain from `propagate_noise`, which needs an emission magnitude; §6.2's table
+   has rows for a step, a door, a swing, a hit, a fall and a cast, and **none for
+   a monster vocalising** — nothing in the simulation has ever needed one,
+   because monsters do not listen to each other.
+
+   Settled as **diegetic and attenuated**, at `noise_melee_hit` (90). §6.1 only
+   reaches SEARCHING → HUNTING with clear line of sight, a lit party and range
+   within sight distance, so a stinging monster is by construction visible and
+   close — which removes the one argument for a non-diegetic sting ("the player
+   misses the tell at range") by making that case unreachable. A non-diegetic
+   sting would also survive dousing the lamp at full volume, turning the tell
+   into a UI notification in a game whose fourth pillar forbids exactly that.
+
+   `audio::kStingEmission` lives in `audio.hpp` and **not** in `Tuning`, which is
+   the part worth disagreeing with. A tunable is a promise that the number
+   changes the simulation, and `ruleset_hash` makes a mismatch a hard rejection
+   at load. Nothing hears the sting, so it cannot reach `world_hash` — and a
+   number no replay could have observed must not be able to reject one. The
+   coupling §9.3 asks for is unaffected: the *attenuation* the sting propagates
+   through is already in `Tuning` and reaches the mix through `propagate_noise`.
+
+10. **§9.2 requires a resident audio arena in the pack, and `SCHEMAS.md` §1 has
+    no record that can describe one.** Mirrored as
+    [#23](https://github.com/gobha-me/gloam/issues/23). §9.2 says "all PCM is
+    decoded at startup into the pack's resident audio arena … the audio pack
+    shares §10's manifest hash", but §1's `role` enum is
+    `wall | floor | ceiling | light_field | monster | item | ui | rune` with no
+    audio value, and the record is shaped for plates — `w`, `h` and a palette
+    codec, with nowhere to put a sample rate, a channel count or a frame count.
+
+    **Deliberately unresolved.** Build-order step 9 is "the audio sink, *rough*",
+    and its acceptance criterion is about determinism rather than fidelity, so
+    the arena is not on the critical path. Extending the pack moves
+    `pack_sha256` — a launch gate (§10) and a `ctest` case — and would bake a
+    schema around content nobody has authored. The device PR synthesises its
+    arena at startup instead, drawing from `Stream::Ambience`, which
+    `world.cpp` excludes from `world_hash` precisely so that a change to what a
+    sting sounds like cannot be reported as a determinism regression. What is
+    lost meanwhile: the PCM is not covered by the manifest digest, so §9.2's
+    "shares §10's manifest hash" is unmet.
+
 ### Decisions taken
 
 Amendments to `design/SPEC.md`, decided 2026-07-31. The snapshot is not edited;
