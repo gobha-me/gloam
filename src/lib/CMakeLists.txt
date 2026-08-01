@@ -41,9 +41,11 @@ add_library(${PROJECT_NAME}_lib STATIC
   pack.cpp
   perception.cpp
   plate.cpp
+  replay.cpp
   runes.cpp
   sha256.cpp
   spells.cpp
+  world.cpp
 )
 
 # Compiled libs get the project's include dir PUBLIC so consumers (bin, tests,
