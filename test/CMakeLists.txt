@@ -46,6 +46,37 @@ add_test(
           ${PROJECT_SOURCE_DIR}/cmake/check_kitty_boundary.cmake
 )
 
+# SPEC §19 step 5 — "Accept: two pipeline runs produce byte-identical packs."
+#
+# test/12pack/ asserts the same property in process; this runs the real binary
+# twice, in two working directories, and compares the files. The two are not
+# redundant — an in-process comparison shares an allocator and an address space,
+# so an uninitialised byte can read the same value both times.
+#
+# Guarded on the target: ${PROJECT_NAME}_BUILD_BIN defaults to
+# PROJECT_IS_TOP_LEVEL, so a consumer's build has no baker to run.
+if (NOT TARGET ${PROJECT_NAME}_bake)
+  # Say so at configure time rather than letting ctest quietly report 20 passed
+  # instead of 21. A dropped acceptance gate that announces nothing is
+  # indistinguishable from one that ran — the same reason the library guard
+  # below prints a STATUS.
+  message(STATUS
+    "${PROJECT_NAME}_bake is not built — SPEC §19 step 5's pack-reproducible gate "
+    "will NOT run. Pair -D${PROJECT_NAME}_BUILD_BIN=OFF with the knowledge that the "
+    "out-of-process byte-identical check is unverified in this configuration."
+  )
+endif ()
+
+if (TARGET ${PROJECT_NAME}_bake)
+  add_test(
+    NAME pack-reproducible
+    COMMAND ${CMAKE_COMMAND}
+            -DBAKE=$<TARGET_FILE:${PROJECT_NAME}_bake>
+            -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}
+            -P ${PROJECT_SOURCE_DIR}/cmake/check_pack_repro.cmake
+  )
+endif ()
+
 file(GLOB TEST_DIRS ${CMAKE_CURRENT_LIST_DIR}/*)
 
 # Say this once, at configure time, instead of letting it surface as a link error

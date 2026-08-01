@@ -117,14 +117,22 @@ if (TARGET ${PROJECT_NAME}_lib)
   )
 endif ()
 
-# ── The application ─────────────────────────────────────────────────────────
-# Installed when it is built, but deliberately not exported: an executable is
+# ── The applications ────────────────────────────────────────────────────────
+# Installed when they are built, but deliberately not exported: an executable is
 # something you run, not something another project links.
-if (TARGET ${PROJECT_NAME} AND ${PROJECT_NAME}_BUILD_BIN)
-  install(TARGETS ${PROJECT_NAME}
-    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
-  )
-endif ()
+#
+# BOTH binaries, and the second one is not optional. §10 makes the pack a hard
+# startup requirement — "a mismatched hash refuses to launch" — and the pack is
+# a build artifact that is never committed (see .gitignore). A prefix holding
+# the game but not the baker is a prefix that cannot produce the one file the
+# game refuses to start without.
+foreach (BINARY ${PROJECT_NAME} ${PROJECT_NAME}_bake)
+  if (TARGET ${BINARY} AND ${PROJECT_NAME}_BUILD_BIN)
+    install(TARGETS ${BINARY}
+      RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    )
+  endif ()
+endforeach ()
 
 # ── Package config ──────────────────────────────────────────────────────────
 # <project>Config.cmake is what find_package(<project> CONFIG) loads; it exists

@@ -15,12 +15,18 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <span>
+#include <vector>
 
+#include "gloam/assets.hpp"
 #include "gloam/budgets.hpp"
 #include "gloam/emit.hpp"
 #include "gloam/layer.hpp"
+#include "gloam/lightfield.hpp"
 #include "gloam/noise.hpp"
+#include "gloam/pack.hpp"
 #include "gloam/perception.hpp"
+#include "gloam/plate.hpp"
 #include "gloam/tuning.hpp"
 
 using namespace gloam;
@@ -90,9 +96,100 @@ TEST_CASE("§11 timing budgets are declared", "[budget]") {
   CHECK(budget::kMaxAudioLatencyMs == 20);
   CHECK(budget::kMaxColdStartPayloadBytes == 1'200'000);
 
-  // PENDING M0: cold start needs the pack and the upload path (§19 step 5).
+  // PENDING M0: cold start needs the UPLOAD path — see the pack case below,
+  //             which measures what exists (§19 step 5) and says plainly why
+  //             that is not this row.
   // PENDING M0: compose+diff+emit needs the compositor (§19 step 6).
   // PENDING M2: audio latency needs the sink (§19 step 9).
+}
+
+TEST_CASE("§11's residency cap, measured against a real manifest", "[budget]") {
+  // §19 step 5 landed the pack, so the plate count is no longer a declaration:
+  // it is read back out of a manifest that was actually assembled.
+  //
+  // The comparison happens HERE and not in pack.hpp, deliberately. emit.hpp
+  // states the rule: "The sink reports; the budget judges; exactly one file can
+  // relax a budget." A parser that knows the cap is a parser that can be
+  // configured past it.
+  const auto field_bytes = plate::blob_bytes(lightfield::kWidthPx, lightfield::kHeightPx);
+  std::vector<std::byte> pixels(field_bytes * lightfield::kFieldCount);
+  std::vector<pack::Record> records;
+  std::vector<std::span<const std::byte>> blobs;
+
+  for (int level = kLampLevelMin; level <= kLampLevelMax; ++level) {
+    const auto slot = static_cast<std::size_t>(level - kLampLevelMin);
+    const auto blob = std::span{pixels}.subspan(slot * field_bytes, field_bytes);
+    REQUIRE(lightfield::bake(level, blob));
+
+    pack::Record r{};
+    r.plate_id = static_cast<std::uint16_t>(level);
+    r.role = pack::Role::LightField;
+    r.depth = pack::kDepthFullFrame;
+    r.lateral = pack::Lateral::FullFrame;
+    r.codec = pack::Codec::RawPlanes;
+    r.w = static_cast<std::uint16_t>(lightfield::kWidthPx);
+    r.h = static_cast<std::uint16_t>(lightfield::kHeightPx);
+    records.push_back(r);
+    blobs.push_back(blob);
+  }
+
+  std::vector<std::byte> image(pack::image_bytes(records));
+  REQUIRE(pack::assemble(records, blobs, image));
+  REQUIRE(pack::verify(image));
+
+  pack::Header header{};
+  REQUIRE(pack::read_header(image, header));
+  CHECK(header.plate_count <= budget::kMaxResidentImages);
+  CHECK(header.plate_count == budget::kLightFields.m0);
+  CHECK(header.total_bytes == image.size());
+
+  // A necessary condition, not the budget: the pack cannot be under 1.2 MB on
+  // the wire if it is already over 1.2 MB at rest.
+  CHECK(image.size() <= budget::kMaxColdStartPayloadBytes);
+}
+
+TEST_CASE("§11's cold-start payload row is CURRENTLY BLOWN, and this says so", "[budget]") {
+  // §11 and BUDGETS.md budget 1.2 MB of BASE64 — the TRANSMIT payload, not the
+  // pack. BUDGETS.md names a "manifest test" as the enforcer, and a manifest
+  // test can only measure the pack, so the row as written cannot be checked by
+  // the thing it names. Those are wildly different numbers: kitty is handed
+  // PIXELS, so a RawPlanes plate expands from 2 bits per pixel to 32, and then
+  // base64 adds another third.
+  //
+  // THIS ASSERTION IS DELIBERATELY INVERTED. The projected wire cost is
+  // computable from constants already in scope, so rather than record the
+  // overrun in four comment blocks and assert nothing — which is how a budget
+  // becomes prose — it is asserted in the direction that is true today. When
+  // the transmit path lands with Codec::Png, `o=z` or shared memory, this test
+  // goes RED and whoever fixed it has to come here and flip it into the real
+  // row. A budget nobody can accidentally leave broken.
+  //
+  // See UPSTREAM.md's correction 7 and gloam#17.
+  // Derived from the PIXEL COUNT, not from a bits-per-pixel ratio against the
+  // blob. A plate's blob is 3 bits per pixel, not 2 — the 2-bit index plane
+  // plus the 1-bit stencil — and quoting the palette depth alone overstates the
+  // expansion by half as much again.
+  constexpr std::size_t kBytesPerWirePixel = 4;  // kitty f=32 RGBA
+
+  const auto pixels = static_cast<std::size_t>(lightfield::kWidthPx) *
+                      static_cast<std::size_t>(lightfield::kHeightPx) *
+                      static_cast<std::size_t>(assets::kPlateCount);
+  const auto pack_bytes = assets::image_bytes();
+  const auto wire_bytes = pixels * kBytesPerWirePixel;
+  const auto base64_bytes = wire_bytes * 4 / 3;
+
+  // The blob really is 3 bits per pixel, and that is what makes the pack small.
+  CHECK(assets::pixel_bytes() * 8 == pixels * 3);
+
+  INFO("pack " << pack_bytes << " B, f=32 payload " << wire_bytes << " B, base64 "
+               << base64_bytes << " B, budget " << budget::kMaxColdStartPayloadBytes << " B");
+
+  CHECK(pack_bytes <= budget::kMaxColdStartPayloadBytes);
+  CHECK(base64_bytes > budget::kMaxColdStartPayloadBytes);
+
+  // Roughly 4.6x over, from the light fields alone, before a single wall plate
+  // exists. Pinned so the ratio cannot drift unremarked in either direction.
+  CHECK(base64_bytes / budget::kMaxColdStartPayloadBytes >= 4);
 }
 
 TEST_CASE("§9.2's dropped-voice-command budget is zero", "[budget]") {

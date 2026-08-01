@@ -46,3 +46,13 @@ include/version.hpp
 *.exe
 *.out
 *.app
+
+# The baked asset pack (SPEC §10). A build artifact: `gloam_bake` reproduces it
+# byte for byte from source, and `pack-reproducible` proves as much on every
+# run, so committing it would add 380 KB of binary that nothing reads.
+#
+# Nothing else stops it being committed — cmake/check_artifacts.cmake skips a
+# fixed extension list that does not include .gloam, and has no size or
+# binary-content rule at all. If you ever do want a golden pack in the tree as a
+# decoder fixture, this line is the only thing in the way; delete it knowingly.
+/pack.gloam

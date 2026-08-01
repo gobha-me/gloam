@@ -45,11 +45,26 @@ driver arrives is not insurance. Two ctest cases keep it honest —
 `kitty-boundary-single-module` (no code outside `src/lib/kitty.cpp` writes an
 escape sequence).
 
-Next up, and unblocked: the
-[asset pipeline](https://github.com/gobha-me/gloam/issues/1) (the longest
-lead-time item on the critical path to the compositor), the
-[replay harness](https://github.com/gobha-me/gloam/issues/3), and the
-[audio sink](https://github.com/gobha-me/gloam/issues/4).
+The **asset pipeline** ([#1](https://github.com/gobha-me/gloam/issues/1)) has
+landed its first slice, and it is the one thing on the critical path that never
+needed termforge. `gloam_bake` writes a versioned, hashed `pack.gloam`: §12's
+manifest, §4.3's fixed ordered dither, §3.1's exact 2:1 downsample, and the six
+full-frame light fields §4.4 asks for — the one asset class §10 marks
+*procedural*, so it could be built before any art exists. Two runs produce a
+byte-identical pack, verified under GCC 13, GCC 14 and Clang 20; the
+`pack-reproducible` ctest case runs the binary twice and compares the files,
+because §10 makes that hash a build gate rather than a nicety.
+
+What that slice does **not** include is the authored depth-0 and depth-1 wall
+rings, because no art and no authoring format exist yet. #1 stays open for them.
+
+It also put a number on something uncomfortable: §11's 1.2 MB cold-start budget
+is for the **base64 transmit payload**, and a 2-bit plate expands to RGBA before
+it goes on the wire. The six light fields are 388,800 B in the pack and roughly
+5.5 MB transmitted — see [#17](https://github.com/gobha-me/gloam/issues/17).
+
+Also unblocked: the [replay harness](https://github.com/gobha-me/gloam/issues/3)
+and the [audio sink](https://github.com/gobha-me/gloam/issues/4).
 
 ## Design
 
@@ -82,20 +97,25 @@ Three commitments shape almost every file:
 
 ```
 design/           the specification the code cites — a snapshot; see design/README.md
-include/gloam/    the deterministic core's public headers, plus the render-side four
+include/gloam/    the deterministic core's public headers, plus ten off-umbrella
 src/lib/          its implementation — standard library only, no I/O, no clock
-src/bin/          the diagnostic binary; termforge lands here, not in the lib
+src/bin/          the diagnostic binary and gloam_bake; termforge lands here too
 test/             property tests (§13.3) and budget assertions (§11)
-cmake/            the template's build machinery, plus check_layer_z.cmake (§4.5)
-                  and check_kitty_boundary.cmake (§16)
+cmake/            the template's build machinery, plus check_layer_z.cmake (§4.5),
+                  check_kitty_boundary.cmake (§16) and check_pack_repro.cmake (§10)
 ```
 
-Four headers in `include/gloam/` are render-side rather than simulation —
-`budgets.hpp`, `layer.hpp`, `emit.hpp`, `kitty.hpp` — and are deliberately left
-out of the `gloam/gloam.hpp` umbrella. They live inside the standard-library-only
-boundary anyway, because **producing** bytes is not the same as needing a
-terminal; the `write` that puts them on one is in `src/bin/`. `gloam.hpp` says so
-at the top, so the exclusion does not read as an oversight.
+Ten headers in `include/gloam/` are not simulation and are deliberately left out
+of the `gloam/gloam.hpp` umbrella: four render-side (`budgets.hpp`, `layer.hpp`,
+`emit.hpp`, `kitty.hpp`) and six for the offline pipeline (`dither.hpp`,
+`plate.hpp`, `lightfield.hpp`, `pack.hpp`, `sha256.hpp`, `assets.hpp`). They live inside the
+standard-library-only boundary anyway, because **producing** bytes is not the
+same as needing a terminal; the `write` that puts them on one is in `src/bin/`,
+and so is the only `open` in the pipeline. None of the pipeline six owns a
+plate — they take caller-owned spans and report the size they need, which is what
+kept image ownership out of the library when the pack format arrived.
+`gloam.hpp` says all of this at the top, so the exclusion does not read as an
+oversight.
 
 `gloam::lib` links nothing beyond the standard library, and that is a hard
 architectural boundary rather than a coincidence: a simulation that can reach a
