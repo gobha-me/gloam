@@ -19,10 +19,12 @@
 
 #include <array>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <span>
 #include <string>
+#include <system_error>
 #include <vector>
 
 #include "gloam/assets.hpp"
@@ -54,20 +56,35 @@ auto usage() -> void {
 /// this process did not produce — which is the only interesting case, since a
 /// baker trivially agrees with itself.
 auto verify_file(const std::string& path, bool quiet) -> int {
+  // THE REGULAR-FILE CHECK IS THE LOAD-BEARING ONE, and the size check below is
+  // not a substitute for it. This comment used to claim that "tellg() returns
+  // -1 on anything unseekable — a directory, a FIFO". It does not: opening a
+  // directory with libstdc++ SUCCEEDS and `tellg()` returns LLONG_MAX, which
+  // sailed past the `size < 0` guard and aborted the process on bad_alloc while
+  // resizing to nine exabytes. `gloam_bake --verify .` did that until this line
+  // existed. A pack also cannot be smaller than its own header.
+  std::error_code ec;
+  if (!std::filesystem::exists(path, ec)) {
+    // Kept distinct from the regular-file check: a typo'd or not-yet-produced
+    // path is the likeliest failure by far, and reporting it as "not a regular
+    // file" sends a reader looking for a FIFO instead of a missing file.
+    std::cerr << "gloam_bake: '" << path << "' does not exist\n";
+    return EXIT_FAILURE;
+  }
+  if (!std::filesystem::is_regular_file(path, ec)) {
+    std::cerr << "gloam_bake: '" << path << "' is not a regular file\n";
+    return EXIT_FAILURE;
+  }
+
   std::ifstream in(path, std::ios::binary | std::ios::ate);
   if (!in) {
     std::cerr << "gloam_bake: cannot open '" << path << "' for reading\n";
     return EXIT_FAILURE;
   }
 
-  // tellg() returns -1 on anything unseekable — a directory, a FIFO, a stream
-  // whose length cannot be reported. Casting that straight to size_t asks for a
-  // 16-exabyte vector and aborts the process on bad_alloc, so it is checked
-  // rather than assumed. A pack also cannot be smaller than its own header.
   const auto size = static_cast<std::streamoff>(in.tellg());
   if (size < 0) {
-    std::cerr << "gloam_bake: cannot determine the size of '" << path
-              << "' — not a regular file?\n";
+    std::cerr << "gloam_bake: cannot determine the size of '" << path << "'\n";
     return EXIT_FAILURE;
   }
   if (static_cast<std::uintmax_t>(size) < gloam::pack::kHeaderBytes) {

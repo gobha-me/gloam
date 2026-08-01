@@ -12,6 +12,7 @@
 
 #include <catch2/catch_all.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -28,6 +29,7 @@
 #include "gloam/perception.hpp"
 #include "gloam/plate.hpp"
 #include "gloam/tuning.hpp"
+#include "gloam/world.hpp"
 
 using namespace gloam;
 
@@ -209,6 +211,11 @@ TEST_CASE("§11's simulation tick budget, measured", "[budget]") {
   // level, then run every monster's senses against it. This runs that at a
   // level size and monster count well past M0's corridor, so the headroom is
   // real rather than an artefact of a four-cell test.
+  //
+  // It calls `gloam::advance` rather than open-coding the loop. This case used
+  // to BE the only tick in the tree, and `world.cpp` took it verbatim; running
+  // the copy would leave the measured tick free to drift away from the replayed
+  // one, and the budget would then be guarding something nothing executes.
   const Tuning& t = kDefaultTuning;
 
   constexpr int kSide = 32;
@@ -217,28 +224,41 @@ TEST_CASE("§11's simulation tick budget, measured", "[budget]") {
   for (int x = 0; x < kSide; ++x) level.carve(Coord{x, 0}, Dir::South, kSide);
 
   constexpr int kMonsters = 16;
-  Perception monsters[kMonsters]{};
-  const MonsterKind kind{Acuity::Normal, false};
-  const Coord party{1, 1};
+  std::vector<Monster> monsters;
+  for (int m = 0; m < kMonsters; ++m) {
+    monsters.push_back(Monster{Coord{2 + m % 28, 2 + m / 4}, MonsterKind{Acuity::Normal, false}, {}});
+  }
+
+  auto world = make_world(0xB0DEB0DEULL, std::move(level), std::move(monsters));
+  world.party = Coord{1, 1};
+  world.armour = Armour::Plate;
 
   constexpr int kTicks = 100;
   const auto start = std::chrono::steady_clock::now();
   for (int tick = 0; tick < kTicks; ++tick) {
-    const auto field = propagate_noise(level, party, step_noise(Armour::Plate, false, t), t);
-    for (int m = 0; m < kMonsters; ++m) {
-      const Coord at{2 + m % 28, 2 + m / 4};
-      Senses s{};
-      s.heard = hears(field, level, at, kind.acuity, monsters[m].state == Awareness::Hunting, t);
-      s.los_clear = line_of_sight(level, at, party);
-      s.range = range_between(at, party);
-      s.lamp_level = kLampLevelDefault;
-      s.party_position = party;
-      step(monsters[m], s, kind, t);
-    }
+    // Set the emission directly rather than stepping: the party stays put, so
+    // every tick is a LOUD tick over the full field. That is the worst case the
+    // budget has to hold for, and a walking party would spend most of these
+    // ticks propagating silence.
+    world.pending_noise = step_noise(world.armour, world.creeping, t);
+    advance(world, t);
   }
   const auto elapsed = std::chrono::steady_clock::now() - start;
   const auto per_tick_us =
       std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count() / kTicks;
+
+  // The tick must have DONE something. Delegating to `gloam::advance` bought
+  // drift-protection and gave up the property that the work being timed was
+  // written here — so without these two lines, a plausible early-out added to
+  // `advance` (skip a silent tick, skip a monster out of noise range) would
+  // make this row pass faster than ever while measuring almost nothing.
+  CHECK(world.tick == kTicks);
+  const auto roused = std::count_if(world.monsters.begin(), world.monsters.end(),
+                                    [](const Monster& m) {
+                                      return m.mind.state != Awareness::Unaware;
+                                    });
+  INFO("monsters no longer unaware: " << roused << " of " << kMonsters);
+  CHECK(roused > 0);
 
   INFO("per-tick " << per_tick_us << " us against a budget of "
                    << budget::kMaxSimulationTickMs * 1000 << " us");

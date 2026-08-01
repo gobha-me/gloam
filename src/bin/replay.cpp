@@ -1,0 +1,350 @@
+/// SPEC §12, §19 step 7 — the golden-replay harness, out of process.
+///
+/// §19 step 7's acceptance criterion is "a recorded session replays to an
+/// identical world hash on both compilers". `test/13replay/` asserts that
+/// in process; this binary is what asserts it ACROSS processes, and what lets a
+/// bug report arrive as a file rather than as a description.
+///
+/// A SEPARATE EXECUTABLE, on `src/bin/bake.cpp`'s argument: the game must not be
+/// able to record or replay through a flag, or "the simulation cannot reach a
+/// file descriptor" becomes a convention rather than a fact.
+///
+/// THIS FILE HOLDS THE ONLY `read` AND `write` IN THE REPLAY PATH. Everything
+/// in `gloam::replay` and `gloam::world` works on caller-owned spans; the
+/// buffers live here, in `main`.
+///
+/// WHAT IT RECORDS TODAY: one scripted session over M0's corridor. There is no
+/// input device to record from — the terminal layer is blocked upstream — so
+/// the session is synthesised. `record` and `play` are still the two halves
+/// that have to agree, and they are separated by a file and a process boundary,
+/// which is the property the gate needs.
+
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <span>
+#include <system_error>
+#include <string>
+#include <vector>
+
+#include "gloam/gloam.hpp"
+#include "gloam/replay.hpp"
+#include "gloam/world.hpp"
+
+namespace {
+
+constexpr auto kDefaultOutput = "replay.gloam";
+
+auto usage() -> void {
+  std::cout << "usage: gloam_replay record [-o PATH] [--quiet]\n"
+            << "       gloam_replay play PATH [--quiet]\n"
+            << "       gloam_replay verify PATH\n"
+            << "\n"
+            << "Records and replays a GLOAM session (SPEC §12). A replay recorded\n"
+            << "against different tuning is rejected at load, never mis-played.\n"
+            << "\n"
+            << "  record         write a scripted session and its final world hash\n"
+            << "  play PATH      replay PATH and check it reaches the hash it carries\n"
+            << "  verify PATH    check the container only; do not simulate\n"
+            << "  -o PATH        write the replay here (default: " << kDefaultOutput << ")\n"
+            << "  --quiet        print only the final world hash\n"
+            << "  --version      print the version and exit\n";
+}
+
+[[nodiscard]] auto hex_of(const gloam::hash::Digest& d) -> std::string {
+  const auto h = gloam::hash::to_hex(d);
+  return std::string(h.data(), h.size());
+}
+
+/// M0's corridor, with an alcove and two monsters. The same shape
+/// `test/13replay/` builds — deliberately duplicated rather than shared,
+/// because a scenario the gate and the suite both read from one definition can
+/// drift into agreeing with itself about the wrong thing.
+[[nodiscard]] auto corridor_world() -> gloam::World {
+  using namespace gloam;
+
+  Level level{9, 3};
+  level.carve(Coord{0, 1}, Dir::East, 9);
+  level.carve(Coord{4, 1}, Dir::North, 2);
+
+  std::vector<Monster> monsters{
+      Monster{Coord{7, 1}, MonsterKind{Acuity::Normal, false}, {}},
+      Monster{Coord{4, 0}, MonsterKind{Acuity::Keen, false}, {}},
+  };
+
+  auto w = make_world(0xDEADBEEF12345678ULL, std::move(level), std::move(monsters));
+  w.party = Coord{1, 1};
+  w.armour = Armour::Leather;
+  return w;
+}
+
+[[nodiscard]] auto scripted_session() -> std::vector<gloam::replay::Record> {
+  using gloam::replay::Event;
+  return {
+      {0, Event::Lamp, 3},  {1, Event::Step, 1}, {2, Event::Step, 1}, {3, Event::Creep, 1},
+      {3, Event::Turn, 2},  {5, Event::Wait, 0}, {8, Event::Lamp, 0}, {9, Event::Step, 3},
+  };
+}
+
+/// Read a whole file into a buffer, refusing everything that is not one.
+///
+/// THE REGULAR-FILE CHECK IS NOT BELT-AND-BRACES, IT IS THE LOAD-BEARING ONE.
+/// Opening a directory with libstdc++ SUCCEEDS, and `tellg()` on it returns
+/// `LLONG_MAX` rather than the -1 that unseekable streams are supposed to give
+/// — so a size check alone passes it straight through to a resize of nine
+/// exabytes and aborts the process on `bad_alloc`. Measured, not assumed:
+/// `gloam_bake --verify .` did exactly that until this check was written, and
+/// its comment claiming -1 is what sent this function down the same path.
+[[nodiscard]] auto slurp(const std::string& path, std::vector<std::byte>& out) -> bool {
+  std::error_code ec;
+  if (!std::filesystem::exists(path, ec)) {
+    // Distinguished from the check below because a typo'd path is by far the
+    // likeliest failure, and "is not a regular file" sends whoever reads the
+    // log hunting for a FIFO instead of a missing file.
+    std::cerr << "gloam_replay: '" << path << "' does not exist\n";
+    return false;
+  }
+  if (!std::filesystem::is_regular_file(path, ec)) {
+    std::cerr << "gloam_replay: '" << path << "' is not a regular file\n";
+    return false;
+  }
+
+  std::ifstream in(path, std::ios::binary | std::ios::ate);
+  if (!in) {
+    std::cerr << "gloam_replay: cannot open '" << path << "'\n";
+    return false;
+  }
+
+  const auto size = static_cast<std::streamoff>(in.tellg());
+  if (size < 0) {
+    std::cerr << "gloam_replay: cannot size '" << path << "'\n";
+    return false;
+  }
+  if (static_cast<std::uintmax_t>(size) < gloam::replay::kHeaderBytes) {
+    std::cerr << "gloam_replay: '" << path << "' is " << size
+              << " B — too short to be a replay at all\n";
+    return false;
+  }
+
+  in.seekg(0);
+  out.resize(static_cast<std::size_t>(size));
+  in.read(reinterpret_cast<char*>(out.data()), size);
+  if (!in) {
+    std::cerr << "gloam_replay: reading '" << path << "' failed\n";
+    return false;
+  }
+  return true;
+}
+
+auto do_record(const std::string& output, bool quiet) -> int {
+  using namespace gloam;
+  const Tuning& tuning = kDefaultTuning;
+
+  const auto records = scripted_session();
+  auto world = corridor_world();
+  const auto seed = world.seed;
+  play(world, records, tuning);
+  const auto final_hash = world_hash(world);
+
+  replay::Header header{};
+  header.seed = seed;
+  header.ruleset_hash = ruleset_hash(tuning);
+  // No pack is loaded: there is nothing to upload plates to until the
+  // compositor exists (#7), and `kNoPackHash` is how a replay says so without
+  // making every load warn.
+  header.pack_hash = replay::kNoPackHash;
+  header.final_world_hash = final_hash;
+
+  std::vector<std::byte> image(replay::image_bytes(static_cast<std::uint32_t>(records.size())));
+  if (const auto res = replay::assemble(header, records, image); !res) {
+    std::cerr << "gloam_replay: cannot assemble the replay: " << replay::describe(res.error)
+              << " (record " << res.record_index << ")\n";
+    return EXIT_FAILURE;
+  }
+
+  std::ofstream out(output, std::ios::binary | std::ios::trunc);
+  if (!out) {
+    std::cerr << "gloam_replay: cannot open '" << output << "' for writing\n";
+    return EXIT_FAILURE;
+  }
+  out.write(reinterpret_cast<const char*>(image.data()), static_cast<std::streamsize>(image.size()));
+  out.close();
+  if (!out) {
+    std::cerr << "gloam_replay: writing '" << output << "' failed\n";
+    return EXIT_FAILURE;
+  }
+
+  const auto hex = hex_of(final_hash);
+  if (quiet) {
+    std::cout << hex << '\n';
+  } else {
+    std::cout << "wrote " << output << " — " << image.size() << " B, " << records.size()
+              << " records, " << world.tick << " ticks\n"
+              << "final world hash " << hex << '\n';
+  }
+  return EXIT_SUCCESS;
+}
+
+auto do_play(const std::string& path, bool quiet) -> int {
+  using namespace gloam;
+  const Tuning& tuning = kDefaultTuning;
+
+  std::vector<std::byte> image;
+  if (!slurp(path, image)) return EXIT_FAILURE;
+
+  replay::Header probe{};
+  if (const auto res = replay::read_header(image, probe); !res) {
+    std::cerr << "gloam_replay: '" << path << "': " << replay::describe(res.error) << '\n';
+    return EXIT_FAILURE;
+  }
+
+  std::vector<replay::Record> records(probe.record_count);
+  replay::Header header{};
+  const replay::Expect expect{ruleset_hash(tuning), replay::kNoPackHash};
+  const auto res = replay::load(image, expect, header, records);
+  if (!res) {
+    std::cerr << "gloam_replay: '" << path << "': " << replay::describe(res.error);
+    if (res.record_index != 0) std::cerr << " (record " << res.record_index << ")";
+    std::cerr << '\n';
+    return EXIT_FAILURE;
+  }
+
+  // SCHEMAS.md §3: art changes do not affect simulation. Advisory, on stderr,
+  // and the replay runs anyway.
+  if (res.pack_hash_mismatch) {
+    std::cerr << "gloam_replay: warning: '" << path
+              << "' was recorded against a different asset pack; art does not affect the "
+                 "simulation, so this is advisory\n";
+  }
+
+  auto world = corridor_world();
+
+  // THE WORLD IS NOT IN THE FILE YET, SO REFUSE THE ONES WE CANNOT BUILD.
+  //
+  // `replay.gloam` carries the seed but not the level or the monster roster —
+  // there is no `level.gloam` reader, so `play` can only ever run against the
+  // scenario compiled in above. Left unchecked, a replay recorded from any
+  // other world loads cleanly, replays against the wrong one, reaches a
+  // different hash, and gets reported as `WorldHashMismatch`: "a regression,
+  // not a flake". The harness would be diagnosing a determinism bug for a file
+  // it simply refused to set up correctly — the exact misdiagnosis §12's
+  // ruleset gate exists to prevent, one field over. Better to say plainly that
+  // this build cannot construct that world.
+  if (header.seed != world.seed) {
+    std::cerr << "gloam_replay: '" << path << "' was recorded against seed 0x" << std::hex
+              << header.seed << ", and this build can only reconstruct 0x" << world.seed << std::dec
+              << ".\nThe replay format does not carry the level or the monster roster yet, so "
+                 "there is no world to replay it against. This is a limitation, NOT a "
+                 "determinism regression.\n";
+    return EXIT_FAILURE;
+  }
+
+  play(world, records, tuning);
+  const auto reached = world_hash(world);
+
+  const auto hex = hex_of(reached);
+  if (quiet) {
+    std::cout << hex << '\n';
+  } else {
+    std::cout << "replayed " << records.size() << " records over " << world.tick << " ticks\n"
+              << "final world hash " << hex << '\n';
+  }
+
+  if (reached != header.final_world_hash) {
+    std::cerr << "gloam_replay: " << replay::describe(replay::ReplayError::WorldHashMismatch)
+              << "\n  expected " << hex_of(header.final_world_hash) << "\n  reached  " << hex
+              << "\nA nondeterministic simulation has no correct behaviour to fall back to "
+                 "(TEST-PLAN.md §2): this is a regression, not a flake.\n";
+    return EXIT_FAILURE;
+  }
+  return EXIT_SUCCESS;
+}
+
+auto do_verify(const std::string& path) -> int {
+  std::vector<std::byte> image;
+  if (!slurp(path, image)) return EXIT_FAILURE;
+
+  const auto res = gloam::replay::verify(image);
+  if (!res) {
+    std::cerr << "gloam_replay: '" << path << "': " << gloam::replay::describe(res.error);
+    if (res.record_index != 0) std::cerr << " (record " << res.record_index << ")";
+    std::cerr << '\n';
+    return EXIT_FAILURE;
+  }
+
+  gloam::replay::Header header{};
+  static_cast<void>(gloam::replay::read_header(image, header));
+  std::cout << path << ": intact — " << image.size() << " B, " << header.record_count
+            << " records, tick_hz " << header.tick_hz << '\n'
+            << "  final world hash " << hex_of(header.final_world_hash) << '\n';
+  return EXIT_SUCCESS;
+}
+
+}  // namespace
+
+auto main(int argc, char** argv) -> int {
+  std::string mode;
+  std::string path;
+  std::string output = kDefaultOutput;
+  bool quiet = false;
+
+  for (int i = 1; i < argc; ++i) {
+    const std::string arg = argv[i];
+
+    if (arg == "--help" || arg == "-h") {
+      usage();
+      return EXIT_SUCCESS;
+    }
+    if (arg == "--version") {
+      std::cout << gloam::version_string() << '\n';
+      return EXIT_SUCCESS;
+    }
+    if (arg == "--quiet") {
+      quiet = true;
+      continue;
+    }
+    if (arg == "-o") {
+      if (i + 1 >= argc) {
+        std::cerr << "gloam_replay: " << arg << " needs a path\n";
+        return EXIT_FAILURE;
+      }
+      output = argv[++i];
+      continue;
+    }
+    if (arg == "record" || arg == "play" || arg == "verify") {
+      if (!mode.empty()) {
+        std::cerr << "gloam_replay: '" << mode << "' and '" << arg
+                  << "' are two modes; pick one\n";
+        return EXIT_FAILURE;
+      }
+      mode = arg;
+      continue;
+    }
+    if (!arg.empty() && arg.front() == '-') {
+      std::cerr << "gloam_replay: unrecognised argument '" << arg << "'\n";
+      usage();
+      return EXIT_FAILURE;
+    }
+    if (!path.empty()) {
+      std::cerr << "gloam_replay: '" << path << "' and '" << arg
+                << "' are two paths; pick one\n";
+      return EXIT_FAILURE;
+    }
+    path = arg;
+  }
+
+  if (mode.empty()) {
+    std::cerr << "gloam_replay: no mode given\n";
+    usage();
+    return EXIT_FAILURE;
+  }
+  if (mode == "record") return do_record(output, quiet);
+
+  if (path.empty()) {
+    std::cerr << "gloam_replay: " << mode << " needs a path\n";
+    return EXIT_FAILURE;
+  }
+  if (mode == "play") return do_play(path, quiet);
+  return do_verify(path);
+}

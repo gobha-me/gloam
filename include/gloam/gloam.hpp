@@ -16,9 +16,11 @@
 ///
 /// WHAT THIS UMBRELLA DELIBERATELY LEAVES OUT
 ///
-/// Ten headers ship in `include/gloam/` and are NOT included below. That is a
-/// decision, not an oversight, and it is written down here so the next person
-/// does not helpfully "fix" it:
+/// Ten headers ship in `include/gloam/` and are NOT included below. Nine of
+/// them are listed here; `sha256.hpp` is the tenth and has its own paragraph at
+/// the end, because it is the one that arrives anyway. That is a decision, not
+/// an oversight, and it is written down here so the next person does not
+/// helpfully "fix" it:
 ///
 ///   budgets.hpp    §11's numbers, as constants and assertions
 ///   layer.hpp      §4.5's compositing bands and the z-index policy over them
@@ -28,17 +30,16 @@
 ///   plate.hpp      §10's palette, as two bit-packed planes over a caller's blob
 ///   lightfield.hpp §4.4's six full-frame screen-door fields
 ///   pack.hpp       §12's `pack.manifest`, and the bytes it describes
-///   sha256.hpp     the digest §10 makes a startup gate
 ///   assets.hpp     the pack's content manifest — what actually goes in it
 ///
-/// The first four are render-side; the last six are the offline asset pipeline
-/// (§10). All ten are inside `gloam::lib` because they are pure — integers and
+/// The first four are render-side; the last five are the offline asset pipeline
+/// (§10). All nine are inside `gloam::lib` because they are pure — integers and
 /// bytes, no clock, no file descriptor, no global, nothing beyond the standard
 /// library — and because tests link only `${PROJECT_NAME}::lib`. PRODUCING bytes
 /// is not the same as needing a terminal; WRITING them is, and that write lives
 /// in `src/bin/`.
 ///
-/// The pipeline six earn their place the same way and one way more: none of
+/// The pipeline five earn their place the same way and one way more: none of
 /// them OWNS a plate. Every entry point takes a caller-owned span and says how
 /// large to make it, so the "image ownership" objection `kitty.hpp` raises
 /// against a transmit path does not apply — the buffers live in
@@ -49,6 +50,18 @@
 /// every consumer's translation unit — including the headless diagnostic in
 /// `src/bin/main.cpp` — is the wrong default. Include them by name when you want
 /// them.
+///
+/// `sha256.hpp` is the tenth, and it is a special case in both directions. It
+/// is not `#include`d below — so it is genuinely off the list above — but it
+/// reaches every consumer anyway, transitively through `replay.hpp` and
+/// `world.hpp`, because both name `hash::Digest` in their own interfaces.
+///
+/// Its old justification was "pipeline-side, not simulation". That stopped
+/// being true when `world_hash` arrived: TEST-PLAN.md §2 defines a golden
+/// replay in terms of a digest over simulation state, so the hash is now
+/// load-bearing on both sides of the house. The sentence is corrected rather
+/// than quietly left to rot, because a justification that has become false is
+/// worse than none — the next person believes it.
 
 #include <cstdint>
 
@@ -56,10 +69,12 @@
 #include "gloam/level.hpp"
 #include "gloam/noise.hpp"
 #include "gloam/perception.hpp"
+#include "gloam/replay.hpp"
 #include "gloam/rng.hpp"
 #include "gloam/runes.hpp"
 #include "gloam/spells.hpp"
 #include "gloam/tuning.hpp"
+#include "gloam/world.hpp"
 
 namespace gloam {
 

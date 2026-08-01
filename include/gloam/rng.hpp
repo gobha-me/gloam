@@ -17,6 +17,7 @@
 ///     hash on BOTH compilers, so the bounded draw is spelled out here in
 ///     fixed-width integer arithmetic that has exactly one answer.
 
+#include <cstddef>
 #include <cstdint>
 
 namespace gloam {
@@ -33,6 +34,13 @@ enum class Stream : std::uint64_t {
   Inscription = 7,///< rune inscription placement (§8.3)
   Ambience = 8,   ///< non-simulation flavour; never feeds back into sim state
 };
+
+/// How many streams exist. `world.hpp` carries one saved state per stream, so
+/// this is the width of a replay's RNG snapshot — grow it in the same commit
+/// that appends to the enum, or the new stream replays from zero.
+inline constexpr std::size_t kStreamCount = 8;
+static_assert(static_cast<std::uint64_t>(Stream::Ambience) == kStreamCount,
+              "kStreamCount must name the last stream; streams are numbered from 1");
 
 /// SplitMix64. Used both to derive a stream's seed from the world seed and as
 /// the stream's own generator: it is a bijection on 64 bits with a known-good

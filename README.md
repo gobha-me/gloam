@@ -30,6 +30,7 @@ diagnostic rather than a game. What exists is the deterministic simulation core:
 | Rune grammar, spell resolver, danger classes | §8 |
 | Budgets, wired as assertions before the code they constrain | §11 |
 | The compositing bands, and the kitty call boundary over them | §4.5, §16 |
+| `replay.gloam`, the world hash, and the golden-replay harness | §12, §13.2 |
 
 The **compositor** is still blocked upstream — see [UPSTREAM.md](UPSTREAM.md).
 termforge stretches a placed image to fill its cell rect and states that scaling
@@ -63,8 +64,26 @@ is for the **base64 transmit payload**, and a 2-bit plate expands to RGBA before
 it goes on the wire. The six light fields are 388,800 B in the pack and roughly
 5.5 MB transmitted — see [#17](https://github.com/gobha-me/gloam/issues/17).
 
-Also unblocked: the [replay harness](https://github.com/gobha-me/gloam/issues/3)
-and the [audio sink](https://github.com/gobha-me/gloam/issues/4).
+The **replay harness** ([#3](https://github.com/gobha-me/gloam/issues/3)) has
+landed, and with it build-order step 7's acceptance criterion: *a recorded
+session replays to an identical world hash on both compilers.* `gloam_replay`
+records a session to a versioned, hashed `replay.gloam` and replays it in a
+different process; `replay-deterministic` is the ctest case that does exactly
+that and compares. A replay recorded against different tuning is **rejected** at
+load rather than mis-played, because §12 is explicit that otherwise a golden
+test starts passing for the wrong reason — while a `pack_hash` mismatch only
+warns, because art cannot affect the simulation.
+
+That needed something the tree did not have: an aggregate to hash. `gloam::World`
+is deliberately the smallest one that can be replayed — a party coordinate, a
+lamp level, a level, N monsters, the eight RNG states — and it is exactly what
+the reference tick in `test/10budgets/` was already assembling by hand. It does
+not open §7's party or §8's magic; BUILD-ORDER step 10 is explicit that those
+wait for the M0 gate. The budget case now calls the same `advance()` the replay
+does, so the measured tick and the replayed tick cannot drift apart.
+
+Still unblocked and unstarted: the
+[audio sink](https://github.com/gobha-me/gloam/issues/4).
 
 ## Design
 
@@ -97,25 +116,33 @@ Three commitments shape almost every file:
 
 ```
 design/           the specification the code cites — a snapshot; see design/README.md
-include/gloam/    the deterministic core's public headers, plus ten off-umbrella
+include/gloam/    the deterministic core's public headers, plus nine off-umbrella
 src/lib/          its implementation — standard library only, no I/O, no clock
-src/bin/          the diagnostic binary and gloam_bake; termforge lands here too
+src/bin/          the diagnostic binary, gloam_bake and gloam_replay; termforge
+                  lands here too
 test/             property tests (§13.3) and budget assertions (§11)
 cmake/            the template's build machinery, plus check_layer_z.cmake (§4.5),
-                  check_kitty_boundary.cmake (§16) and check_pack_repro.cmake (§10)
+                  check_kitty_boundary.cmake (§16), check_pack_repro.cmake (§10)
+                  and check_replay_determinism.cmake (§12)
 ```
 
-Ten headers in `include/gloam/` are not simulation and are deliberately left out
+Nine headers in `include/gloam/` are not simulation and are deliberately left out
 of the `gloam/gloam.hpp` umbrella: four render-side (`budgets.hpp`, `layer.hpp`,
-`emit.hpp`, `kitty.hpp`) and six for the offline pipeline (`dither.hpp`,
-`plate.hpp`, `lightfield.hpp`, `pack.hpp`, `sha256.hpp`, `assets.hpp`). They live inside the
+`emit.hpp`, `kitty.hpp`) and five for the offline pipeline (`dither.hpp`,
+`plate.hpp`, `lightfield.hpp`, `pack.hpp`, `assets.hpp`). They live inside the
 standard-library-only boundary anyway, because **producing** bytes is not the
 same as needing a terminal; the `write` that puts them on one is in `src/bin/`,
-and so is the only `open` in the pipeline. None of the pipeline six owns a
+and so is the only `open` in the pipeline. None of the pipeline five owns a
 plate — they take caller-owned spans and report the size they need, which is what
 kept image ownership out of the library when the pack format arrived.
 `gloam.hpp` says all of this at the top, so the exclusion does not read as an
 oversight.
+
+`sha256.hpp` is a tenth, and a special case: still not included by `gloam.hpp`,
+but reaching every consumer anyway through `replay.hpp` and `world.hpp`, which
+both name `hash::Digest`. Its old reason — "pipeline-side, not simulation" —
+stopped being true when `world_hash` arrived, since a digest over simulation
+state is exactly what §13.2's golden replay is defined in terms of.
 
 `gloam::lib` links nothing beyond the standard library, and that is a hard
 architectural boundary rather than a coincidence: a simulation that can reach a

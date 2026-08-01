@@ -207,9 +207,62 @@ Two more, which are design questions rather than factual errors:
      rather than by spending a palette entry, which would cost 25% of a palette
      that is the whole art direction. See `include/gloam/plate.hpp`.
 
-   Also noted there and not yet answered: `replay.gloam` carries `pack_hash:u64`
-   while the manifest carries `pack_sha256:[32]u8`. Presumably a truncation, but
-   it is not written down, and G-3 needs the answer.
+   Also noted there and now **answered** by item 8 below: `replay.gloam` carries
+   `pack_hash:u64` while the manifest carries `pack_sha256:[32]u8`.
+
+8. **`SCHEMAS.md` §3 does not fully specify `replay.gloam`, and the replay as
+   built deviates from it in two places.** Mirrored as
+   [#19](https://github.com/gobha-me/gloam/issues/19), with the `pack_hash` half
+   answered on [#16](https://github.com/gobha-me/gloam/issues/16) where it was
+   raised. Settled in `include/gloam/replay.hpp`. Five items:
+
+   - **`pack_hash:u64` is the FIRST EIGHT BYTES of the manifest's
+     `pack_sha256`, in the order they appear on disk.** This is the question
+     item 6 left open. The eight bytes `replay.gloam` carries at its offset 56
+     are byte-for-byte the eight bytes `pack.gloam` carries at its offset 8, so
+     the two files can be held up against each other in a hex dump. A fold, a
+     re-hash, or the last eight bytes would be equally uniform and none of them
+     would let someone confirm an unexpected warning by eye — which, for a field
+     that only ever warns, outweighs everything else. `kNoPackHash = 0` means
+     "no pack was loaded", which is every replay until the compositor exists.
+   - **Endianness and packing were unstated**, exactly as for the pack.
+     Little-endian, fields serialized one at a time. The helpers both formats
+     use now live in `src/lib/bytes.hpp` rather than being copied. A record is
+     **seven** bytes: §3 says "packed", and writing fields one at a time means
+     honouring that costs nothing.
+   - **Four fields are ADDED to §3's six**: `file_sha256`, `record_count` and
+     `total_bytes` are the pack's own header fields doing the pack's own job.
+     `final_world_hash` is the deviation that matters — see below.
+   - **The file carries the world hash it is supposed to reproduce.**
+     TEST-PLAN.md §2 defines a golden replay as "seed + input log → world hash
+     at tick N" and then says "keep at least one replay per bug ever filed".
+     Those compose only if the file holds all three parts; a replay carrying
+     just the seed and the inputs is half a regression test, and a bug report
+     mailed in from outside arrives with no way to say what it should have done.
+
+   - **§3 states no ceiling on `tick`, and it needs one.** `play` reaches a
+     record's tick by advancing one tick at a time, so `tick` is the field that
+     decides how much CPU a file costs — and it is a `u32`. A well-formed
+     111-byte replay whose single record sits at `0xFFFFFFFF` costs 4.29 billion
+     full-level ticks, about twenty minutes of a pinned core, on a file that
+     passes every other check including the digest. Reproduced against the real
+     binary during review. `replay::kMaxTick` is 10,000,000 (~11.5 days of game
+     time at 10 Hz) and anything past it is refused as `TickOutOfRange`. A
+     format documented to accept files "mailed in from outside" cannot leave its
+     own work bound unstated.
+
+   Two places where the simulation had to decide something §6.2 is silent about,
+   recorded here and on [#19](https://github.com/gobha-me/gloam/issues/19)
+   because they are design questions rather than code. Both are now baked into
+   `final_world_hash`, so the golden replay pins them:
+
+   - **Two emitters in one tick take the MAX, not the sum.** §3 permits two
+     records to share a tick. Summing would let an input stream manufacture
+     arbitrary loudness out of two footfalls 100 ms apart.
+   - **`creep_tick_cost` is not charged by `advance`.** §6.2 makes creeping cost
+     ticks as well as halving the noise, but there is no movement-rate model to
+     charge them against yet, so how often a `Step` may legally appear is the
+     driver's rule. `step_noise` already halves.
 
 7. **§11's cold-start payload row measures the base64 TRANSMIT payload, not the
    pack — and on the current numbers it is unreachable.** Mirrored as

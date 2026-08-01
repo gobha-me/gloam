@@ -77,6 +77,37 @@ if (TARGET ${PROJECT_NAME}_bake)
   )
 endif ()
 
+# SPEC §19 step 7 — "Accept: a recorded session replays to an identical world
+# hash on both compilers."
+#
+# test/13replay/ asserts it in process; this records in one process and replays
+# in another, through a file. Same argument as the pack gate above: a shared
+# allocator and address space can hide an uninitialised read that two processes
+# cannot. The "both compilers" half is CI's matrix running this twice.
+if (NOT TARGET ${PROJECT_NAME}_replay)
+  message(STATUS
+    "${PROJECT_NAME}_replay is not built — SPEC §19 step 7's replay-deterministic gate "
+    "will NOT run. Pair -D${PROJECT_NAME}_BUILD_BIN=OFF with the knowledge that the "
+    "out-of-process determinism check is unverified in this configuration."
+  )
+endif ()
+
+if (TARGET ${PROJECT_NAME}_replay)
+  add_test(
+    NAME replay-deterministic
+    COMMAND ${CMAKE_COMMAND}
+            -DREPLAY=$<TARGET_FILE:${PROJECT_NAME}_replay>
+            -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}
+            -P ${PROJECT_SOURCE_DIR}/cmake/check_replay_determinism.cmake
+  )
+  # The one test in the suite that runs a simulation for as long as a FILE tells
+  # it to. `replay::kMaxTick` bounds that to a few seconds, but a bound enforced
+  # only inside the thing under test is not a bound on the harness — if it ever
+  # regresses, this must fail the build rather than hang it. Everything here
+  # finishes in well under a second.
+  set_tests_properties(replay-deterministic PROPERTIES TIMEOUT 120)
+endif ()
+
 file(GLOB TEST_DIRS ${CMAKE_CURRENT_LIST_DIR}/*)
 
 # Say this once, at configure time, instead of letting it surface as a link error

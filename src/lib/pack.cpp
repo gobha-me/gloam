@@ -3,47 +3,16 @@
 #include <algorithm>
 #include <limits>
 
+#include "bytes.hpp"
 #include "gloam/geometry.hpp"
 
 namespace gloam::pack {
 namespace {
 
-// ── Little-endian, one byte at a time ──────────────────────────────────────
-//
-// Never a memcpy of a compiler struct: ABI padding would land in the digest,
-// and the digest is a build gate.
-
-auto put_u8(std::span<std::byte> out, std::size_t at, std::uint8_t v) -> void {
-  out[at] = static_cast<std::byte>(v);
-}
-
-auto put_u16(std::span<std::byte> out, std::size_t at, std::uint16_t v) -> void {
-  out[at + 0] = static_cast<std::byte>(v & 0xFFU);
-  out[at + 1] = static_cast<std::byte>((v >> 8) & 0xFFU);
-}
-
-auto put_u32(std::span<std::byte> out, std::size_t at, std::uint32_t v) -> void {
-  out[at + 0] = static_cast<std::byte>(v & 0xFFU);
-  out[at + 1] = static_cast<std::byte>((v >> 8) & 0xFFU);
-  out[at + 2] = static_cast<std::byte>((v >> 16) & 0xFFU);
-  out[at + 3] = static_cast<std::byte>((v >> 24) & 0xFFU);
-}
-
-[[nodiscard]] auto get_u8(std::span<const std::byte> in, std::size_t at) -> std::uint8_t {
-  return static_cast<std::uint8_t>(in[at]);
-}
-
-[[nodiscard]] auto get_u16(std::span<const std::byte> in, std::size_t at) -> std::uint16_t {
-  return static_cast<std::uint16_t>(static_cast<std::uint16_t>(get_u8(in, at)) |
-                                    static_cast<std::uint16_t>(get_u8(in, at + 1) << 8));
-}
-
-[[nodiscard]] auto get_u32(std::span<const std::byte> in, std::size_t at) -> std::uint32_t {
-  return static_cast<std::uint32_t>(get_u8(in, at)) |
-         (static_cast<std::uint32_t>(get_u8(in, at + 1)) << 8) |
-         (static_cast<std::uint32_t>(get_u8(in, at + 2)) << 16) |
-         (static_cast<std::uint32_t>(get_u8(in, at + 3)) << 24);
-}
+// Little-endian, one byte at a time — see src/lib/bytes.hpp for why. These were
+// this file's own until `replay.cpp` needed the same six plus a u64 version;
+// two copies of a format writer's primitives is one copy too many.
+using namespace le;  // NOLINT(google-build-using-namespace)
 
 /// Field offsets, named once. A layout typo in two places is a layout typo that
 /// round-trips cleanly and corrupts nothing until someone else's reader tries.
@@ -131,9 +100,7 @@ auto write_header(std::span<std::byte> out, const Header& header) -> PackResult 
   }
   put_u16(out, hdr::kVersion, header.version);
   put_u16(out, hdr::kReserved0, 0);
-  for (std::size_t i = 0; i < header.pack_sha256.size(); ++i) {
-    put_u8(out, hdr::kDigest + i, header.pack_sha256[i]);
-  }
+  put_digest(out, hdr::kDigest, header.pack_sha256);
   put_u16(out, hdr::kPlateCount, header.plate_count);
   put_u16(out, hdr::kReserved1, 0);
   put_u32(out, hdr::kTotalBytes, header.total_bytes);
@@ -155,9 +122,7 @@ auto write_record(std::span<std::byte> out, const Record& record) -> PackResult 
   put_u16(out, rec::kHeight, record.h);
   put_u32(out, rec::kOffset, record.offset);
   put_u32(out, rec::kLength, record.length);
-  for (std::size_t i = 0; i < record.sha256.size(); ++i) {
-    put_u8(out, rec::kDigest + i, record.sha256[i]);
-  }
+  put_digest(out, rec::kDigest, record.sha256);
 
   return {PackError::None, kRecordBytes, 0};
 }
@@ -177,9 +142,7 @@ auto read_header(std::span<const std::byte> in, Header& out) -> PackResult {
   if (get_u16(in, hdr::kReserved0) != 0) return {PackError::ReservedNotZero, 0, 0};
   if (get_u16(in, hdr::kReserved1) != 0) return {PackError::ReservedNotZero, 0, 0};
 
-  for (std::size_t i = 0; i < h.pack_sha256.size(); ++i) {
-    h.pack_sha256[i] = get_u8(in, hdr::kDigest + i);
-  }
+  h.pack_sha256 = get_digest(in, hdr::kDigest);
   h.plate_count = get_u16(in, hdr::kPlateCount);
   if (h.plate_count == 0) return {PackError::ZeroPlates, 0, 0};
   h.total_bytes = get_u32(in, hdr::kTotalBytes);
@@ -219,9 +182,7 @@ auto read_record(std::span<const std::byte> in, Record& out) -> PackResult {
   r.h = get_u16(in, rec::kHeight);
   r.offset = get_u32(in, rec::kOffset);
   r.length = get_u32(in, rec::kLength);
-  for (std::size_t i = 0; i < r.sha256.size(); ++i) {
-    r.sha256[i] = get_u8(in, rec::kDigest + i);
-  }
+  r.sha256 = get_digest(in, rec::kDigest);
 
   out = r;
   return {PackError::None, kRecordBytes, 0};
@@ -285,9 +246,7 @@ auto assemble(std::span<Record> records, std::span<const std::span<const std::by
   // Last, over everything the digest covers — which now includes the records
   // just written and every padding byte between blobs.
   const auto digest = hash::sha256(out.subspan(kDigestCoverageStart, total - kDigestCoverageStart));
-  for (std::size_t i = 0; i < digest.size(); ++i) {
-    put_u8(out, kDigestOffset + i, digest[i]);
-  }
+  put_digest(out, kDigestOffset, digest);
 
   return {PackError::None, total, 0};
 }
