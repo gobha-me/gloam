@@ -16,28 +16,39 @@
 ///
 /// WHAT THIS UMBRELLA DELIBERATELY LEAVES OUT
 ///
-/// Ten headers ship in `include/gloam/` and are NOT included below. Nine of
-/// them are listed here; `sha256.hpp` is the tenth and has its own paragraph at
-/// the end, because it is the one that arrives anyway. That is a decision, not
-/// an oversight, and it is written down here so the next person does not
+/// Eleven headers ship in `include/gloam/` and are NOT included below. Ten of
+/// them are listed here; `sha256.hpp` is the eleventh and has its own paragraph
+/// at the end, because it is the one that arrives anyway. That is a decision,
+/// not an oversight, and it is written down here so the next person does not
 /// helpfully "fix" it:
 ///
 ///   budgets.hpp    §11's numbers, as constants and assertions
 ///   layer.hpp      §4.5's compositing bands and the z-index policy over them
 ///   emit.hpp       the byte sink §13.4's budget counters wrap around
 ///   kitty.hpp      the kitty call boundary — every escape sequence, one module
+///   audio.hpp      §9's voice ring, and the gain/pan derivation over §6.2
 ///   dither.hpp     §4.3's fixed ordered matrix, and the one comparison
 ///   plate.hpp      §10's palette, as two bit-packed planes over a caller's blob
 ///   lightfield.hpp §4.4's six full-frame screen-door fields
 ///   pack.hpp       §12's `pack.manifest`, and the bytes it describes
 ///   assets.hpp     the pack's content manifest — what actually goes in it
 ///
-/// The first four are render-side; the last five are the offline asset pipeline
-/// (§10). All nine are inside `gloam::lib` because they are pure — integers and
-/// bytes, no clock, no file descriptor, no global, nothing beyond the standard
-/// library — and because tests link only `${PROJECT_NAME}::lib`. PRODUCING bytes
-/// is not the same as needing a terminal; WRITING them is, and that write lives
-/// in `src/bin/`.
+/// The first four are render-side; `audio.hpp` is §9; the last five are the
+/// offline asset pipeline (§10). All ten are inside `gloam::lib` because they
+/// are pure — integers and bytes, no clock, no file descriptor, no global,
+/// nothing beyond the standard library — and because tests link only
+/// `${PROJECT_NAME}::lib`. PRODUCING bytes is not the same as needing a
+/// terminal; WRITING them is, and that write lives in `src/bin/`.
+///
+/// `audio.hpp` is the one whose NAME argues hardest against its placement, so it
+/// gets a sentence: what is in `gloam::lib` is the SPSC ring, the command type
+/// and the arithmetic that turns §6.2's propagation into a gain and a pan. The
+/// RtAudio stream is a device and lives in `src/bin/`, exactly as §9.3 asks
+/// ("RtAudio stays behind one translation unit"). It stays off this umbrella
+/// even so, because `advance` names `audio::Sink` only through a POINTER —
+/// `world.hpp` forward-declares it — and there is no reason for a translation
+/// unit that merely ticks a world to compile a `std::atomic` ring it will never
+/// touch. Include it by name when you want it.
 ///
 /// The pipeline five earn their place the same way and one way more: none of
 /// them OWNS a plate. Every entry point takes a caller-owned span and says how

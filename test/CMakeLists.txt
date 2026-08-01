@@ -106,6 +106,25 @@ if (TARGET ${PROJECT_NAME}_replay)
   # regresses, this must fail the build rather than hang it. Everything here
   # finishes in well under a second.
   set_tests_properties(replay-deterministic PROPERTIES TIMEOUT 120)
+
+  # SPEC §19 step 9 — "Accept: `--mute` and unmuted runs produce identical
+  # replays."
+  #
+  # test/16audiosim/ asserts the identity in process; this records and replays
+  # the same session both ways in separate processes and compares the artifacts.
+  # Same argument as the two gates above — a shared allocator and address space
+  # can mask a difference that two processes cannot.
+  #
+  # It needs no audio device and never will: gloam::audio is standard library and
+  # gloam_replay does not link RtAudio. See the header of check_audio_mute.cmake.
+  add_test(
+    NAME audio-mute-identical
+    COMMAND ${CMAKE_COMMAND}
+            -DREPLAY=$<TARGET_FILE:${PROJECT_NAME}_replay>
+            -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}
+            -P ${PROJECT_SOURCE_DIR}/cmake/check_audio_mute.cmake
+  )
+  set_tests_properties(audio-mute-identical PROPERTIES TIMEOUT 120)
 endif ()
 
 file(GLOB TEST_DIRS ${CMAKE_CURRENT_LIST_DIR}/*)
@@ -189,6 +208,22 @@ foreach(TEST_DIR ${TEST_DIRS})
 
   set_tests_properties(${TEST_NAME} PROPERTIES FIXTURES_REQUIRED runners)
 endforeach()
+
+# SPEC §9.2 — "a full ring drops the command and increments a counter. It never
+# blocks."
+#
+# A ring that blocks does not fail this suite, it HANGS it, and a hung runner is
+# a worse outcome than a red one because nothing reports it. The timeout turns
+# the one failure mode §9.2 names into an ordinary test failure. Same argument as
+# replay-deterministic's timeout below; everything here finishes in about a
+# second, TSan included.
+#
+# Set here rather than in test/15voicering/CMakeLists.txt because add_test runs
+# in the loop above, AFTER that subdirectory is processed — the test does not
+# exist yet at the point the subdirectory could name it.
+if (TEST 15voicering-test)
+  set_tests_properties(15voicering-test PROPERTIES TIMEOUT 120)
+endif ()
 
 # SET FIXTURE DEPENDENCIES
 set_tests_properties(startup PROPERTIES FIXTURES_SETUP runners)

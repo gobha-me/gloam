@@ -28,6 +28,10 @@
 #include <string>
 #include <vector>
 
+// By name, because `world.hpp` only forward-declares `audio::Sink` — see the
+// umbrella note in `gloam.hpp`. This binary constructs a real sink, so it needs
+// the definition.
+#include "gloam/audio.hpp"
 #include "gloam/gloam.hpp"
 #include "gloam/replay.hpp"
 #include "gloam/world.hpp"
@@ -37,8 +41,8 @@ namespace {
 constexpr auto kDefaultOutput = "replay.gloam";
 
 auto usage() -> void {
-  std::cout << "usage: gloam_replay record [-o PATH] [--quiet]\n"
-            << "       gloam_replay play PATH [--quiet]\n"
+  std::cout << "usage: gloam_replay record [-o PATH] [--quiet] [--audio]\n"
+            << "       gloam_replay play PATH [--quiet] [--audio]\n"
             << "       gloam_replay verify PATH\n"
             << "\n"
             << "Records and replays a GLOAM session (SPEC §12). A replay recorded\n"
@@ -48,9 +52,45 @@ auto usage() -> void {
             << "  play PATH      replay PATH and check it reaches the hash it carries\n"
             << "  verify PATH    check the container only; do not simulate\n"
             << "  -o PATH        write the replay here (default: " << kDefaultOutput << ")\n"
+            << "  --audio        attach a §9 voice sink; report its counters on stderr\n"
+            << "  --mute         no voice sink at all (the default)\n"
             << "  --quiet        print only the final world hash\n"
             << "  --version      print the version and exit\n";
 }
+
+/// Run a session with a §9 sink attached and report what it heard, on stderr.
+///
+/// THIS BINARY NEVER LINKS RtAudio, AND THAT IS DELIBERATE. `gloam::audio`'s
+/// ring and mix are standard library, so a device-free sink costs nothing and
+/// needs nothing; the RtAudio stream belongs to `src/bin/main.cpp` for the same
+/// reason `record` and `play` live here rather than behind a flag on the game.
+/// Putting a device in the determinism harness would be exactly the mistake this
+/// file's header argues against one paragraph up.
+///
+/// Counters go to STDERR because stdout is the world hash and nothing else —
+/// `check_replay_determinism.cmake` and `check_audio_mute.cmake` both compare it
+/// verbatim.
+struct AudioRun {
+  gloam::audio::RecordingSink<> sink{};
+  std::uint64_t footfalls{0};
+  std::uint64_t stings{0};
+
+  /// Drain what the simulation queued, as the audio callback would.
+  auto drain() -> void {
+    gloam::audio::Command c{};
+    while (sink.ring().try_pop(c)) {
+      if (c.sound == gloam::audio::SoundId::PartyFootfall) ++footfalls;
+      if (c.sound == gloam::audio::SoundId::HuntingSting) ++stings;
+    }
+  }
+
+  auto report(const char* what) -> void {
+    drain();
+    std::cerr << "gloam_replay: " << what << " voices=" << sink.ring().pushed()
+              << " dropped=" << sink.ring().dropped() << " footfalls=" << footfalls
+              << " stings=" << stings << '\n';
+  }
+};
 
 [[nodiscard]] auto hex_of(const gloam::hash::Digest& d) -> std::string {
   const auto h = gloam::hash::to_hex(d);
@@ -137,14 +177,20 @@ auto usage() -> void {
   return true;
 }
 
-auto do_record(const std::string& output, bool quiet) -> int {
+auto do_record(const std::string& output, bool quiet, bool audio) -> int {
   using namespace gloam;
   const Tuning& tuning = kDefaultTuning;
 
   const auto records = scripted_session();
   auto world = corridor_world();
   const auto seed = world.seed;
-  play(world, records, tuning);
+
+  // §19 step 9's acceptance criterion is that these two paths produce IDENTICAL
+  // replays. Not similar, not equivalent — the same bytes and the same hash.
+  AudioRun heard;
+  play(world, records, tuning, audio ? &heard.sink : nullptr);
+  if (audio) heard.report("recorded");
+
   const auto final_hash = world_hash(world);
 
   replay::Header header{};
@@ -186,7 +232,7 @@ auto do_record(const std::string& output, bool quiet) -> int {
   return EXIT_SUCCESS;
 }
 
-auto do_play(const std::string& path, bool quiet) -> int {
+auto do_play(const std::string& path, bool quiet, bool audio) -> int {
   using namespace gloam;
   const Tuning& tuning = kDefaultTuning;
 
@@ -240,7 +286,10 @@ auto do_play(const std::string& path, bool quiet) -> int {
     return EXIT_FAILURE;
   }
 
-  play(world, records, tuning);
+  AudioRun heard;
+  play(world, records, tuning, audio ? &heard.sink : nullptr);
+  if (audio) heard.report("replayed");
+
   const auto reached = world_hash(world);
 
   const auto hex = hex_of(reached);
@@ -288,6 +337,7 @@ auto main(int argc, char** argv) -> int {
   std::string path;
   std::string output = kDefaultOutput;
   bool quiet = false;
+  bool audio = false;
 
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
@@ -302,6 +352,18 @@ auto main(int argc, char** argv) -> int {
     }
     if (arg == "--quiet") {
       quiet = true;
+      continue;
+    }
+    if (arg == "--audio") {
+      audio = true;
+      continue;
+    }
+    // Accepted and does nothing, because nothing is what it means: `--mute` is
+    // the default. Spelled out rather than rejected so that the two halves of
+    // §19 step 9's criterion can be written as a symmetric pair of commands —
+    // `--mute` against `--audio` — instead of a flag against its own absence.
+    if (arg == "--mute") {
+      audio = false;
       continue;
     }
     if (arg == "-o") {
@@ -339,12 +401,12 @@ auto main(int argc, char** argv) -> int {
     usage();
     return EXIT_FAILURE;
   }
-  if (mode == "record") return do_record(output, quiet);
+  if (mode == "record") return do_record(output, quiet, audio);
 
   if (path.empty()) {
     std::cerr << "gloam_replay: " << mode << " needs a path\n";
     return EXIT_FAILURE;
   }
-  if (mode == "play") return do_play(path, quiet);
+  if (mode == "play") return do_play(path, quiet, audio);
   return do_verify(path);
 }

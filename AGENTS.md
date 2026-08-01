@@ -43,6 +43,23 @@ issue so the call gets made rather than absorbed.
    are deliberately excluded from the `gloam/gloam.hpp` umbrella — that header
    says so, and says why.
 
+   **`audio.hpp` is the same split, and the one whose name argues hardest against
+   it.** §9's *sink* is a device and belongs in `src/bin/`; what lives in the
+   library is the SPSC voice ring, the `VoiceCommand` type and the arithmetic
+   that turns §6.2's propagation into a gain and a pan. Producing a voice command
+   is not needing a device; playing it is. Two consequences worth knowing before
+   you move anything: the ring is only audited by the sanitizer matrix *because*
+   it is library-side (a lock-free queue behind a device nobody in CI has is a
+   queue nothing checks), and `world.hpp` names `audio::Sink` through a
+   **forward declaration** so that ticking a world does not drag a `std::atomic`
+   ring into every translation unit.
+
+   `gloam::audio::saturating_add` is a deliberate three-line duplicate of
+   `gloam::emit::saturating_add`. Do not "fix" it by including `emit.hpp`: that
+   would pull the byte sink through `world.hpp` into every consumer and silently
+   reverse the umbrella exclusion the header documents by name. If a third copy
+   ever appears, that is the moment to give them a shared home.
+
 2. **No floating point in simulation state.** §6 is explicit: "Every number
    below is an integer." Where the design prose says a multiplier — creep is
    "× 0.5", ESK is "cast noise halved" — it is spelled as an explicit
