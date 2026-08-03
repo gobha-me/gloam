@@ -225,6 +225,18 @@ if (TEST 15voicering-test)
   set_tests_properties(15voicering-test PROPERTIES TIMEOUT 120)
 endif ()
 
+# Same argument, different failure mode. test/18ttywrite/ is the only suite that
+# drives real file descriptors, and BUDGETS.md's "what actually left the process"
+# is measured by filling a pipe on purpose. A write to a pipe nobody drains
+# BLOCKS; a `classify` regression that turned a stall into a retry LOOPS. Neither
+# is a test failure without this line, and both are worse than one.
+#
+# Set here rather than in that directory's own CMakeLists.txt for the reason
+# above: add_test runs in the loop, after the subdirectory is processed.
+if (TEST 18ttywrite-test)
+  set_tests_properties(18ttywrite-test PROPERTIES TIMEOUT 120)
+endif ()
+
 # SET FIXTURE DEPENDENCIES
 set_tests_properties(startup PROPERTIES FIXTURES_SETUP runners)
 set_tests_properties(shutdown PROPERTIES FIXTURES_CLEANUP runners)

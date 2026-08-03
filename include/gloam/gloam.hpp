@@ -16,15 +16,16 @@
 ///
 /// WHAT THIS UMBRELLA DELIBERATELY LEAVES OUT
 ///
-/// Eleven headers ship in `include/gloam/` and are NOT included below. Ten of
-/// them are listed here; `sha256.hpp` is the eleventh and has its own paragraph
+/// Twelve headers ship in `include/gloam/` and are NOT included below. Eleven of
+/// them are listed here; `sha256.hpp` is the twelfth and has its own paragraph
 /// at the end, because it is the one that arrives anyway. That is a decision,
 /// not an oversight, and it is written down here so the next person does not
 /// helpfully "fix" it:
 ///
 ///   budgets.hpp    §11's numbers, as constants and assertions
 ///   layer.hpp      §4.5's compositing bands and the z-index policy over them
-///   emit.hpp       the byte sink §13.4's budget counters wrap around
+///   emit.hpp       the byte sink §11's budget counters wrap around
+///   meter.hpp      §11's per-frame classes, and the p95 over their history
 ///   kitty.hpp      the kitty call boundary — every escape sequence, one module
 ///   audio.hpp      §9's voice ring, and the gain/pan derivation over §6.2
 ///   dither.hpp     §4.3's fixed ordered matrix, and the one comparison
@@ -33,8 +34,8 @@
 ///   pack.hpp       §12's `pack.manifest`, and the bytes it describes
 ///   assets.hpp     the pack's content manifest — what actually goes in it
 ///
-/// The first four are render-side; `audio.hpp` is §9; the last five are the
-/// offline asset pipeline (§10). All ten are inside `gloam::lib` because they
+/// The first five are render-side; `audio.hpp` is §9; the last five are the
+/// offline asset pipeline (§10). All eleven are inside `gloam::lib` because they
 /// are pure — integers and bytes, no clock, no file descriptor, no global,
 /// nothing beyond the standard library — and because tests link only
 /// `${PROJECT_NAME}::lib`. PRODUCING bytes is not the same as needing a
@@ -62,7 +63,7 @@
 /// `src/bin/main.cpp` — is the wrong default. Include them by name when you want
 /// them.
 ///
-/// `sha256.hpp` is the tenth, and it is a special case in both directions. It
+/// `sha256.hpp` is the twelfth, and it is a special case in both directions. It
 /// is not `#include`d below — so it is genuinely off the list above — but it
 /// reaches every consumer anyway, transitively through `replay.hpp` and
 /// `world.hpp`, because both name `hash::Digest` in their own interfaces.

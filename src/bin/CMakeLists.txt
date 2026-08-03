@@ -1,5 +1,10 @@
+# tty_writer.cpp is the only file in GLOAM that calls write(2), and it is here
+# rather than in src/lib/ for the reason AGENTS.md rule 1 gives: producing bytes
+# is not needing a terminal, writing them is. It joins this target and NOT bake
+# or replay — those own file descriptors, but never a terminal.
 add_executable(${PROJECT_NAME}
   main.cpp
+  tty_writer.cpp
 )
 
 # PROJECT_SOURCE_DIR, not CMAKE_SOURCE_DIR: the latter is the top-level build's

@@ -8,13 +8,26 @@
 // M0's corridor through the real perception model so the numbers in §6 can be
 // read rather than trusted.
 //
-// Standard library only. This binary will grow a termforge dependency; it must
-// not grow one that reaches back into gloam::lib's determinism.
+// Standard library only, apart from the one POSIX write in tty_writer.hpp. This
+// binary will grow a termforge dependency; it must not grow one that reaches
+// back into gloam::lib's determinism.
+
+#include <signal.h>
+#include <unistd.h>  // STDOUT_FILENO — do not lean on libstdc++ leaking it
 
 #include <cstdio>
+#include <string>
 #include <string_view>
 
+#include "gloam/budgets.hpp"
+#include "gloam/emit.hpp"
+#include "gloam/geometry.hpp"
 #include "gloam/gloam.hpp"
+#include "gloam/kitty.hpp"
+#include "gloam/layer.hpp"
+#include "gloam/meter.hpp"
+#include "gloam/replay.hpp"
+#include "tty_writer.hpp"
 
 namespace {
 
@@ -43,6 +56,112 @@ void print_ruleset() {
   std::printf("  tunables      %zu integers, no floats\n", kTuningFieldCount);
   std::printf("  ruleset_hash  0x%016llx\n", static_cast<unsigned long long>(hash));
   std::printf("                a replay recorded under a different hash is rejected at load\n");
+}
+
+/// Build-order step 4: "Counters on the emit path and the upload path, printed
+/// every run."
+///
+/// Printed through gloam::tty::write_all rather than printf, because this is the
+/// process's ONE write syscall and the byte figure it reports has to be a real
+/// measurement rather than a decoration. AGENTS.md has promised for two releases
+/// that "the write that puts those bytes on a terminal stays in src/bin/, and
+/// that one line is the whole terminal-facing surface"; this is that line.
+///
+/// It does NOT print a p95. There is no compositor and therefore no session, and
+/// a shipped binary that printed a synthetic percentile would be quoted back as
+/// a measurement inside a month. What it prints instead is the wire form —
+/// measured here, in this binary, by emitting a real placement — and the two
+/// rules that were undecided until now.
+auto print_instruments() -> bool {
+  // The measurement: one placement through the real emitter, at §3.2's
+  // reference cell. Not a quoted constant.
+  //
+  // The field values are REPRESENTATIVE rather than minimal, and that is the
+  // difference between a useful line and a flattering one. Every integer here
+  // is `to_chars`'d, so an id of 1 at cell (0,0) is the cheapest placement that
+  // can exist — measuring it would print 64 B and derive a headroom of 32, when
+  // §4.2's own slot inventory measures 66.5 B and 30. A 6% optimistic figure on
+  // the exact quantity gloam#26's 1.6% overrun turns on is worse than no figure.
+  emit::ByteSink probe;
+  const kitty::Placement sample{
+      .image_id = 103,
+      .placement_id = 103,
+      .band = layer::Band::Geometry,
+      .band_rank = 0,
+      .cell_col = 24,
+      .cell_row = 11,
+      .offset_x_px = 0,
+      .offset_y_px = 0,
+      .crop_x = 0,
+      .crop_y = 0,
+      .crop_w = geometry::kDepths[0].width,
+      .crop_h = geometry::kDepths[0].height,
+  };
+  const auto placed = kitty::emit_placement(
+      probe, sample,
+      kitty::CellPixelSize{geometry::kReferenceCellWidthPx, geometry::kReferenceCellHeightPx});
+  const auto placement_bytes = placed ? placed.bytes : 0;
+
+  // Built by appending, not by snprintf into a fixed buffer. A truncating
+  // snprintf produces a partial line and reports it through a return value
+  // nobody checks, which is a poor property for the one block in this binary
+  // whose whole claim is that its figures are measurements.
+  const auto num = [](auto value) { return std::to_string(value); };
+
+  std::string report;
+  report.reserve(1024);
+  report += "\ninstruments (BUDGETS.md, build-order step 4)\n";
+  report += "  wire form     a representative placement is " + num(placement_bytes) +
+            " B at the reference cell (measured here)\n";
+  report += "  frame classes idle " + num(budget::kIdleFrameBytes) + " B / animation <= " +
+            num(budget::kMaxAnimationFrameBytes) + " B / recomposition <= " +
+            num(budget::kMaxRecompositionBytes) + " B\n";
+  if (placement_bytes > 0) {
+    report += "  headroom      " + num(budget::kMaxRecompositionBytes / placement_bytes) +
+              " placements fit a recomposition, " +
+              num(budget::kMaxAnimationFrameBytes / placement_bytes) + " an animation frame\n";
+  }
+  report +=
+      "  classified on the STATE DELTA: party or facing -> recomposition;\n"
+      "                lamp or awareness -> animation; else idle       (gloam#24)\n";
+  report += "  sustained     p95 by nearest rank over sliding " + num(replay::kTickHz) +
+            "-tick windows, <= " + num(budget::kMaxSustainedBytesPerSecond) + " B/s  (gloam#25)\n";
+  report +=
+      "  measured      0 emit bytes this run. There is no compositor (gloam#7),\n"
+      "                so no session was rendered and no p95 was computed. The\n"
+      "                200-tick harness in test/10budgets/ is where that number\n"
+      "                lives, and it is 1.6% OVER budget (gloam#26).\n";
+
+  // printf and a raw write share a file descriptor and not a buffer, so the
+  // sections printed above would otherwise land after this one.
+  std::fflush(stdout);
+
+  const auto produced = report.size();
+  const auto result = tty::write_all(STDOUT_FILENO, report);
+
+  // Produced against accepted, for the block above — not a running total that
+  // would have to include its own line. That pair IS the distinction this whole
+  // module exists to make: `ByteSink` can only ever report the left-hand number.
+  const std::string tail = "  write path    " + num(produced) + " B produced, " +
+                           num(result.bytes_written) +
+                           " B accepted by write(2) for the block above\n";
+  const auto tail_result = tty::write_all(STDOUT_FILENO, tail);
+
+  const auto& failure = result ? tail_result : result;
+  if (failure) return true;
+
+  // To stderr, not stdout: a report that the output stream failed has no
+  // business being sent down the output stream. `gloam > /dev/full` is the case
+  // that makes the difference visible.
+  std::fprintf(stderr, "gloam: instrument report stopped early after %zu B (error %d, errno %d)\n",
+               failure.bytes_written, static_cast<int>(failure.error), failure.errno_value);
+
+  // A reader that went away is not this process failing. `gloam | head -1` closes
+  // the pipe on purpose, and exiting non-zero there would make an ordinary shell
+  // idiom look like a fault. Anything else — a full disk, a bad fd, a stalled
+  // write — means build-order step 4's "printed every run" did not happen, and
+  // a caller checking $? has to be able to tell.
+  return failure.error == tty::WriteError::Closed;
 }
 
 /// M0's corridor: four cells long, one intersection (SPEC 15).
@@ -106,6 +225,11 @@ void trace_corridor() {
 }  // namespace
 
 auto main(int argc, char** argv) -> int {
+  // A raw write to a closed pipe kills the process by default, and this binary
+  // now has one: `gloam | head -1` would die rather than report a short write.
+  // printf masks this; write(2) does not.
+  ::signal(SIGPIPE, SIG_IGN);
+
   bool quiet = false;
   for (int i = 1; i < argc; ++i) {
     const std::string_view arg{argv[i]};
@@ -131,6 +255,14 @@ auto main(int argc, char** argv) -> int {
   std::printf("GLOAM %s - simulation core\n\n", gloam::version_string());
   print_geometry();
   print_ruleset();
+  // Before the --quiet guard, on purpose: build-order step 4 says the counters
+  // are "printed every run", and a flag that silences an instrument makes the
+  // instrument optional.
+  const bool instrumented = print_instruments();
   if (!quiet) trace_corridor();
-  return 0;
+
+  // Non-zero when the instruments could not be printed at all. Step 4's contract
+  // is that they are printed every run; a script that reads $? and sees success
+  // over an empty stdout has been told something false.
+  return instrumented ? 0 : 1;
 }

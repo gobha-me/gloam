@@ -39,9 +39,18 @@ issue so the call gets made rather than absorbed.
    global, so §5.1's rationale is untouched. The `write` that puts those bytes on
    a terminal stays in `src/bin/`, and that one line is the whole terminal-facing
    surface. Do not move `kitty.cpp` out on the strength of its name. The same
-   reasoning covers `budgets.hpp`, `layer.hpp` and `emit.hpp`, all four of which
-   are deliberately excluded from the `gloam/gloam.hpp` umbrella — that header
-   says so, and says why.
+   reasoning covers `budgets.hpp`, `layer.hpp`, `emit.hpp` and `meter.hpp`, all
+   five of which are deliberately excluded from the `gloam/gloam.hpp` umbrella —
+   that header says so, and says why.
+
+   **That write now exists, and it is `src/bin/tty_writer.cpp`.** It is the only
+   file in the tree that calls `write(2)`, and it is what makes `BUDGETS.md`'s
+   "the counters measure what actually left the process" true rather than
+   aspirational — a `ByteSink` counts bytes appended to a `std::string`, which is
+   what the compositor *produced*. `meter::FrameMeter::record` takes a byte count
+   rather than a sink for exactly that reason, so the number the budget sees can
+   be the kernel's. If you are adding terminal output, add it there; if adding it
+   there is awkward, the awkwardness is the boundary doing its job.
 
    **`audio.hpp` is the same split, and the one whose name argues hardest against
    it.** §9's *sink* is a device and belongs in `src/bin/`; what lives in the

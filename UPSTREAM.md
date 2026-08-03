@@ -324,6 +324,112 @@ Two more, which are design questions rather than factual errors:
     lost meanwhile: the PCM is not covered by the manifest digest, so §9.2's
     "shares §10's manifest hash" is unmet.
 
+11. **§11 judges a frame against a per-frame budget and never says how a frame's
+    CLASS is determined.** Mirrored as
+    [#24](https://github.com/gobha-me/gloam/issues/24). `BUDGETS.md`'s per-frame
+    table has three byte rows — "Idle — nothing changed", "Animation-only frame
+    (monster pose, lamp flicker)" and "Full recomposition (a step or a turn)" —
+    and §4.6 restates them. Every class is named by SITUATION. Nothing anywhere
+    gives a rule code can evaluate, which is precisely what a budget assertion
+    needs in order to pick which of 0 B / 400 B / 2 KB a frame is judged against.
+    §4.6's one procedural sentence — "builds a placement list each tick and diffs
+    it against the one on screen. Identical list, zero bytes emitted" — defines
+    idle as an OUTCOME of the diff, not as an input classification.
+
+    **Decided: classify on the state delta, not on the input event.** A tick is
+    `Recomposition` if `party` or `facing` changed, else `Animation` if
+    `lamp_level` changed or any monster's awareness state changed, else `Idle`.
+    Encoded as `gloam::meter::FrameClass` and, for the harness,
+    `classify_frame(before, after)` in `test/10budgets/`.
+
+    The alternative — read the class off the `replay::Event` — is worse in a way
+    that matters. `apply()` already refuses a `Step` into an impassable edge, so
+    classifying on the event charges a blocked step as a 2 KB recomposition, and
+    an input log can then manufacture its own budget class: spam `Step` into a
+    wall and every tick draws a 2 KB allowance while nothing moves. The delta
+    inherits `apply`'s rules rather than restating them somewhere they can drift
+    apart — the same argument `world.cpp` makes for deriving the footfall from
+    `pending_noise` instead of intercepting the event.
+
+    **What the rule cannot see, and the code says so out loud:** monster *pose*
+    and lamp *flicker* are both named in the animation row and neither exists in
+    `World`. Awareness state is the nearest thing that does. This is an
+    under-approximation of the animation class, not the final rule, and it gets
+    revisited when §6.4's patrols land and monsters acquire a pose.
+
+12. **`TEST-PLAN.md` §4 asks for a total and §11 states a percentile, and the
+    windowing rule between them is unwritten.** Mirrored as
+    [#25](https://github.com/gobha-me/gloam/issues/25). §4's headline budget test
+    is "a **200-tick scripted replay** whose total emitted bytes are counted at
+    the emit path and compared against the p95 budget". A total is not a
+    percentile; §11's unit is bytes **per second** while the measurement is per
+    tick; and `emit::ByteSink` keeps three scalars and no per-frame history, so
+    no percentile of any kind was computable from the instrument that existed.
+
+    **Decided: nearest-rank p95 over SLIDING one-second windows.** Form every
+    window of `W` consecutive frames where `W` is one second of ticks
+    (`replay::kTickHz`); sum each; sort the `N − W + 1` sums; take the sum at
+    1-indexed rank `(95·M + 99) / 100`. Integer arithmetic throughout — no
+    interpolation, no floating point, per AGENTS.md rule 2. For N=200, W=10 that
+    is `sorted[181]` of 191 windows.
+
+    **The rejected reading is the tempting one:** p95 of per-TICK bytes, scaled
+    by the tick rate. A recomposition tick appears in exactly one per-tick sample
+    but in `W` sliding windows, so the per-tick form lets any script with under
+    5% recomposition ticks report the *animation* cost as its sustained rate — a
+    budget that reports the cost of standing still as the cost of walking.
+
+    **One unit trap, pinned in the code rather than in this paragraph:**
+    `kMaxSustainedBytesPerSecond` is per second and the comparison is against a
+    window SUM, so the units agree only while `W == kTickHz`. The harness derives
+    `W` from `replay::kTickHz` and asserts the identity; otherwise a change to
+    the tick rate silently rescales the budget.
+
+13. **§4.7's 140 ms step transition and §11's 8 KB/s sustained p95 are mutually
+    unreachable at §4.1's own placement count.** Mirrored as
+    [#26](https://github.com/gobha-me/gloam/issues/26). Unlike 11 and 12 this is
+    not a gap — it is a contradiction between two rows of the same document, and
+    it is measured rather than argued.
+
+    `test/10budgets/` now runs TEST-PLAN.md §4's 200-tick scripted replay through
+    the real `kitty::emit_placement`, at the fastest walk the simulation can
+    express (a step every two ticks — §4.7's 140 ms is faster still, and 10 Hz
+    cannot express it). Measured:
+
+    | | |
+    | --- | --- |
+    | One placement, reference cell | ~66 B |
+    | Full recomposition, 24 placements | **1,596 B** vs 2,048 — passes |
+    | Animation-only frame | **137 B** vs 400 — passes |
+    | Idle frame | **0 B** — passes |
+    | Sustained p95, sliding 1 s windows | **8,321 B/s** vs 8,192 — **1.6% over** |
+
+    At §4.7's own 140 ms rate rather than the tick-quantised 5 steps/s the script
+    can reach, it is roughly **1.4x** over.
+
+    The p95 is an **upper bound**: the model places §4.2's M0 slot inventory with
+    no diff, and §4.6's diff can only remove placements from a full list. That
+    bound holds under one assumption, which is now a constraint on
+    [#7](https://github.com/gobha-me/gloam/issues/7): the compositor must
+    allocate **one placement id per slot and reuse it**. §4.6's diff is
+    place-and-delete, so a compositor that allocates ids per frame pays ~25 B per
+    vacated slot and the measurement stops bounding anything.
+
+    **The named escape.** kitty defaults `x=0,y=0` and reads `w=0,h=0` as "to the
+    right/bottom edge", so a full-plate placement can omit
+    `,x=0,y=0,w=480,h=360` — 20 of the ~66 bytes, which brings even §4.7's rate
+    inside budget with room. Deliberately not taken in this slice: it breaks
+    `test/07emit/`'s golden literal, the crop fields are load-bearing for any
+    future atlas, and `kitty.cpp`'s `validate()` refuses a zero crop for a
+    documented and correct reason. It belongs to whoever builds the compositor.
+
+    `test/10budgets/` asserts the overrun **inverted**, the way #17's cold-start
+    row is asserted, so the row goes red the day a diff or a shorter wire form
+    fixes it and whoever lands that has to come back and flip it. A second
+    assertion pins the overrun at ≤ 5%: the margin being this thin is itself part
+    of the finding, because a budget whose satisfaction turns on the third
+    significant figure of an assumed wire form is not yet a budget.
+
 ### Decisions taken
 
 Amendments to `design/SPEC.md`, decided 2026-07-31. The snapshot is not edited;
