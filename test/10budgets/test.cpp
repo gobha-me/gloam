@@ -1,4 +1,4 @@
-// SPEC §11 and §13.4 — every budget as an assertion.
+// SPEC §11 and BUDGETS.md — every budget as an assertion.
 //
 // "Every row of §11 is an assertion in CI." Most of the rows constrain code
 // that does not exist yet, and they are here anyway: §19 step 4's acceptance
@@ -23,12 +23,16 @@
 #include "gloam/audio.hpp"
 #include "gloam/budgets.hpp"
 #include "gloam/emit.hpp"
+#include "gloam/geometry.hpp"
+#include "gloam/kitty.hpp"
 #include "gloam/layer.hpp"
 #include "gloam/lightfield.hpp"
+#include "gloam/meter.hpp"
 #include "gloam/noise.hpp"
 #include "gloam/pack.hpp"
 #include "gloam/perception.hpp"
 #include "gloam/plate.hpp"
+#include "gloam/replay.hpp"
 #include "gloam/tuning.hpp"
 #include "gloam/world.hpp"
 
@@ -105,13 +109,16 @@ TEST_CASE("§11 byte budgets are declared and ordered sanely", "[budget]") {
   CHECK(budget::kMaxAnimationFrameBytes < budget::kMaxRecompositionBytes);
 
   // The idle row is now measured, not merely declared — see the §4.6 case below,
-  // which runs a frame through gloam::emit::ByteSink. §13.4 wants the counter to
-  // wrap the emit path so it reports what actually left the process rather than
-  // what the compositor believed it produced, and ByteSink is that counter.
+  // which runs a frame through gloam::emit::ByteSink. BUDGETS.md's "Per-frame
+  // emission" wants the counter to wrap the emit path so it reports what
+  // actually left the process rather than what the compositor believed it
+  // produced; ByteSink is the produced half, and `tty::write_all` is the half
+  // that can report what a syscall accepted.
   //
-  // PENDING M0: the animation, recomposition and sustained-p95 rows need a
-  // compositor producing real placement lists to measure against — G-6, and
-  // through it the §4 compositor, which is still blocked upstream (UPSTREAM.md).
+  // The animation, recomposition and sustained-p95 rows are measured at the end
+  // of this file against an explicitly-labelled MODEL of the placement list,
+  // because the §4 compositor is still blocked upstream (UPSTREAM.md). Read the
+  // banner on that case before quoting its number.
 }
 
 TEST_CASE("§11 timing budgets are declared", "[budget]") {
@@ -617,7 +624,353 @@ TEST_CASE("§4.6's idle frame costs zero bytes, measured at the sink", "[budget]
   // frames would be indistinguishable from no frames at all and this row would
   // be unmeasurable rather than merely trivially met.
   CHECK(sink.frames() == 1);
+}
 
-  // PENDING M0: the sustained p95 row (kMaxSustainedBytesPerSecond) needs a
-  // scripted replay to measure against — TEST-PLAN.md §4, G-6.
+// ════════════════════════════════════════════════════════════════════════════
+//  TEST-PLAN.md §4's headline: a 200-tick scripted replay, counted at the emit
+//  path.
+//
+//  READ THIS BEFORE QUOTING THE NUMBER BELOW.
+//
+//  There is no compositor. §4 is blocked on termforge #137 and #109 (gloam#7),
+//  so nothing in this tree builds a placement list from a world. What follows is
+//  a MODEL of one: for each tick it places §4.2's M0 slot inventory — twelve
+//  wall slots, eight floor and ceiling bands, one light field, one sprite per
+//  monster — through the real `kitty::emit_placement`, with NO DIFF.
+//
+//  So the BYTES are real and the LIST is a model. Two consequences, both of
+//  which have to travel with the number:
+//
+//   1. It is an UPPER BOUND on what a compositor emits for the same event
+//      stream, because §4.6's diff can only remove placements from a full list.
+//   2. That bound holds only while the compositor allocates ONE PLACEMENT ID PER
+//      SLOT AND REUSES IT. §4.6's diff is place-and-delete: re-placing an id
+//      costs one place, but a placement that VACATES costs a delete as well. A
+//      compositor that allocates ids per frame pays ~25 B per vacated slot and
+//      this measurement stops being an upper bound. That is a constraint this
+//      instrument places on #7, not a caveat about this test.
+// ════════════════════════════════════════════════════════════════════════════
+
+namespace {
+
+/// A frame's class, from the state delta across a tick.
+///
+/// The design names §11's three per-frame rows by SITUATION and never gives a
+/// rule code can evaluate — UPSTREAM.md item 11, gloam#24, which record the call
+/// this function implements.
+///
+/// On the delta rather than on the `replay::Event`, deliberately. `apply()`
+/// already refuses a step into an impassable edge, so classifying on the event
+/// charges a blocked step as a 2 KB recomposition — and lets an input log
+/// manufacture its own budget class by spamming Step into a wall until every
+/// tick draws a 2 KB allowance while nothing moves.
+struct FrameState {
+  Coord party{};
+  Dir facing{};
+  std::int32_t lamp_level{};
+  std::vector<Awareness> minds{};
+  /// Captured even though `advance` never moves a monster today (`world.hpp`
+  /// says so). When §6.4's patrols land, a tick where a monster relocates
+  /// WITHOUT changing awareness would otherwise classify as idle, emit nothing,
+  /// and quietly falsify this case's upper-bound claim while CI stayed green.
+  /// Cheaper to capture now than to remember later.
+  std::vector<Coord> positions{};
+};
+
+auto snapshot(const World& w) -> FrameState {
+  FrameState s{w.party, w.facing, w.lamp_level, {}, {}};
+  s.minds.reserve(w.monsters.size());
+  s.positions.reserve(w.monsters.size());
+  for (const auto& m : w.monsters) {
+    s.minds.push_back(m.mind.state);
+    s.positions.push_back(m.at);
+  }
+  return s;
+}
+
+auto classify_frame(const FrameState& before, const FrameState& after) -> meter::FrameClass {
+  if (before.party != after.party || before.facing != after.facing) {
+    return meter::FrameClass::Recomposition;
+  }
+  if (before.lamp_level != after.lamp_level || before.minds != after.minds ||
+      before.positions != after.positions) {
+    return meter::FrameClass::Animation;
+  }
+  return meter::FrameClass::Idle;
+}
+
+/// The reference cell (§3.2), so the byte counts below are the ones §11 is
+/// written against rather than an artefact of some other terminal.
+constexpr kitty::CellPixelSize kReferenceCell{geometry::kReferenceCellWidthPx,
+                                              geometry::kReferenceCellHeightPx};
+
+/// One placement into a named slot. Coordinates are inside §3.2's viewport
+/// region; ids are 1-based because zero is refused.
+auto place(emit::ByteSink& sink, std::uint32_t slot, layer::Band band, int rank,
+           geometry::Ring ring) -> std::size_t {
+  const kitty::Placement p{
+      .image_id = slot,
+      .placement_id = slot,
+      .band = band,
+      .band_rank = rank,
+      .cell_col = static_cast<std::int32_t>(slot % 40),
+      .cell_row = static_cast<std::int32_t>(slot % 17),
+      .offset_x_px = 0,
+      .offset_y_px = 0,
+      .crop_x = 0,
+      .crop_y = 0,
+      .crop_w = ring.width,
+      .crop_h = ring.height,
+  };
+  const auto result = kitty::emit_placement(sink, p, kReferenceCell);
+  REQUIRE(static_cast<bool>(result));
+  return result.bytes;
+}
+
+/// §4.2's M0 slot inventory as a placement list. NOT a compositor: no diff, no
+/// visibility culling, no depth sorting, no transition sequences.
+auto model_recomposition(emit::ByteSink& sink, const World& w) -> int {
+  int placements = 0;
+  std::uint32_t slot = 1;
+
+  // §4.1's twelve wall slots: left and right trapezoids at depths 0-3, front
+  // faces at depths 1-4. The depth ring gives each its extent.
+  for (int depth = 0; depth < geometry::kDepthCount - 1; ++depth) {
+    place(sink, slot++, layer::Band::Geometry, depth, geometry::kDepths[depth]);
+    place(sink, slot++, layer::Band::Geometry, depth, geometry::kDepths[depth]);
+    place(sink, slot++, layer::Band::Geometry, depth, geometry::kDepths[depth + 1]);
+    placements += 3;
+  }
+
+  // Floor and ceiling bands, one pair per depth.
+  for (int depth = 0; depth < 4; ++depth) {
+    place(sink, slot++, layer::Band::Geometry, 16 + depth, geometry::kDepths[depth]);
+    place(sink, slot++, layer::Band::Geometry, 20 + depth, geometry::kDepths[depth]);
+    placements += 2;
+  }
+
+  // §4.4's light field, above the geometry band and below the sprites. The same
+  // lamp_level that picks the plate is the one perception reads.
+  place(sink, static_cast<std::uint32_t>(100 + w.lamp_level), layer::Band::Light, 0,
+        geometry::kDepths[0]);
+  ++placements;
+
+  for (std::size_t m = 0; m < w.monsters.size(); ++m) {
+    place(sink, static_cast<std::uint32_t>(200 + m), layer::Band::Sprites,
+          static_cast<int>(m), geometry::kDepths[2]);
+    ++placements;
+  }
+
+  return placements;
+}
+
+/// §4.6's "two or three placements, not twenty-four": the light field, plus the
+/// sprite of every monster whose awareness moved.
+auto model_animation(emit::ByteSink& sink, const World& w, const FrameState& before) -> int {
+  int placements = 0;
+
+  place(sink, static_cast<std::uint32_t>(100 + w.lamp_level), layer::Band::Light, 0,
+        geometry::kDepths[0]);
+  ++placements;
+
+  for (std::size_t m = 0; m < w.monsters.size(); ++m) {
+    if (m < before.minds.size() && before.minds[m] == w.monsters[m].mind.state) continue;
+    place(sink, static_cast<std::uint32_t>(200 + m), layer::Band::Sprites,
+          static_cast<int>(m), geometry::kDepths[2]);
+    ++placements;
+  }
+
+  return placements;
+}
+
+}  // namespace
+
+TEST_CASE("§11's per-frame rows, over a 200-tick scripted replay", "[budget]") {
+  const Tuning& t = kDefaultTuning;
+
+  // ── The script, and its density ──────────────────────────────────────────
+  //
+  // THE STEP DENSITY IS DECIDED HERE AND DEFENDED, NOT TUNED UNTIL THE NUMBER
+  // PASSES. §4.7 budgets a 140 ms step transition; at kTickHz = 10 the fastest
+  // walk the simulation can express is one step every TWO ticks (200 ms), which
+  // is already slower than §4.7 allows. So: a step on every even tick, and the
+  // odd ticks alternate a lamp change with a wait. Anything slower would be
+  // choosing a script to make a number, and §11's premise is that the numbers
+  // are contracts.
+  //
+  // The waits are here so that all THREE classes are exercised rather than two —
+  // a script with no idle tick makes the zero-byte row vacuously true. They move
+  // the sustained number DOWNWARD, which is the direction that cannot be
+  // accused of inflating the finding below.
+  constexpr int kTicks = 200;
+  constexpr int kRunLength = 20;  // cells before the party turns around
+
+  Level level{kRunLength + 2, 3};
+  level.carve(Coord{0, 1}, Dir::East, kRunLength + 2);
+
+  std::vector<Monster> monsters;
+  for (int m = 0; m < 3; ++m) {
+    monsters.push_back(Monster{Coord{4 + 5 * m, 1}, MonsterKind{Acuity::Normal, false}, {}});
+  }
+
+  auto world = make_world(0x6E1E5ULL, std::move(level), std::move(monsters));
+  world.party = Coord{0, 1};
+  world.facing = Dir::East;
+  world.armour = Armour::Leather;
+
+  std::vector<replay::Record> script;
+  script.reserve(kTicks);
+  {
+    Dir facing = Dir::East;
+    int walked = 0;
+    std::int32_t lamp = 3;
+    for (std::uint32_t tick = 0; tick < kTicks; ++tick) {
+      if (tick % 2 == 0) {
+        if (walked == kRunLength) {
+          facing = opposite(facing);
+          walked = 0;
+          script.push_back({tick, replay::Event::Turn, static_cast<std::uint16_t>(facing)});
+        } else {
+          ++walked;
+          script.push_back({tick, replay::Event::Step, static_cast<std::uint16_t>(facing)});
+        }
+      } else if (tick % 4 == 1) {
+        lamp = lamp == 3 ? 4 : 3;
+        script.push_back({tick, replay::Event::Lamp, static_cast<std::uint16_t>(lamp)});
+      } else {
+        script.push_back({tick, replay::Event::Wait, 0});
+      }
+    }
+  }
+  REQUIRE(script.size() == kTicks);
+
+  // ── The run ──────────────────────────────────────────────────────────────
+  //
+  // apply/advance driven here rather than through `play`, because `play` has no
+  // per-tick seam and this needs the world both sides of every tick. No seam is
+  // added to `play` for it: a byte meter is downstream of a compositor, not of a
+  // tick, and `advance` cannot classify from inside because it mutates in place
+  // and retains nothing to compare against.
+  emit::ByteSink sink;
+  meter::FrameMeter frame_meter;
+
+  int recompositions = 0;
+  int animations = 0;
+  int idles = 0;
+
+  for (const auto& record : script) {
+    const auto before = snapshot(world);
+
+    apply(world, record.event, record.payload, t);
+    advance(world, t);
+
+    const auto after = snapshot(world);
+    const auto frame_class = classify_frame(before, after);
+
+    switch (frame_class) {
+      case meter::FrameClass::Recomposition:
+        model_recomposition(sink, world);
+        ++recompositions;
+        break;
+      case meter::FrameClass::Animation:
+        model_animation(sink, world, before);
+        ++animations;
+        break;
+      case meter::FrameClass::Idle:
+        // §4.6: identical list, zero bytes. Asserted INSIDE the loop, because a
+        // single idle frame that emitted a cursor move would be invisible in the
+        // totals and is exactly the regression this row exists to catch.
+        CHECK(sink.size() == budget::kIdleFrameBytes);
+        ++idles;
+        break;
+    }
+
+    frame_meter.end_frame(sink, frame_class);
+  }
+
+  // ── The traffic guard ────────────────────────────────────────────────────
+  //
+  // Without this the sustained row is satisfiable by a script that never walks —
+  // the same defect the voice-ring gate had before it started requiring every
+  // emitter by name rather than a nonzero total.
+  INFO("frames: " << recompositions << " recomposition, " << animations << " animation, " << idles
+                  << " idle");
+  CHECK(world.tick == static_cast<std::uint32_t>(kTicks));
+  CHECK(frame_meter.frames() == static_cast<std::uint64_t>(kTicks));
+  CHECK(recompositions >= 40);
+
+  // EVERY class has to be exercised, not just the expensive one. `peak()` of a
+  // class with no samples is 0, so `peak(Idle) == 0` and `peak(Animation) <= 400`
+  // both pass over an empty set — the three per-frame rows below would go
+  // vacuous rather than red. Concretely: a tuning change that made monsters flip
+  // awareness on every wait tick would drive `idles` to zero and silently stop
+  // measuring §11's headline row.
+  CHECK(idles > 0);
+  CHECK(animations > 0);
+  CHECK(frame_meter.frames(meter::FrameClass::Idle) == static_cast<std::uint64_t>(idles));
+  CHECK(frame_meter.frames(meter::FrameClass::Animation) == static_cast<std::uint64_t>(animations));
+  CHECK(frame_meter.frames(meter::FrameClass::Recomposition) ==
+        static_cast<std::uint64_t>(recompositions));
+
+  // ── The per-frame rows ───────────────────────────────────────────────────
+  INFO("peak recomposition " << frame_meter.peak(meter::FrameClass::Recomposition) << " B");
+  INFO("peak animation " << frame_meter.peak(meter::FrameClass::Animation) << " B");
+  CHECK(frame_meter.peak(meter::FrameClass::Idle) == budget::kIdleFrameBytes);
+  CHECK(frame_meter.peak(meter::FrameClass::Animation) <= budget::kMaxAnimationFrameBytes);
+  CHECK(frame_meter.peak(meter::FrameClass::Recomposition) <= budget::kMaxRecompositionBytes);
+
+  // ── The sustained row ────────────────────────────────────────────────────
+  //
+  // One second of ticks per window, derived rather than spelled: the budget is
+  // per SECOND and this is a window SUM, so the units agree only while the two
+  // agree. UPSTREAM.md item 12, gloam#25.
+  const std::size_t window = replay::kTickHz;
+
+  // The guard, spelled as a literal on purpose. Comparing kTickHz to itself
+  // asserts nothing; what has to be caught is the tick rate MOVING, because the
+  // budget is per second and this is a window sum, and the two agree only while
+  // one second is this many frames. If this goes red, whoever changed the rate
+  // has to come back and decide what "per second" means at the new one.
+  STATIC_REQUIRE(replay::kTickHz == 10);
+
+  const auto p95 = meter::sustained_p95(frame_meter, window);
+  REQUIRE(p95.has_value());
+
+  const auto windows = frame_meter.history().size() - window + 1;
+  INFO("sustained p95 " << *p95 << " B/s over " << windows
+                        << " one-second windows, against a budget of "
+                        << budget::kMaxSustainedBytesPerSecond
+                        << " B/s — UPPER BOUND, no diff");
+  // ── AND THE ROW IS BLOWN. THIS ASSERTION IS DELIBERATELY INVERTED. ───────
+  //
+  // Measured: 8,321 B/s against a budget of 8,192 — 1.6% over, on a number that
+  // is an UPPER BOUND and is byte-stable across compilers (every placement is
+  // integer `to_chars` output over a fixed list, and the awareness transitions
+  // that pick the animation frames come from `rng.hpp`'s own bounded draw).
+  //
+  // The overrun is not a defect in the model. It is a contradiction between two
+  // rows of the same design document: §4.7's 140 ms step transition and §11's
+  // 8 KB/s sustained p95 are mutually unreachable at §4.1's own "roughly two
+  // dozen sprites" and the current wire form. At §4.7's rate rather than this
+  // script's tick-quantised 5 steps/s it is worse — about 1.4x.
+  //
+  // Recorded as UPSTREAM.md item 13 and gloam#26, with the named escape: kitty
+  // defaults `x=0,y=0` and reads `w=0,h=0` as "to the edge", so a full-plate
+  // placement can drop 20 of its ~66 bytes and the row comes back inside budget
+  // with room. That is #7's to spend — it breaks test/07emit's golden literal,
+  // the crop fields are load-bearing for any future atlas, and `kitty.cpp`'s
+  // `validate()` refuses a zero crop for a documented and correct reason.
+  //
+  // Inverted rather than left as prose, for the reason #17's cold-start row is:
+  // a budget recorded in a comment is not a budget. THIS GOES RED the day a diff
+  // or a shorter wire form lands, and whoever lands it has to come here and flip
+  // it into the real row.
+  CHECK(*p95 > budget::kMaxSustainedBytesPerSecond);
+
+  // How far over, pinned in both directions. The overrun is small — which is
+  // itself the finding, because a budget whose satisfaction turns on the third
+  // significant figure of an assumed wire form is not yet a budget. If this goes
+  // red upward, something made emission much more expensive and that is a
+  // regression rather than a re-measurement.
+  CHECK(*p95 * 100 / budget::kMaxSustainedBytesPerSecond <= 105);
 }

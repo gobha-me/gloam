@@ -1,13 +1,19 @@
 #pragma once
 
-/// SPEC §11, §13.4 — the emit path, and the counter wrapped around it.
+/// SPEC §11 — the emit path, and the counter wrapped around it.
 ///
-/// §13.4 is specific about where the byte budgets are measured: "The counters
-/// wrap the EMIT PATH, so they measure what actually left the process, not what
-/// the compositor believed it produced." `ByteSink` is that wrapper. Every byte
-/// GLOAM sends to a terminal goes through one of these, and the counter is not
-/// optional bookkeeping bolted on afterwards — it is the reason the type exists
-/// rather than a bare `std::string`.
+/// `BUDGETS.md`'s "Per-frame emission" is specific about where the byte budgets
+/// are measured: "The counters wrap the EMIT PATH, so they measure what actually
+/// left the process, not what the compositor believed it produced." `ByteSink`
+/// is the near half of that wrapper — it counts bytes PRODUCED, which is a
+/// necessary condition and not the row itself. What actually left the process is
+/// what a write syscall reported, and that lives in `src/bin/tty_writer.hpp`,
+/// on the other side of the boundary this library may not cross. `meter.hpp`
+/// takes a byte count rather than reading a sink for exactly that reason.
+///
+/// Every byte GLOAM sends to a terminal goes through one of these, and the
+/// counter is not optional bookkeeping bolted on afterwards — it is the reason
+/// the type exists rather than a bare `std::string`.
 ///
 /// This header is deliberately separate from `kitty.hpp`. §16's mitigation is
 /// that "a vendored driver is a swap and not a rewrite"; that swap replaces the
@@ -39,10 +45,16 @@ namespace gloam::emit {
 /// testable without adding a test-only seam to shipped code — you cannot
 /// realistically fill a 64-bit counter, and an untested overflow path in a
 /// budget instrument is exactly the kind of thing that is discovered wrong.
-[[nodiscard]] constexpr auto saturating_add(std::uint64_t a, std::size_t b) -> std::uint64_t {
-  const auto addend = static_cast<std::uint64_t>(b);
-  if (a > UINT64_MAX - addend) return UINT64_MAX;
-  return a + addend;
+///
+/// Both parameters are `std::uint64_t` rather than `(counter, std::size_t)`.
+/// A `std::size_t` addend widens to this harmlessly on every platform, and
+/// taking the narrower type is what made `meter.cpp` reach for a local
+/// 64-bit-on-both-sides copy — a THIRD copy of a function AGENTS.md permits
+/// exactly two of. One signature that serves both call shapes is the fix that
+/// rule asks for.
+[[nodiscard]] constexpr auto saturating_add(std::uint64_t a, std::uint64_t b) -> std::uint64_t {
+  if (a > UINT64_MAX - b) return UINT64_MAX;
+  return a + b;
 }
 
 /// A byte buffer that remembers how much has gone through it.

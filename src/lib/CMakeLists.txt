@@ -47,6 +47,7 @@ add_library(${PROJECT_NAME}_lib STATIC
   kitty.cpp
   level.cpp
   lightfield.cpp
+  meter.cpp
   noise.cpp
   pack.cpp
   perception.cpp

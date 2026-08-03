@@ -1,10 +1,11 @@
-// SPEC §3.2, §4.6, §11, §13.4 — the byte sink and the kitty call boundary.
+// SPEC §3.2, §4.6, §11 — the byte sink and the kitty call boundary.
 //
 // Two subjects in one file, sink first, because testing a byte counter apart
 // from its only consumer is testing a std::string wrapper. The assertions worth
 // having — that a refused command leaves the counter untouched, that no emitted
 // byte sequence ever contains a cell-scaling key — are joint properties of the
-// two, and they are what §3.2 and §13.4 actually ask for.
+// two, and they are what §3.2 and BUDGETS.md's "Per-frame emission" actually
+// ask for.
 //
 // Failure matrix first, per AGENTS.md. The golden byte literal is last: it is a
 // smoke check plus a lock on key order, and it proves the least of anything here.
@@ -94,7 +95,7 @@ constexpr CellPixelSize kReferenceCell{10, 20};
 }  // namespace
 
 // ════════════════════════════════════════════════════════════════════════════
-//  Part A — the byte sink (§11, §13.4)
+//  Part A — the byte sink (§11)
 // ════════════════════════════════════════════════════════════════════════════
 
 TEST_CASE("a fresh sink reports nothing in every dimension", "[emit]") {

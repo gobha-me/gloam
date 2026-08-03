@@ -32,6 +32,7 @@ diagnostic rather than a game. What exists is the deterministic simulation core:
 | The compositing bands, and the kitty call boundary over them | §4.5, §16 |
 | `replay.gloam`, the world hash, and the golden-replay harness | §12, §13.2 |
 | The voice ring, the gain/pan mix, and the wall the sim talks through | §9.2, §9.3 |
+| The frame classes, the sustained percentile, and the one write syscall | §11 |
 
 The **compositor** is still blocked upstream — see [UPSTREAM.md](UPSTREAM.md).
 termforge stretches a placed image to fill its cell rect and states that scaling
@@ -114,6 +115,46 @@ against §11's 4 ms budget. §9.3's actual wording — *evaluated from the party
 position instead of the monster's* — is one field per tick rather than one per
 monster, and noise cost is symmetric, so the two readings agree; that is 0.97 ms,
 and `test/10budgets/` measures exactly that tick.
+
+The **byte instruments** ([#6](https://github.com/gobha-me/gloam/issues/6)) have
+landed the half that does not need a compositor, which is build-order step 4's
+*"counters on the emit path… printed every run"*. `gloam::meter` classifies a
+frame and computes §11's sustained percentile; `src/bin/tty_writer.hpp` holds the
+process's **only** `write` syscall and reports what the kernel accepted, which is
+what `BUDGETS.md` asks for and what a `std::string` counter structurally cannot
+answer. `gloam --quiet` prints the instrument block, because a flag that silences
+an instrument makes the instrument optional.
+
+Two things the design had never decided had to be decided to write any of it, and
+both are recorded rather than absorbed: **how a frame's class is determined**
+([#24](https://github.com/gobha-me/gloam/issues/24) — on the state delta, not the
+input event, because `apply()` already refuses a step into a wall and an input log
+must not be able to manufacture its own budget class) and **what a p95 of a total
+means** ([#25](https://github.com/gobha-me/gloam/issues/25) — nearest rank over
+sliding one-second windows, in integers).
+
+Then the harness measured something worth having:
+
+| Row | Measured | Budget | |
+| --- | --- | --- | --- |
+| Full recomposition, 24 placements | 1,596 B | 2,048 B | passes |
+| Animation-only frame | 137 B | 400 B | passes |
+| Idle frame | 0 B | 0 B | passes |
+| Sustained p95 | **8,321 B/s** | 8,192 B/s | **1.6% over** |
+
+§4.7's 140 ms step transition and §11's 8 KB/s sustained p95 are **mutually
+unreachable** at §4.1's own placement count and the current wire form — and the
+measured figure is an *upper bound*, taken with no diff at the fastest walk 10 Hz
+can express. [#26](https://github.com/gobha-me/gloam/issues/26) carries the
+arithmetic, the one assumption the bound rests on (the compositor must reuse
+placement ids per slot), and the escape: dropping kitty's defaulted crop keys
+saves 20 of a placement's 66 bytes and puts the row back inside budget with room.
+`test/10budgets/` asserts the overrun **inverted**, the way #17's cold-start row
+is asserted, so it goes red the day someone fixes it.
+
+Still `PENDING` and honest about it: every **cold-start** row. All three need the
+transmit path that `kitty.hpp` reserves and does not implement, and behind it
+`pack::Codec::Png`, kitty's `o=z`, or upstream's shared-memory transfer.
 
 Still unstarted: the **RtAudio device** — the stream, the resident PCM and the
 mixer. It is deliberately a separate change, because neither a GitHub runner nor
