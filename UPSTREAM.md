@@ -402,7 +402,7 @@ Two more, which are design questions rather than factual errors:
     | Full recomposition, 24 placements | **1,596 B** vs 2,048 — passes |
     | Animation-only frame | **137 B** vs 400 — passes |
     | Idle frame | **0 B** — passes |
-    | Sustained p95, sliding 1 s windows | **8,321 B/s** vs 8,192 — **1.6% over** |
+    | Sustained p95, sliding 1 s windows | **8,459 B/s** vs 8,192 — **3.3% over** |
 
     At §4.7's own 140 ms rate rather than the tick-quantised 5 steps/s the script
     can reach, it is roughly **1.4x** over.
@@ -666,9 +666,18 @@ Two more, which are design questions rather than factual errors:
 
     | Arrangement | Per tick |
     | --- | --- |
-    | No pathing at all | 19 µs |
-    | Sixteen monsters, one shared target | 318 µs |
-    | Sixteen monsters, sixteen distinct targets | **2,695 µs** — 67% of the 4 ms budget |
+    | No pathing at all | 5–17 µs |
+    | Sixteen monsters, one shared target | 170–330 µs |
+    | Sixteen monsters, sixteen distinct targets | **≈2,650 µs** — 67% of the 4 ms budget |
+
+    The last row is stable to within ~3% across runs; the first two are small
+    enough to be dominated by noise, so the saving is *roughly an order of
+    magnitude* and not the "8.5×" an earlier draft of this item derived from one
+    sample of each. **That worst case is over the budget on CI** — 5,462 µs for
+    GCC on a GitHub runner, with Clang under it on the same hardware — which is
+    [#36](https://github.com/gobha-me/gloam/issues/36): a row that straddles its
+    budget by machine and by compiler, measured and printed rather than
+    asserted, because neither direction is stable.
 
     **And the finding that changed the shape of that row.** Sixteen distinct
     targets require sixteen STALE beliefs: `step` writes `mind.last_known` from
@@ -678,13 +687,19 @@ Two more, which are design questions rather than factual errors:
     expensive tick is the one where sixteen monsters are searching sixteen
     places the party is not.
 
-    That was found by measurement rather than by reading: the first version of
-    the budget row lit the lamp, reported sixteen "distinct" targets that were
-    all the party's cell, and timed a whole tick at 521 µs while sixteen fields
-    in isolation cost 2,676 µs in the same build. Two numbers that cannot both
-    describe the same work. The row now asserts a RATIO
-    (`distinct > shared × 2`) so it survives the sanitizer legs and goes red on
-    every box if someone reintroduces a field per monster.
+    That was found by measurement rather than by reading. The first version of
+    the budget row lit the lamp and reported sixteen "distinct" targets that
+    were in fact all the party's cell, so the tick it timed was an order of
+    magnitude cheaper than sixteen fields in isolation cost in the same build —
+    two numbers that could not both describe the same work. Counting the field
+    builds directly settled it: fifty-one builds over fifty-one ticks, every one
+    rooted at the party. (The exact microsecond figure that first version
+    printed is not reproducible, because the code that produced it was replaced;
+    what is reproducible is the isolated cost, ≈2,620 µs for sixteen fields.)
+
+    The row now asserts a RATIO (`distinct > shared × 2`) so it survives the
+    sanitizer legs and goes red on every box if someone reintroduces a field per
+    monster.
 
 #### Proposed: nine rows for `TEST-PLAN.md` §3
 

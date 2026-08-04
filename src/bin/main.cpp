@@ -82,7 +82,7 @@ auto print_instruments() -> bool {
   // is `to_chars`'d, so an id of 1 at cell (0,0) is the cheapest placement that
   // can exist — measuring it would print 64 B and derive a headroom of 32, when
   // §4.2's own slot inventory measures 66.5 B and 30. A 6% optimistic figure on
-  // the exact quantity gloam#26's 1.6% overrun turns on is worse than no figure.
+  // the exact quantity gloam#26's overrun turns on is worse than no figure.
   emit::ByteSink probe;
   const kitty::Placement sample{
       .image_id = 103,
@@ -131,7 +131,7 @@ auto print_instruments() -> bool {
       "  measured      0 emit bytes this run. There is no compositor (gloam#7),\n"
       "                so no session was rendered and no p95 was computed. The\n"
       "                200-tick harness in test/10budgets/ is where that number\n"
-      "                lives, and it is 1.6% OVER budget (gloam#26).\n";
+      "                lives, and it is 3.3% OVER budget (gloam#26).\n";
 
   // printf and a raw write share a file descriptor and not a buffer, so the
   // sections printed above would otherwise land after this one.

@@ -304,8 +304,11 @@ TEST_CASE("every reached cell has a neighbour exactly one step closer", "[path][
   }
   CHECK(descents > 0);
 
-  // And the walk terminates: from the deepest cell of the pocket, descending
-  // reaches the target in exactly its distance. A greedy stepper would loop.
+  // And the walk terminates: from inside the pocket, descending reaches the
+  // target in exactly its distance. A greedy stepper would loop here — (4,5) is
+  // the pocket's MOUTH, and the greedy step from it is into the closed end.
+  // (The genuinely deepest cell is (4,1) at distance 15, at the shut north end;
+  // the property loop above covers every cell, so both are asserted.)
   const Coord deep{4, 5};
   auto cursor = deep;
   auto facing = Dir::North;

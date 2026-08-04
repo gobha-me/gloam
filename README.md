@@ -145,7 +145,7 @@ Then the harness measured something worth having:
 | Full recomposition, 24 placements | 1,596 B | 2,048 B | passes |
 | Animation-only frame | 137 B | 400 B | passes |
 | Idle frame | 0 B | 0 B | passes |
-| Sustained p95 | **8,321 B/s** | 8,192 B/s | **1.6% over** |
+| Sustained p95 | **8,459 B/s** | 8,192 B/s | **3.3% over** |
 
 §4.7's 140 ms step transition and §11's 8 KB/s sustained p95 are **mutually
 unreachable** at §4.1's own placement count and the current wire form — and the
@@ -222,11 +222,16 @@ loses you when you back away, gives up, and walks home to resume the ping-pong:
   15    (3,2)    west    suspicious   3     (1,2)    yes  <- crossing
   16    (2,2)    west    searching    3     (1,2)    yes  <- off its route
   17    (2,2)    west    hunting      3     (1,2)    yes  <- off its route
+  ...
   27    (2,2)    west    hunting      0     (1,2)    yes  <- off its route
+  ...
   33    (2,2)    east    hunting      0     (4,2)    no   <- off its route
   40    (2,2)    south   lost-track   0     (5,2)    no   <- off its route
   80    (3,2)    east    unaware      0     (5,2)    no   <- crossing
 ```
+
+(Abridged — the binary prints one row per *event*, twenty-two of them, and
+carries on past tick 80 to show the ping-pong resume.)
 
 Two rows there are the mechanic rather than the plumbing. **Tick 27: the lamp is
 out and it still sees you**, because §6.3 keeps an unlit party visible at an
@@ -266,11 +271,25 @@ exercised: the *set* of hashed state is unchanged, and the *values* changed
 because monsters now walk.
 
 Measured at §11's reference scale, a tick in which sixteen monsters path to
-sixteen different places costs 2,695 µs against the 4 ms budget, and the same
-sixteen sharing one target cost 318 µs. That 8.5× is what the per-tick field
-cache buys — though the reason it usually applies is not the cache: `step`
-rewrites every perceiving monster's `last_known` to the party's cell, so monsters
-that can see you agree about where you are by construction.
+sixteen different places costs **≈2,650 µs** against the 4 ms budget — stable
+across runs to within ~3%. The same sixteen sharing one target cost **170–330 µs**
+and a tick with no pathing at all **5–17 µs**; both of those are small enough to
+be dominated by run-to-run noise, so the cache is worth *roughly an order of
+magnitude* rather than any one figure. (The first version of this paragraph
+quoted single samples of the two noisy numbers as though they were measurements.
+They were the high end of a spread.)
+
+The reason the cache usually applies is not the cache: `step` rewrites every
+perceiving monster's `last_known` to the party's cell, so monsters that can see
+you agree about where you are by construction. Sixteen *distinct* targets need
+sixteen *stale* beliefs.
+
+That worst case is **67% of the budget here and over it on CI** — GCC on a
+GitHub runner measured 5,462 µs, and Clang on the same runner stayed under. A
+row that straddles its budget by machine and by compiler is not a stable
+assertion in either direction, so it is measured and printed rather than
+asserted, and [#36](https://github.com/gobha-me/gloam/issues/36) carries the
+escape route.
 
 Still unstarted: the **RtAudio device** — the stream, the resident PCM and the
 mixer. It is deliberately a separate change, because neither a GitHub runner nor
