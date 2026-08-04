@@ -32,13 +32,14 @@
 ///
 /// WHAT IS NOT MODELLED YET, AND IS NOT PRETENDED TO BE
 ///
-///   * A MONSTER THAT HAS NOTICED YOU DOES NOT COME AFTER YOU. §6.4's patrol
-///     routes are here, and a monster walks one — but three of §6.1's five
-///     tells ("walks to the last known position", "direct pursuit", "walks back
-///     to the patrol route") translate a monster toward a target, and §6 never
-///     says how a monster paths. At SEARCHING and above it holds position.
-///     That is gloam#32, and `test/19patrol/` asserts it, so removing it is a
-///     deliberate red test rather than a silent change.
+///   * ARRIVAL HAS NO OUTCOME. A monster that notices you now comes after you
+///     (gloam#32) — and stops one cell short, because there is no combat, no
+///     death and no cell-occupancy rule for it to arrive INTO. It stands at
+///     arm's reach facing you until you move. When §7 lands, that halt becomes
+///     the attack and the pathing does not change.
+///   * MONSTERS DO NOT COLLIDE WITH EACH OTHER, for the same missing model.
+///     Two of them may stand in one cell. `test/22pursuit/` pins it so it is a
+///     decision rather than an accident.
 ///   * `creep_tick_cost` IS NOT APPLIED TO THE PARTY. §6.2 makes creeping cost ticks as
 ///     well as halving the noise. Monsters now have a movement-rate model
 ///     (`Tuning::monster_move_ticks`, gloam#29) and the party still does not:
@@ -183,10 +184,15 @@ struct Monster {
 ///
 /// WHAT IT DOES NOT CHECK, because it is not told: where the monster is
 /// STANDING. A perfectly valid route paired with a monster placed off it — or
-/// on it but not at `route[waypoint]` — yields a monster that never moves
-/// again, and this function returns true. Rejoining a route is the walk
-/// gloam#32 defers, so until that lands the placement is the author's to get
-/// right; `test/19patrol/` pins the behaviour so it is at least not a surprise.
+/// on it but not at `route[waypoint]` — is still a route this function accepts.
+///
+/// THAT USED TO MEAN "a monster that never moves again", and it no longer does.
+/// gloam#32's re-join rule walks such a monster back to the nearest cell of its
+/// own route and resumes the ping-pong from there, so a placement an author got
+/// wrong costs a walk rather than a corpse standing in a corridor for ever. The
+/// one case that still stands still is a route it cannot REACH — behind a shut
+/// door, or across rock — which is a level that disagrees with itself, and
+/// standing still is the same answer the pump gives every other kind of that.
 [[nodiscard]] auto valid_route(const Level& level, std::span<const Coord> route,
                                std::span<const std::uint8_t> dwell) -> bool;
 

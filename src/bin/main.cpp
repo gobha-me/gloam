@@ -15,6 +15,7 @@
 #include <signal.h>
 #include <unistd.h>  // STDOUT_FILENO — do not lean on libstdc++ leaking it
 
+#include <algorithm>
 #include <cstdio>
 #include <string>
 #include <string_view>
@@ -235,6 +236,11 @@ void trace_corridor() {
 /// question needs pixels - but "is the monster where the model says, when the
 /// model says, and does it know about me" is answerable here and is the half
 /// that has to be right before the pixels can help.
+/// True when this monster is standing on a cell of its own patrol route.
+[[nodiscard]] auto on_route(const Monster& m) -> bool {
+  return std::find(m.patrol.route.begin(), m.patrol.route.end(), m.at) != m.patrol.route.end();
+}
+
 void trace_patrol() {
   const Tuning& t = kDefaultTuning;
 
@@ -255,25 +261,49 @@ void trace_patrol() {
   // the monster patrols past you unaware; lit, it registers you. One integer,
   // both behaviours - which is SPEC 6.3's pillar and 4.4's plate selector being
   // the same number.
+  // THE LAMP GOES UP, AND THEN IT GOES OUT AGAIN, which is the whole cycle
+  // rather than half of it. Lit, the thing notices you and comes; doused, it
+  // loses you, gives up, and walks back to the route it left. Every one of
+  // those is a SPEC 6.1 tell, and until gloam#32 the trace stopped at the
+  // first.
   constexpr std::uint32_t kLampUpAtTick = 14;
-  constexpr int kTicks = 22;
+  constexpr std::uint32_t kLampOutAtTick = 26;
+  // AND THEN YOU WALK AWAY, because in a four-cell corridor dousing alone does
+  // not save you: SPEC 6.3 keeps an unlit party visible at an ADJACENT cell, so
+  // a monster already at arm's reach goes on seeing you with the lamp out. That
+  // is the mechanic working, and it is worth seeing in the table. Getting clear
+  // is what actually breaks the contact - and a leather step at 14 is below a
+  // normal monster's hearing threshold of 40, so walking away is silent.
+  constexpr std::uint32_t kFirstRetreatTick = 28;
+  constexpr int kRetreatSteps = 4;
+  constexpr int kTicks = 95;
 
   std::printf("\nM0 corridor - the patrol, ticked (SPEC 6.4)\n");
   std::printf("  party at (%d,%d) facing east; monster patrols (3,0)..(3,4) through\n",
               world.party.x, world.party.y);
   std::printf("  the intersection at (3,2), one step every %d ticks. You start doused,\n",
               t.monster_move_ticks);
-  std::printf("  and light the lamp at tick %u.\n\n", kLampUpAtTick);
+  std::printf("  light the lamp at tick %u, douse it at tick %u, and then back away\n",
+              kLampUpAtTick, kLampOutAtTick);
+  std::printf("  east from tick %u.\n\n", kFirstRetreatTick);
 
-  std::printf("  %-5s %-8s %-7s %-12s %-5s %s\n", "tick", "monster", "facing", "awareness",
-              "lamp", "sees you");
+  std::printf("  %-5s %-8s %-7s %-12s %-5s %-8s %s\n", "tick", "monster", "facing", "awareness",
+              "lamp", "you", "sees you");
 
   static const char* kFacings[] = {"north", "east", "south", "west"};
   static const char* kStates[] = {"unaware", "suspicious", "searching", "hunting", "lost-track"};
 
+  auto previous_state = world.monsters[0].mind.state;
+  auto previous_at = world.monsters[0].at;
+  auto previous_party = world.party;
+
   for (int tick = 0; tick < kTicks; ++tick) {
-    if (world.tick == kLampUpAtTick) {
-      apply(world, replay::Event::Lamp, 3, t);
+    if (world.tick == kLampUpAtTick) apply(world, replay::Event::Lamp, 3, t);
+    if (world.tick == kLampOutAtTick) apply(world, replay::Event::Lamp, 0, t);
+    for (int r = 0; r < kRetreatSteps; ++r) {
+      if (world.tick == kFirstRetreatTick + static_cast<std::uint32_t>(r) * 2) {
+        apply(world, replay::Event::Step, static_cast<std::uint16_t>(Dir::East), t);
+      }
     }
     advance(world, t);
     const auto& mon = world.monsters[0];
@@ -285,15 +315,36 @@ void trace_patrol() {
                                     range_between(mon.at, world.party),
                                     t.sight_distance(mon.kind.acuity));
 
-    std::printf("  %-5u (%d,%d)    %-7s %-12s %-5d %s%s\n", world.tick, mon.at.x, mon.at.y,
-                kFacings[static_cast<int>(mon.facing)],
-                kStates[static_cast<int>(mon.mind.state)], world.lamp_level,
-                seen ? "yes" : "no", mon.at == Coord{3, 2} ? "   <- crossing" : "");
+    // ONE LINE PER EVENT, NOT PER TICK. Ninety-six rows of a monster standing
+    // still is a table nobody reads to the end; the interesting ticks are the
+    // ones where it changed its mind or its cell.
+    const bool interesting = mon.mind.state != previous_state || mon.at != previous_at ||
+                             world.tick == kLampUpAtTick + 1 || world.tick == kLampOutAtTick + 1 ||
+                             world.party != previous_party;
+    previous_state = mon.mind.state;
+    previous_at = mon.at;
+    previous_party = world.party;
+    if (!interesting) continue;
+
+    const char* note = "";
+    if (mon.at == Coord{3, 2}) note = "   <- crossing";
+    if (!on_route(mon)) note = "   <- off its route";
+
+    std::printf("  %-5u (%d,%d)    %-7s %-12s %-5d (%d,%d)    %s%s\n", world.tick, mon.at.x,
+                mon.at.y, kFacings[static_cast<int>(mon.facing)],
+                kStates[static_cast<int>(mon.mind.state)], world.lamp_level, world.party.x,
+                world.party.y, seen ? "yes" : "no", note);
   }
 
-  std::printf("\n  Doused, it walks past and never knows. Lit, it stops - and then it\n"
-              "  stands there, because every SPEC 6.1 tell that would bring it TOWARD\n"
-              "  you needs a pathfinder SPEC 6 never specifies (gloam#32).\n");
+  const auto& mon = world.monsters[0];
+  std::printf("\n  Doused, it walks past and never knows. Lit, it leaves the route and\n"
+              "  comes for you - and stops one cell short, because there is no combat\n"
+              "  at M0 and a thing standing ON you is a worse dead end than a thing\n"
+              "  standing next to you. Douse again and it searches where you were,\n"
+              "  gives up, casts about, and walks home.\n");
+  std::printf("  Ends on (%d,%d), %s, %s.\n", mon.at.x, mon.at.y,
+              kStates[static_cast<int>(mon.mind.state)],
+              on_route(mon) ? "back on its route" : "still off its route");
 }
 
 }  // namespace

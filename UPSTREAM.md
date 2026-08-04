@@ -565,46 +565,132 @@ Two more, which are design questions rather than factual errors:
 
 18. **Three of §6.1's five tells require a monster to translate toward a target,
     and §6 never says how a monster paths.** Mirrored as
-    [#32](https://github.com/gobha-me/gloam/issues/32), which is G-9b's charter
-    rather than a note. "Leaves the patrol route, walks to the last known
-    position", "direct pursuit", and "walks back to the patrol route and
-    resumes" all need a path. §5.2's "same AI, same patrols, **same
-    pathfinding**" is the only mention of the word in the document, and it
-    asserts that two play modes share a thing that does not exist.
+    [#32](https://github.com/gobha-me/gloam/issues/32). **Decided and
+    implemented in G-9b.** §5.2's "same AI, same patrols, **same pathfinding**"
+    now asserts that two play modes share something that exists.
 
-    **Decided for now: a monster at SEARCHING or above holds position,** and
-    `test/19patrol/` asserts it so that removing it in G-9b is a deliberate red
-    test. G-9a's boundary is one sentence — *it moves monsters along authored
-    routes and turns their heads; it never translates a monster toward the
-    party* — which maps exactly onto "needs no pathfinder".
+    **The primitive is a uniform-cost BFS over `Level::walk`, rooted at the
+    TARGET.** `gloam::DistanceField` in `path.hpp`, deliberately modelled on
+    `NoiseField` and deliberately NOT on `propagate_noise`: noise is a Dijkstra
+    over `conducts_sound()`, which is TRUE for a closed door, and movement is a
+    BFS over `walk()`, which is FALSE for the same door. One graph, two readings
+    (§12) — and a monster that could path through a shut door because sound can
+    is exactly what sharing one function would have produced. `test/21path/`
+    pins the pair: the same level, refused closed and walked open, at §6.2's own
+    attenuation numbers.
 
-    **Cost is not why.** A single party-rooted BFS field per tick would serve
-    every HUNTING monster at once, the same shared-field trick `advance` already
-    uses twice. Four other things are: **arrival has no defined outcome** (no
-    combat, no collision rule, no cell-occupancy rule — a monster that pursues
-    you and then stands *on* you is a more visible dead end than one that holds);
-    the shared field serves only one of the three rows, since SEARCHING and the
-    route walk-back target per-monster positions, so shipping pursuit alone
-    would give patrol → halt → *freeze* → **charge** → *freeze*; a distance
-    field is a new public primitive whose failure matrix is a slice's work; and
-    it would have tripled the behavioural diff in the commit that also moved
-    `kWorldHashVersion`.
+    Unreachable is a named sentinel (`kUnreachable`) rather than
+    `std::optional`, because zero is a real distance where zero loudness is not,
+    and because the sentinel makes "unreachable is farther than anywhere" true
+    by arithmetic rather than by a special case at every call site.
 
-    **Explicitly rejected as a shortcut:** greedy "step to the neighbour that
-    reduces Chebyshev range". It sticks in local minima on a walled grid and
-    reads as broken AI, which is §16's top risk row and precisely what #8's gate
-    exists to measure. A wrong answer here poisons the gate rather than
-    approximating it.
+    **Rooted at the target, and that IS the shared-field discipline.** A field
+    rooted at the monster answers one monster's question; one rooted at the
+    destination answers every monster's. Licensed by a theorem rather than by
+    hope — `Level::walk` is symmetric between two navigable cells — and asserted
+    as `d(a,b) == d(b,a)` over every navigable pair, the way §13.3 asserts LOS
+    symmetry, for the same reason. The one asymmetry (`walk` never checks that
+    the SOURCE is navigable, so a body can leave rock but not enter it) is
+    closed by refusing a source in rock, which is also the answer to "the party
+    is standing in rock".
 
-    Two of the five tells ARE performed, because neither translates anything:
-    `PatrolRhythmBreaks` (halt one tick, head turns toward `mind.last_known`)
-    and `CastsAbout` (turning in place). `facing` is hashed state for that
-    reason — a tell a replay cannot reproduce is not a tell, it is an animation.
+    **A HUNTING monster pursues `mind.last_known`, never `w.party`.**
+    `hunting_lost_ticks` is 8, so a hunter can hold a stale belief for eight
+    ticks, and pursuing the true position would hand it knowledge it does not
+    have. A monster rounding a corner you have already left is §6.1 working; one
+    that tracks you through a wall it cannot hear you through is §16's top risk
+    row.
+
+    **Decided — THE ARRIVAL RULE: pursuit stops at adjacency.** A HUNTING
+    monster never enters the party's cell; it stands cardinally adjacent, facing
+    you, until you move. There is no combat, no death and no cell-occupancy
+    model at M0, so a monster standing *on* you is a more visible dead end than
+    one that stops at arm's reach; §6.3 already treats adjacency as the contact
+    boundary. When §7's combat lands, the halt becomes the attack and not one
+    line of the pathing changes.
+
+    Stated in **path** distance, not `range_between` — the field is 4-connected
+    and `kAdjacentRange` is Chebyshev, so the two disagree on the diagonal and a
+    diagonally-adjacent monster takes one more step. Two notions of adjacency
+    now exist in the tree, and the code says which is which.
+
+    **Decided — monsters do not collide with each other.** Two may occupy one
+    cell. There is no occupancy model to consult, and inventing one to serve
+    pathing would be deciding §7's entity question from inside `world.cpp`.
+    Asserted in `test/22pursuit/`, so it is a pinned decision rather than an
+    accident of implementation.
+
+    **Decided — THE RE-JOIN RULE, which closes the half of
+    [#28](https://github.com/gobha-me/gloam/issues/28) left open.** A monster
+    that would patrol but is not standing at `route[waypoint]` walks home: one
+    **multi-source** field seeded with every cell of its own route, descended
+    until it arrives, so "the nearest cell of the route" falls out of the search
+    rather than out of a loop over candidate targets. The arrived cell's LOWEST
+    matching index becomes the waypoint — the same reading that makes a route
+    naming one cell twice unambiguous — and the arrival pays its dwell.
+
+    This retires `world.hpp`'s "a monster placed off its route never moves
+    again", and it makes §6.1's LOST_TRACK → UNAWARE tell ("walks back to the
+    patrol route and resumes") and #28's re-join **one code path**: the tell
+    fires on the transition tick, and the sustained behaviour is "would patrol,
+    is not on its route, walks home".
+
+    **Decided — LEAVING THE ROUTE DISCARDS THE PAUSE IT OWED.** A monster
+    part-way through a four-tick authored dwell that notices you must not stand
+    through the rest of it first. `dwell_left` is a patrol debt and nothing
+    else; the pause is re-authored the next time the ping-pong arrives there.
+
+    **Decided — NO NEW SPEED TUNABLE.** Pursuit runs on `monster_move_ticks`
+    through the same ready/charge pair the patrol pump uses, so two rate models
+    cannot drift. A monster that outruns the party is a balance decision and
+    item 15 deferred it until #8's gate is answered. §6.1's "gait changes" is
+    carried behaviourally — it leaves the route and comes straight at you — plus
+    the sting that already fires.
+
+    **`move_cooldown` moved from `Patrol` to `Monster`.** It is a movement
+    clock, not a patrol cursor: a route-LESS monster that pursues charges it
+    too, and leaving it in `Patrol` would have meant a monster with no route
+    quietly writing patrol state — which `test/13replay/` asserts does not
+    happen, and was right to. Hashed in the position it already occupied, so not
+    one digest byte changed for the move.
+
+    **The rejected shortcut stays rejected, and is now falsifiable.** Greedy
+    "step to the neighbour that reduces Chebyshev range" sticks in local minima
+    on a walled grid. `test/21path/` asserts the property that kills it: every
+    reached cell at distance *d* ≥ 1 has a neighbour at exactly *d* − 1, so a
+    descent always exists — a theorem about a BFS field and a falsehood about a
+    greedy heuristic, demonstrated on a U-shaped pocket.
+
+    **What it cost, measured**, at §11's reference scale (32×32, sixteen
+    monsters, GCC 14 Debug):
+
+    | Arrangement | Per tick |
+    | --- | --- |
+    | No pathing at all | 19 µs |
+    | Sixteen monsters, one shared target | 318 µs |
+    | Sixteen monsters, sixteen distinct targets | **2,695 µs** — 67% of the 4 ms budget |
+
+    **And the finding that changed the shape of that row.** Sixteen distinct
+    targets require sixteen STALE beliefs: `step` writes `mind.last_known` from
+    `senses.party_position` on every perception hit, so every monster that can
+    currently see or hear the party believes the same cell. The shared field is
+    not a discipline the cache imposes — it is what perception hands it, and the
+    expensive tick is the one where sixteen monsters are searching sixteen
+    places the party is not.
+
+    That was found by measurement rather than by reading: the first version of
+    the budget row lit the lamp, reported sixteen "distinct" targets that were
+    all the party's cell, and timed a whole tick at 521 µs while sixteen fields
+    in isolation cost 2,676 µs in the same build. Two numbers that cannot both
+    describe the same work. The row now asserts a RATIO
+    (`distinct > shared × 2`) so it survives the sanitizer legs and goes red on
+    every box if someone reintroduces a field per monster.
 
 #### Proposed: nine rows for `TEST-PLAN.md` §3
 
 §3's property table has six rows and **none of them are about movement**, because
-nothing moved when it was written. `test/19patrol/` implements the nine below;
+nothing moved when it was written. `test/19patrol/` and `test/22pursuit/`
+implement the rows below;
 they are recorded here as a proposed amendment rather than written into
 `design/TEST-PLAN.md`, which is a snapshot (see `design/README.md`).
 
@@ -618,7 +704,13 @@ they are recorded here as a proposed amendment rather than written into
 | P6 | After 1000 patrolling ticks, ONLY `Stream::Patrol` has moved | §6.4's "never the shared one", asserted rather than conventional |
 | P7 | With no jitter and no dwell, an *n*-cell route repeats in `2(n-1) × monster_move_ticks` ticks | legibility as a theorem; notices if idle variation leaks onto a pauseless leg |
 | P8 | `PatrolRhythmBreaks` halts for EXACTLY one tick and faces `mind.last_known` | §6.1 says "halt for one tick"; a freeze is a different behaviour wearing the same name |
-| P9 | Awareness at SEARCHING or above pins the position | item 18's boundary, so removing it in G-9b is a deliberate red test |
+| P9a | LOST_TRACK pins the position, and is now the only state that does | §6.1's tell for it is "turning IN PLACE"; a monster that walked while casting about would be performing a different tell |
+| P9b | A SEARCHING monster walks ONTO the last known position and stops | §6.1's "walks to the last known position", read literally |
+| P9c | A HUNTING monster stops adjacent and never enters the party's cell | the arrival rule, and the reason it exists is that nothing defines what arriving INTO a party means |
+| P11 | A target it cannot reach makes a monster stand still | never a drift toward the wall between you, which is the greedy stepper's failure and §16's top risk row |
+| P12 | Pursuit never steps more often than `monster_move_ticks` allows | P3 for the other mover: an assertion that nobody gave pursuit a clock of its own |
+| P13 | A monster that loses you walks home and resumes its patrol | §6.1's cycle closed, performed end to end for the first time |
+| P14 | Pursuit is deterministic and takes no RNG draw; a rejoin ARRIVAL draws, from `patrol` and no other | the pathfinder needs no stream, and §19 step 9's `--mute` identity survives a second subsystem writing `Monster::at` |
 
 ### Decisions taken
 
@@ -632,6 +724,8 @@ these rows are the amendment, and the code implements them.
 | [#12](https://github.com/gobha-me/gloam/issues/12) | **§6.1 gains a LOST_TRACK → HUNTING row, with its own tell.** Condition is the same `saw` as SEARCHING → HUNTING. The tell is the head snapping mid-cast-about and an immediate close, with **no audio sting**. | `Tell::SnapsBack`. The sting is reserved for a first sighting: it means "found you", and its absence here means "never lost you". Tell selection is now keyed on the `(before, next)` pair, because two transitions land on HUNTING and §6.1 requires them to read differently. |
 | [#10](https://github.com/gobha-me/gloam/issues/10) | **Confirmed:** transition sequences are animation registrations, not resident images. | Already encoded; no change. |
 | [#13](https://github.com/gobha-me/gloam/issues/13) | **Recorded, deliberately not built.** Capacity from (carry − equipped), over-capacity as a noise penalty, multiplicative rather than subtractive noise reduction, armour **classes** not slots, enchantments derived from URN bindings, and the bag is **silent, not weightless**. | No code. §19 is explicit that nothing in §7 or §8 makes M0's question easier to answer and building either first makes it more expensive to act on the answer. Implement at M1, when the party exists. |
+
+| [#32](https://github.com/gobha-me/gloam/issues/32) | **§6.1 gains a SEARCHING → LOST_TRACK row, and it needs no new tunable and no new tell.** Condition: the trail is exhausted — the monster is standing on `last_known`, or cannot reach it from where it stands — **and** `hunting_lost_ticks` have passed with no perception hit. Ordered AFTER the `saw` check, on #12's re-acquisition precedent. | Without it, pursuit's only terminal state is a monster frozen off its route for the rest of the session — strictly worse for §6.4's "the world feels alive" than the hold-position boundary it replaces, and it would poison #8's gate rather than approximate it. The tell is the existing `Tell::CastsAbout` — "casts about **at the last position**, turning in place" — which `world.cpp` recorded as satisfied *vacuously* until #32; this is the row that cashes it. #12's rule that two paths into one state must not read alike does not apply, because both mean the identical thing: the trail went cold here. `Senses` gains `trail_exhausted`, derived in `advance` where the distance field is, so `perception.cpp` never learns how a monster paths — and it defaults false, so no existing caller changed. `kTuningFieldCount` unchanged at **49**, `ruleset_hash` unmoved, and **no recorded replay is invalidated**. |
 
 Two notes worth carrying forward from #12's implementation:
 

@@ -125,13 +125,18 @@ struct AudioRun {
   // stream, so the two recording processes now have to agree about `Stream::
   // Patrol` as well as about the world.
   //
-  // IT SOUNDS ONCE, AND THAT IS THE BEHAVIOUR RATHER THAN A THIN SCENARIO.
-  // This session walks a lit party to within two cells of the alcove, so the
-  // monster escalates almost immediately — and a monster at SEARCHING or above
-  // holds position (gloam#32). One step, then it stops patrolling and starts
-  // paying attention to you. Lengthening the route or removing the pause does
-  // not change that; only §6.1's timers running back down to UNAWARE would, and
-  // those are 48 ticks against this session's 10.
+  // IT SOUNDS MORE THAN ONCE NOW, AND THAT IS gloam#32 LANDING. This session
+  // walks a lit party to within two cells of the alcove, so the monster
+  // escalates almost immediately — and it no longer stops when it does. It
+  // leaves the alcove and comes down the corridor, so the session carries a
+  // footfall per step of a pursuit rather than the single step a patrol got in
+  // before it froze.
+  //
+  // That makes `check_audio_mute.cmake`'s by-name `monster_footfalls > 0`
+  // requirement STRONGER rather than weaker, and it makes
+  // `check_replay_determinism.cmake` measure something new again: the two
+  // recording processes now have to agree about a path as well as about a
+  // patrol cursor and an RNG stream.
   //
   // THE PAUSE IS ON WAYPOINT 1, NOT WAYPOINT 0, AND THAT IS NOT COSMETIC. The
   // pump owes a dwell on ARRIVING at a waypoint, so the dwell of the cell a
