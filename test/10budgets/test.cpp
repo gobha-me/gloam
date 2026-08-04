@@ -575,6 +575,125 @@ TEST_CASE("§11's tick budget still holds with the audio sink attached", "[budge
   CHECK(per_tick_us < budget::kMaxSimulationTickMs * 1000);
 }
 
+TEST_CASE("§11's tick budget holds when sixteen monsters PURSUE", "[budget]") {
+  // WHAT THIS ROW MEASURES, AND THE FACT THAT DECIDES ITS SHAPE.
+  //
+  // A distance field has no cheap case: unlike `propagate_noise`, whose extent
+  // is bounded by the emission, it always fills its reachable component and
+  // there is no early-out. So the only lever on cost is how many DISTINCT
+  // targets a tick asks about.
+  //
+  // AND SIXTEEN DISTINCT TARGETS REQUIRE SIXTEEN STALE BELIEFS. `step` writes
+  // `mind.last_known` from `senses.party_position` on every perception hit, so
+  // every monster that can currently see or hear the party believes the SAME
+  // cell — the shared field is not a discipline the cache imposes, it is what
+  // perception hands it. The expensive tick is therefore the one where sixteen
+  // monsters are searching sixteen places the party is not, which is why this
+  // case douses the lamp and keeps the party silent rather than lighting it.
+  //
+  // Measured while writing this, because the first attempt lit the lamp and
+  // then reported sixteen "distinct" targets that were all the party's cell: a
+  // whole tick came in at 521 us while sixteen fields in isolation cost 2676 us
+  // in the same build. Two numbers that cannot both describe the same work.
+  const Tuning& t = kDefaultTuning;
+
+  constexpr int kSide = 32;
+  constexpr int kMonsters = 16;
+  constexpr int kRepeats = 50;
+  const Coord party{16, 20};
+
+  // Sixteen cells spread across the level, so no two searches share a source.
+  const auto stale_target = [](int m) { return Coord{1 + (m % 4) * 8, 1 + (m / 4) * 8}; };
+
+  const auto build = [&](bool distinct_targets, Awareness state) {
+    Level level{kSide, kSide};
+    for (int y = 0; y < kSide; ++y) level.carve(Coord{0, y}, Dir::East, kSide);
+    for (int x = 0; x < kSide; ++x) level.carve(Coord{x, 0}, Dir::South, kSide);
+
+    std::vector<Monster> monsters;
+    for (int m = 0; m < kMonsters; ++m) {
+      Monster mon{};
+      mon.at = Coord{14 + m % 5, 14 + m / 5};
+      mon.kind = MonsterKind{Acuity::Dull, false};  // deaf enough not to re-acquire
+      mon.mind.state = state;
+      mon.mind.has_last_known = true;
+      mon.mind.last_known = distinct_targets ? stale_target(m) : stale_target(0);
+      monsters.push_back(mon);
+    }
+    auto w = make_world(0xC0FFEEULL, std::move(level), std::move(monsters));
+    w.party = party;
+    w.armour = Armour::Leather;
+    w.lamp_level = 0;  // doused: the beliefs above stay stale, which is the point
+    return w;
+  };
+
+  const auto time_ticks = [&](World& world, bool distinct_targets, Awareness state) {
+    const auto rearm = [&] {
+      for (std::size_t i = 0; i < world.monsters.size(); ++i) {
+        auto& mon = world.monsters[i];
+        mon.at = Coord{14 + static_cast<int>(i) % 5, 14 + static_cast<int>(i) / 5};
+        mon.move_cooldown = 0;
+        mon.mind.state = state;
+        mon.mind.ticks_since_hit = 0;  // so §6.1's give-up timer never fires
+        mon.mind.last_known = distinct_targets ? stale_target(static_cast<int>(i)) : stale_target(0);
+      }
+    };
+    rearm();
+    advance(world, t);  // warm-up, deliberately untimed
+
+    std::chrono::steady_clock::duration total{};
+    for (int r = 0; r < kRepeats; ++r) {
+      rearm();
+      const auto start = std::chrono::steady_clock::now();
+      advance(world, t);
+      total += std::chrono::steady_clock::now() - start;
+    }
+    return std::chrono::duration_cast<std::chrono::microseconds>(total).count() / kRepeats;
+  };
+
+  auto shared = build(/*distinct_targets=*/false, Awareness::Searching);
+  auto distinct = build(/*distinct_targets=*/true, Awareness::Searching);
+  auto silent = build(/*distinct_targets=*/false, Awareness::Unaware);
+
+  const auto silent_us = time_ticks(silent, false, Awareness::Unaware);
+  const auto shared_us = time_ticks(shared, false, Awareness::Searching);
+  const auto distinct_us = time_ticks(distinct, true, Awareness::Searching);
+
+  // THE TRAFFIC GUARD, and without it this is the fastest row in the file while
+  // measuring nothing. An early-out in `monster_step`, or a target nobody can
+  // path to, would make every arrangement free and leave the ratio comparing two
+  // descriptions of an empty tick.
+  int moved = 0;
+  for (int i = 0; i < kMonsters; ++i) {
+    const Coord spawn{14 + i % 5, 14 + i / 5};
+    if (distinct.monsters[static_cast<std::size_t>(i)].at != spawn) ++moved;
+  }
+  INFO("monsters that actually stepped on the last timed tick: " << moved);
+  CHECK(moved == kMonsters);
+
+  INFO("one shared target: " << shared_us << " us; " << kMonsters << " distinct: " << distinct_us
+                             << " us; no pathing at all: " << silent_us << " us");
+
+  // THE ANTI-REGRESSION INSTRUMENT, and it is a ratio so it survives every leg
+  // of the matrix: a sanitizer slows both measurements equally. Reintroduce a
+  // field per monster and `shared_us` becomes `distinct_us`, and this goes red
+  // on every box rather than only on a slow one — which an absolute budget would
+  // not do, since a fast machine fits sixteen searches inside 4 ms and waves the
+  // regression through.
+  CHECK(distinct_us > shared_us * 2);
+
+  // And the absolute row. If this ever fails unsanitized the answer is NOT a
+  // distance cap on the primitive: a cap makes "far" and "unreachable" the same
+  // answer and breaks the SEARCHING exit's honesty. Record the measurement and
+  // take the decision in the open, the way the 13.6 ms finding was.
+#if defined(GLOAM_TEST_SANITIZED)
+  WARN("§11's absolute tick budget is not asserted under a sanitizer — see the worst-case "
+       "sting row for the argument.");
+#else
+  CHECK(distinct_us < budget::kMaxSimulationTickMs * 1000);
+#endif
+}
+
 TEST_CASE("§11's tick budget holds when EVERY monster stings on one tick", "[budget]") {
   // THE ACTUAL WORST CASE, CONSTRUCTED RATHER THAN WAITED FOR.
   //
