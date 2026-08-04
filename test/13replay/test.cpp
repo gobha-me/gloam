@@ -546,7 +546,7 @@ TEST_CASE("the world hash notices every field of the world", "[replay][determini
   CHECK(changed([](World& w) { w.monsters[0].patrol.waypoint += 1; }));
   CHECK(changed([](World& w) { w.monsters[0].patrol.reversed = true; }));
   CHECK(changed([](World& w) { w.monsters[0].patrol.dwell_left += 1; }));
-  CHECK(changed([](World& w) { w.monsters[0].patrol.move_cooldown += 1; }));
+  CHECK(changed([](World& w) { w.monsters[0].move_cooldown += 1; }));
 
   // Every simulation stream. If one of these ever stops mattering, it is the
   // static_assert in world.cpp that should be arguing about it, not silence.
@@ -640,17 +640,35 @@ TEST_CASE("a world REACHED by replaying hashes the same as one built directly",
   // transition is a head turn. Copying `mind` alone left this case red for a
   // reason that was the pump working correctly.
   //
+  // `at` and `move_cooldown` joined them with gloam#32, and the pair is worth a
+  // sentence because it is a genuinely new fact about this world: THESE
+  // MONSTERS HAVE NO ROUTE AND THEY MOVE ANYWAY. Pursuit needs no route — a
+  // monster that notices you walks toward what it believes, patrol or no
+  // patrol — so "route-less" stopped meaning "stationary" the day the
+  // pathfinder landed, and where it got to is part of the end state exactly as
+  // `mind` and `facing` are.
+  //
   // AND NOTHING ELSE IS COPIED, DELIBERATELY. Blanket-copying `patrol` and
   // `rng_state` across would also make this case pass, and would defeat the
   // exact thing it exists to catch — "anything a `play` leaves behind that a
   // direct build does not". Leaving them uncopied is what asserts that a
-  // route-less world takes no patrol draw and writes no cursor. If §6.4 ever
-  // touches either on a path a direct build cannot reproduce, this goes red
-  // here rather than in `gloam_replay play`, which is the whole point.
+  // route-less world takes no patrol draw and writes no CURSOR — which is also
+  // why `move_cooldown` lives on `Monster` rather than inside `Patrol` now: a
+  // pursuing monster charges a movement clock, and it must not be reaching into
+  // patrol state to do it. If either is ever touched on a path a direct build
+  // cannot reproduce, this goes red here rather than in `gloam_replay play`,
+  // which is the whole point.
   for (std::size_t i = 0; i < built.monsters.size(); ++i) {
     built.monsters[i].mind = walked.monsters[i].mind;
     built.monsters[i].facing = walked.monsters[i].facing;
+    built.monsters[i].at = walked.monsters[i].at;
+    built.monsters[i].move_cooldown = walked.monsters[i].move_cooldown;
   }
+  // Non-vacuity, and it is the assertion that makes the paragraph above true
+  // rather than merely stated: at least one of them actually left where it was
+  // put. Without this the copies could be masking a world in which nothing
+  // moved at all.
+  CHECK(built.monsters != corridor_world().monsters);
 
   CHECK(hex_of(world_hash(built)) == hex_of(world_hash(walked)));
 }
@@ -767,10 +785,24 @@ TEST_CASE("a golden world hash pins the simulation across compilers",
   //      tell.
   //
   // Being able to say which is which is the whole point of the version byte.
+  //
+  // Moved AGAIN with gloam#32's pathfinder, and this time in the direction
+  // nothing had exercised: `kWorldHashVersion` is STILL 2 and the hash moved
+  // anyway. That is not a contradiction, it is the distinction the byte exists
+  // to draw. The SET of hashed state is unchanged — every pursuit target is a
+  // pure function of `mind.last_known`, `patrol.route` and `at`, all of which
+  // were already hashed, and `move_cooldown` moved from `Patrol` to `Monster`
+  // while keeping its position in the digest, so not one byte of the LAYOUT
+  // changed. What changed is the VALUES: these route-less monsters now walk
+  // toward what they believe, so the world at tick N is a different world.
+  //
+  // Bumping the version "to be safe" would have destroyed exactly that
+  // distinction, by making "the layout changed" and "the monsters moved"
+  // produce the same evidence.
   const auto records = scripted_records();
   auto w = corridor_world();
   play(w, records, kDefaultTuning);
-  CHECK(hex_of(world_hash(w)) == "5d594c7b996e6072592a3dc9abd212f88d9c594ed15ee76cf87b2b6f56b9f91c");
+  CHECK(hex_of(world_hash(w)) == "62df236767a39e7f68ca3ee63fb8fff57cc1c78e6c30c2f76492f305d8a9352f");
 }
 
 TEST_CASE("a golden file digest pins the container across compilers",

@@ -50,6 +50,7 @@ add_library(${PROJECT_NAME}_lib STATIC
   meter.cpp
   noise.cpp
   pack.cpp
+  path.cpp
   perception.cpp
   plate.cpp
   replay.cpp

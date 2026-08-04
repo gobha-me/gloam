@@ -80,6 +80,7 @@
 #include "gloam/geometry.hpp"
 #include "gloam/level.hpp"
 #include "gloam/noise.hpp"
+#include "gloam/path.hpp"
 #include "gloam/perception.hpp"
 #include "gloam/replay.hpp"
 #include "gloam/rng.hpp"

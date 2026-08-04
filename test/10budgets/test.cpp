@@ -12,6 +12,7 @@
 
 #include <catch2/catch_all.hpp>
 
+#include <array>
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
@@ -52,6 +53,20 @@ using namespace gloam;
 // Clang spells it `__has_feature`; GCC spells it `__SANITIZE_ADDRESS__` and
 // `__SANITIZE_THREAD__`. UBSan is deliberately absent — it is recoverable and
 // barely affects timing, so the absolute budget stays asserted there.
+//
+// ONE ROW HAS SINCE FOUND AN EXCEPTION TO THAT LAST CLAUSE, and it is worth
+// knowing before trusting it again: gloam#32's pathfinder row is dense signed
+// integer arithmetic, which is exactly what UBSan instruments, and it measured
+// 1.9x slower under it — 2,695 us against 5,182 us at §11's reference scale on
+// GCC 14, which is the difference between 67% of the 4 ms budget and 130% of it.
+//
+// Neither compiler predefines a macro for UBSan, and `cmake/toolchain/
+// undefined.cmake` already ships `TEMPLATE_UBSAN` for that reason — so that row
+// reads the define that is already there rather than inventing a second one.
+// (An earlier attempt did invent one, and `check_artifacts.cmake`'s B3 rule
+// caught it: the UBSan define is a coupled pair across two files, and the rule
+// exists to keep it one pair rather than two.) Every OTHER absolute budget still
+// asserts under UBSan exactly as before.
 #if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
 #define GLOAM_TEST_SANITIZED 1
 #elif defined(__has_feature)
@@ -574,6 +589,149 @@ TEST_CASE("§11's tick budget still holds with the audio sink attached", "[budge
   CHECK(per_tick_us < budget::kMaxSimulationTickMs * 1000);
 }
 
+TEST_CASE("§11's tick budget holds when sixteen monsters PURSUE", "[budget]") {
+  // WHAT THIS ROW MEASURES, AND THE FACT THAT DECIDES ITS SHAPE.
+  //
+  // A distance field has no cheap case: unlike `propagate_noise`, whose extent
+  // is bounded by the emission, it always fills its reachable component and
+  // there is no early-out. So the only lever on cost is how many DISTINCT
+  // targets a tick asks about.
+  //
+  // AND SIXTEEN DISTINCT TARGETS REQUIRE SIXTEEN STALE BELIEFS. `step` writes
+  // `mind.last_known` from `senses.party_position` on every perception hit, so
+  // every monster that can currently see or hear the party believes the SAME
+  // cell — the shared field is not a discipline the cache imposes, it is what
+  // perception hands it. The expensive tick is therefore the one where sixteen
+  // monsters are searching sixteen places the party is not, which is why this
+  // case douses the lamp and keeps the party silent rather than lighting it.
+  //
+  // Measured while writing this, because the first attempt lit the lamp and
+  // then reported sixteen "distinct" targets that were all the party's cell: a
+  // whole tick came in at 521 us while sixteen fields in isolation cost 2676 us
+  // in the same build. Two numbers that cannot both describe the same work.
+  const Tuning& t = kDefaultTuning;
+
+  constexpr int kSide = 32;
+  constexpr int kMonsters = 16;
+  constexpr int kRepeats = 50;
+  const Coord party{16, 20};
+
+  // Sixteen cells spread across the level, so no two searches share a source.
+  const auto stale_target = [](int m) { return Coord{1 + (m % 4) * 8, 1 + (m / 4) * 8}; };
+
+  const auto build = [&](bool distinct_targets, Awareness state) {
+    Level level{kSide, kSide};
+    for (int y = 0; y < kSide; ++y) level.carve(Coord{0, y}, Dir::East, kSide);
+    for (int x = 0; x < kSide; ++x) level.carve(Coord{x, 0}, Dir::South, kSide);
+
+    std::vector<Monster> monsters;
+    for (int m = 0; m < kMonsters; ++m) {
+      Monster mon{};
+      mon.at = Coord{14 + m % 5, 14 + m / 5};
+      mon.kind = MonsterKind{Acuity::Dull, false};  // deaf enough not to re-acquire
+      mon.mind.state = state;
+      mon.mind.has_last_known = true;
+      mon.mind.last_known = distinct_targets ? stale_target(m) : stale_target(0);
+      monsters.push_back(mon);
+    }
+    auto w = make_world(0xC0FFEEULL, std::move(level), std::move(monsters));
+    w.party = party;
+    w.armour = Armour::Leather;
+    w.lamp_level = 0;  // doused: the beliefs above stay stale, which is the point
+    return w;
+  };
+
+  const auto time_ticks = [&](World& world, bool distinct_targets, Awareness state) {
+    const auto rearm = [&] {
+      for (std::size_t i = 0; i < world.monsters.size(); ++i) {
+        auto& mon = world.monsters[i];
+        mon.at = Coord{14 + static_cast<int>(i) % 5, 14 + static_cast<int>(i) / 5};
+        mon.move_cooldown = 0;
+        mon.mind.state = state;
+        mon.mind.ticks_since_hit = 0;  // so §6.1's give-up timer never fires
+        mon.mind.last_known = distinct_targets ? stale_target(static_cast<int>(i)) : stale_target(0);
+      }
+    };
+    rearm();
+    advance(world, t);  // warm-up, deliberately untimed
+
+    std::chrono::steady_clock::duration total{};
+    for (int r = 0; r < kRepeats; ++r) {
+      rearm();
+      const auto start = std::chrono::steady_clock::now();
+      advance(world, t);
+      total += std::chrono::steady_clock::now() - start;
+    }
+    return std::chrono::duration_cast<std::chrono::microseconds>(total).count() / kRepeats;
+  };
+
+  auto shared = build(/*distinct_targets=*/false, Awareness::Searching);
+  auto distinct = build(/*distinct_targets=*/true, Awareness::Searching);
+  auto silent = build(/*distinct_targets=*/false, Awareness::Unaware);
+
+  const auto silent_us = time_ticks(silent, false, Awareness::Unaware);
+  const auto shared_us = time_ticks(shared, false, Awareness::Searching);
+  const auto distinct_us = time_ticks(distinct, true, Awareness::Searching);
+
+  // THE TRAFFIC GUARD, and without it this is the fastest row in the file while
+  // measuring nothing. An early-out in `monster_step`, or a target nobody can
+  // path to, would make every arrangement free and leave the ratio comparing two
+  // descriptions of an empty tick.
+  int moved = 0;
+  for (int i = 0; i < kMonsters; ++i) {
+    const Coord spawn{14 + i % 5, 14 + i / 5};
+    if (distinct.monsters[static_cast<std::size_t>(i)].at != spawn) ++moved;
+  }
+  INFO("monsters that actually stepped on the last timed tick: " << moved);
+  CHECK(moved == kMonsters);
+
+  INFO("one shared target: " << shared_us << " us; " << kMonsters << " distinct: " << distinct_us
+                             << " us; no pathing at all: " << silent_us << " us");
+
+  // THE ANTI-REGRESSION INSTRUMENT, and it is a ratio so it survives every leg
+  // of the matrix: a sanitizer slows both measurements equally. Reintroduce a
+  // field per monster and `shared_us` becomes `distinct_us`, and this goes red
+  // on every box rather than only on a slow one — which an absolute budget would
+  // not do, since a fast machine fits sixteen searches inside 4 ms and waves the
+  // regression through.
+  CHECK(distinct_us > shared_us * 2);
+
+  // ── AND THE ABSOLUTE ROW IS NOT ASSERTED, WHICH IS gloam#36 ──────────────
+  //
+  // Not an omission and not a sanitizer caveat: this row STRADDLES the budget by
+  // machine and by compiler, which is a worse thing for a contract to be than
+  // simply blown.
+  //
+  //   dev box, GCC 14 Debug        2,695 us    67% of the 4 ms budget
+  //   CI runner, GCC 14 Debug      5,462 us   137%
+  //   CI runner, Clang 20 Debug    under it — the same hardware, the other way
+  //   dev box, GCC 14 UBSan        5,182 us   130%
+  //
+  // #17 and #26 are asserted INVERTED because they are blown everywhere, so
+  // "assert what is true today and let it go red when someone fixes it" works.
+  // It does not work here: an inverted assertion would be red on the dev box and
+  // green on CI, and a machine-dependent assertion in EITHER direction is a
+  // flaky test wearing a budget's clothes — which this file has already been
+  // burned by once, at the worst-case sting row.
+  //
+  // What is asserted instead is the ratio above, which is machine-independent
+  // and is the check that actually polices the shared-field discipline. The
+  // absolute figure is measured and PRINTED every run, so it cannot quietly
+  // vanish — the same discipline the PENDING rows in this file use, and for the
+  // same reason: a row that disappeared would be indistinguishable from one that
+  // was never written.
+  //
+  // Explicitly NOT done about it: a distance cap on the primitive (it makes
+  // "far" and "unreachable" the same answer, and §6.1's SEARCHING exit is keyed
+  // on exactly that distinction), and a cheaper scenario (choosing a worst case
+  // to make a row pass is what BUDGETS.md exists to prevent). gloam#36 carries
+  // the escape route and what would close it.
+  WARN("§11 simulation tick, sixteen monsters pathing to sixteen distinct targets: "
+       << distinct_us << " us against a " << budget::kMaxSimulationTickMs * 1000
+       << " us budget — MEASURED, NOT ASSERTED (gloam#36): this row straddles the budget by "
+          "machine and by compiler, so neither direction is a stable assertion.");
+}
+
 TEST_CASE("§11's tick budget holds when EVERY monster stings on one tick", "[budget]") {
   // THE ACTUAL WORST CASE, CONSTRUCTED RATHER THAN WAITED FOR.
   //
@@ -596,7 +754,12 @@ TEST_CASE("§11's tick budget holds when EVERY monster stings on one tick", "[bu
   // Within sight distance of the party and in clear line of sight, so the
   // SEARCHING -> HUNTING row fires for each of them on the same tick.
   constexpr int kMonsters = 16;
-  const Coord party{16, 16};
+  // OFF THE MONSTERS' OWN CELLS, which it did not have to be until gloam#32. At
+  // (16,16) one of the sixteen spawned exactly on the party, and a monster that
+  // has already arrived does not step — so the roster below would have been
+  // fifteen steppers and one bystander for no stated reason. Six cells south is
+  // still inside a Normal monster's sight from every one of them.
+  const Coord party{16, 20};
 
   // One step below HUNTING, looking in the right place. Re-applied before every
   // timed tick below, so each one is a fresh worst case.
@@ -633,14 +796,37 @@ TEST_CASE("§11's tick budget holds when EVERY monster stings on one tick", "[bu
   // numbers stay directly comparable. Each repeat resets every monster to
   // SEARCHING outside the timed region, so every timed tick is a fresh worst
   // case rather than a monster that is already hunting.
+  //
+  // POSITIONS ARE RESET TOO, SINCE gloam#32, and leaving them out was a real
+  // hole rather than an omission. A hunting monster now WALKS, so across fifty
+  // repeats the roster closed on the party and parked at arm's reach — and
+  // because the silent pass runs first, by the time the sink was attached every
+  // monster had already arrived and none of them stepped again. The voice total
+  // below stayed exactly right for a scenario that had quietly stopped being the
+  // one described: sixteen monsters stinging while standing still. Resetting the
+  // position makes every timed tick the tick this case is named after, on which
+  // each monster both steps AND stings.
   audio::RecordingSink<> sink;
   audio::Command drained{};
   constexpr int kRepeats = 50;
 
+  std::vector<Coord> spawn;
+  spawn.reserve(world.monsters.size());
+  for (const auto& m : world.monsters) spawn.push_back(m.at);
+
   const auto rearm = [&] {
-    for (auto& m : world.monsters) m.mind = searching_mind(party);
+    for (std::size_t i = 0; i < world.monsters.size(); ++i) {
+      world.monsters[i].mind = searching_mind(party);
+      world.monsters[i].at = spawn[i];
+      world.monsters[i].move_cooldown = 0;
+    }
     world.pending_noise = step_noise(world.armour, world.creeping, t);
   };
+
+  // BY EMITTER, NEVER BY `pushed()`. A total is satisfiable by the wrong mix —
+  // the lesson this file has now learned twice — and the whole point of the
+  // reset above is that the mix changed.
+  std::array<std::uint64_t, 8> heard{};
 
   const auto time_ticks = [&](audio::Sink* voices) {
     rearm();
@@ -648,6 +834,7 @@ TEST_CASE("§11's tick budget holds when EVERY monster stings on one tick", "[bu
     if (voices != nullptr) {
       while (sink.ring().try_pop(drained)) {}
       sink.ring().reset_counters();
+      heard.fill(0);
     }
 
     std::chrono::steady_clock::duration total{};
@@ -657,7 +844,7 @@ TEST_CASE("§11's tick budget holds when EVERY monster stings on one tick", "[bu
       advance(world, t, voices);
       total += std::chrono::steady_clock::now() - start;
       if (voices != nullptr) {
-        while (sink.ring().try_pop(drained)) {}
+        while (sink.ring().try_pop(drained)) ++heard[static_cast<std::size_t>(drained.sound)];
       }
     }
     return std::chrono::duration_cast<std::chrono::microseconds>(total).count() / kRepeats;
@@ -676,8 +863,14 @@ TEST_CASE("§11's tick budget holds when EVERY monster stings on one tick", "[bu
   INFO("monsters that reached HUNTING on the last tick: " << hunting);
   CHECK(hunting == kMonsters);
   INFO("voices over " << kRepeats << " worst-case ticks: " << sink.ring().pushed());
-  CHECK(sink.ring().pushed() ==
-        static_cast<std::uint64_t>(kRepeats) * (static_cast<std::uint64_t>(kMonsters) + 1));
+  const auto repeats = static_cast<std::uint64_t>(kRepeats);
+  const auto monsters_n = static_cast<std::uint64_t>(kMonsters);
+  CHECK(heard[static_cast<std::size_t>(audio::SoundId::HuntingSting)] == repeats * monsters_n);
+  CHECK(heard[static_cast<std::size_t>(audio::SoundId::PartyFootfall)] == repeats);
+  CHECK(heard[static_cast<std::size_t>(audio::SoundId::MonsterFootfall)] == repeats * monsters_n);
+  // Which is `2N + 1` per tick — the bound the ring-headroom case reasons about
+  // and, until gloam#32, could not construct.
+  CHECK(sink.ring().pushed() == repeats * (2 * monsters_n + 1));
 
   // ── What audio COSTS, which is the durable form of the question ──────────
   //
@@ -806,9 +999,33 @@ struct FrameState {
   /// quietly falsify this case's upper-bound claim while CI stayed green.
   ///
   /// It was cheaper to capture then than to remember now, and the case that
-  /// cashes it is at the end of this file. The 200-tick harness's own monsters
-  /// stay route-less, so this field costs it nothing.
+  /// cashes it is at the end of this file.
+  ///
+  /// NOTE WHAT STOPPED BEING TRUE ABOUT IT WITH gloam#32: this used to add that
+  /// "the 200-tick harness's own monsters stay route-less, so this field costs
+  /// it nothing". Pursuit needs no route, so route-less stopped meaning
+  /// stationary, and the harness's monsters now move under it.
   std::vector<Coord> positions{};
+
+  // AND A `facings` FIELD IS DELIBERATELY NOT HERE, which is worth writing down
+  // because it looks like the obvious next one. The argument for it: a monster
+  // halted at arm's reach re-faces its target on every tick it holds, so its
+  // POSE could change while its awareness and position do not — an Animation
+  // frame that would classify Idle and be asserted at zero bytes.
+  //
+  // It was added, and then removed, because the frame it describes is not
+  // reachable. Every facing write in `advance` is driven by a target that only
+  // moves when the PARTY moves — `mind.last_known` is written from
+  // `senses.party_position` — and a tick on which the party moves is a
+  // Recomposition by the first rule, whatever the monsters did. Checked by
+  // mutation rather than by argument: with the field in place, deleting it from
+  // `classify_frame` left the whole suite green, which is the signature of a
+  // branch no scenario reaches.
+  //
+  // If §7 ever gives a monster a reason to turn that the party did not cause —
+  // an idle look-around, a head turn toward another monster — this is the field
+  // to add, and `test/22pursuit/`'s "a halted hunter keeps facing you" is where
+  // the behaviour is pinned meanwhile.
 };
 
 auto snapshot(const World& w) -> FrameState {
@@ -1091,7 +1308,7 @@ TEST_CASE("§11's per-frame rows, over a 200-tick scripted replay", "[budget]") 
                         << " B/s — UPPER BOUND, no diff");
   // ── AND THE ROW IS BLOWN. THIS ASSERTION IS DELIBERATELY INVERTED. ───────
   //
-  // Measured: 8,321 B/s against a budget of 8,192 — 1.6% over, on a number that
+  // Measured: 8,459 B/s against a budget of 8,192 — 3.3% over, on a number that
   // is an UPPER BOUND and is byte-stable across compilers (every placement is
   // integer `to_chars` output over a fixed list, and the awareness transitions
   // that pick the animation frames come from `rng.hpp`'s own bounded draw).
@@ -1099,7 +1316,13 @@ TEST_CASE("§11's per-frame rows, over a 200-tick scripted replay", "[budget]") 
   // The overrun is not a defect in the model. It is a contradiction between two
   // rows of the same design document: §4.7's 140 ms step transition and §11's
   // 8 KB/s sustained p95 are mutually unreachable at §4.1's own "roughly two
-  // dozen sprites" and the current wire form. At §4.7's rate rather than this
+  // dozen sprites" and the current wire form.
+  //
+  // IT WENT UP WITH gloam#32, from 8,321 (1.6% over) to 8,459 (3.3% over), and
+  // the cause is this harness's own monsters: they are route-less, which used to
+  // mean stationary and no longer does, so ticks that were Idle now carry a
+  // moving sprite. The overrun is worse than it was and it is worse for a stated
+  // reason, which is the only way a budget number is allowed to move. At §4.7's rate rather than this
   // script's tick-quantised 5 steps/s it is worse — about 1.4x.
   //
   // Recorded as UPSTREAM.md item 13 and gloam#26, with the named escape: kitty

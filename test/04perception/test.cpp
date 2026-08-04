@@ -271,7 +271,94 @@ TEST_CASE("a doused party breaks the escalation at the sight step", "[perception
   dark.range = 3;         // well within sight distance
   dark.lamp_level = 0;    // but the lamp is out
 
+  // AND IT KEEPS HEARING YOU, which is load-bearing now in a way it was not
+  // when this case was written. gloam#32 gave SEARCHING an exit — the trail
+  // going cold — and `heard` on every tick is what keeps `ticks_since_hit` at
+  // zero and that exit shut. The claim is still "dousing blocks the sight step";
+  // it is no longer "SEARCHING is where a monster stays for ever".
   const auto tells = settle(p, dark, kind, 100);
+  CHECK(p.state == Awareness::Searching);
+  for (const auto tell : tells) CHECK(tell == Tell::None);
+}
+
+// ── §6.1's SEARCHING -> LOST_TRACK row (gloam#32) ───────────────────────────
+
+TEST_CASE("a searcher that runs out of trail gives up, and casts about", "[perception]") {
+  // The row §6.1 shipped without. Its absence was invisible while a SEARCHING
+  // monster could not move: "searching for ever" and "standing still" were the
+  // same picture. Once it walks to the last known position, an exit-less
+  // SEARCHING is a monster stranded off its route for the rest of the session.
+  //
+  // TWO CONDITIONS, and both are asserted separately below, because a timer
+  // alone would make a monster give up mid-walk — which reads as losing interest
+  // rather than as drawing a blank.
+  const MonsterKind kind{Acuity::Normal, false};
+  const Tuning& t = kDefaultTuning;
+
+  Senses cold{};
+  cold.heard = false;
+  cold.los_clear = false;
+  cold.lamp_level = 0;
+  cold.range = 9;
+
+  SECTION("the trail ends and the timer expires") {
+    Perception p{};
+    p.state = Awareness::Searching;
+    cold.trail_exhausted = true;
+
+    // `hunting_lost_ticks` of nothing, and not one tick sooner.
+    for (int i = 1; i < t.hunting_lost_ticks; ++i) {
+      INFO("tick " << i);
+      REQUIRE(step(p, cold, kind, t) == Tell::None);
+      REQUIRE(p.state == Awareness::Searching);
+    }
+    CHECK(step(p, cold, kind, t) == Tell::CastsAbout);
+    CHECK(p.state == Awareness::LostTrack);
+  }
+
+  SECTION("the timer alone is not enough while there is still trail to walk") {
+    // The monster is still on its way to the last known position. It does not
+    // get to give up before it arrives, however long the walk.
+    Perception p{};
+    p.state = Awareness::Searching;
+    cold.trail_exhausted = false;
+
+    const auto tells = settle(p, cold, kind, 200);
+    CHECK(p.state == Awareness::Searching);
+    for (const auto tell : tells) CHECK(tell == Tell::None);
+  }
+
+  SECTION("seeing you beats the timer on the exact tick it expires") {
+    // Ordered after the `saw` check, on gloam#12's precedent: losing someone on
+    // the frame they walked into your light is the worst available reading.
+    Perception p{};
+    p.state = Awareness::Searching;
+    cold.trail_exhausted = true;
+    for (int i = 1; i < t.hunting_lost_ticks; ++i) static_cast<void>(step(p, cold, kind, t));
+
+    Senses lit = cold;
+    lit.los_clear = true;
+    lit.range = 2;
+    lit.lamp_level = kLampLevelMax;
+    CHECK(step(p, lit, kind, t) == Tell::GaitChanges);
+    CHECK(p.state == Awareness::Hunting);
+  }
+}
+
+TEST_CASE("trail_exhausted defaults false, so no existing caller changed", "[perception]") {
+  // The field was APPENDED to `Senses` with a false default precisely so that
+  // every caller that never heard of it keeps its old meaning. This is that
+  // promise, asserted rather than trusted: a default-constructed `Senses` cannot
+  // fire the new row no matter how long it runs.
+  const MonsterKind kind{Acuity::Normal, false};
+  Perception p{};
+  p.state = Awareness::Searching;
+
+  Senses nothing{};
+  nothing.lamp_level = 0;
+  REQUIRE_FALSE(nothing.trail_exhausted);
+
+  const auto tells = settle(p, nothing, kind, 500);
   CHECK(p.state == Awareness::Searching);
   for (const auto tell : tells) CHECK(tell == Tell::None);
 }

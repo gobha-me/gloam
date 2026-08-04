@@ -117,6 +117,17 @@ struct Senses {
   std::int32_t range{0};   ///< `range_between` the two
   std::int32_t lamp_level{kLampLevelDefault};
   Coord party_position{};
+  /// The trail ends here: the monster is STANDING on `last_known`, or cannot
+  /// reach it at all. Drives §6.1's SEARCHING -> LOST_TRACK row (gloam#32).
+  ///
+  /// Derived by `advance`, where the distance field is, so that this header
+  /// never learns how a monster paths — the same division `heard` already makes
+  /// between `propagate_noise` and the state machine that reads its answer.
+  ///
+  /// APPENDED, and defaulting false, so every existing caller keeps its meaning:
+  /// a monster whose trail is never reported exhausted searches exactly as long
+  /// as it did before.
+  bool trail_exhausted{false};
 };
 
 /// One monster's awareness state. Integer-only, per §5.1.

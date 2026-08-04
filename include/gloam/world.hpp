@@ -32,13 +32,21 @@
 ///
 /// WHAT IS NOT MODELLED YET, AND IS NOT PRETENDED TO BE
 ///
-///   * A MONSTER THAT HAS NOTICED YOU DOES NOT COME AFTER YOU. §6.4's patrol
-///     routes are here, and a monster walks one — but three of §6.1's five
-///     tells ("walks to the last known position", "direct pursuit", "walks back
-///     to the patrol route") translate a monster toward a target, and §6 never
-///     says how a monster paths. At SEARCHING and above it holds position.
-///     That is gloam#32, and `test/19patrol/` asserts it, so removing it is a
-///     deliberate red test rather than a silent change.
+///   * ARRIVAL HAS NO OUTCOME. A monster that notices you now comes after you
+///     (gloam#32) — and stops one cell short, because there is no combat, no
+///     death and no cell-occupancy rule for it to arrive INTO. It stands at
+///     arm's reach facing you until you move. When §7 lands, that halt becomes
+///     the attack and the pathing does not change.
+///
+///     THE RESTRAINT IS ON THE MONSTER AND ONLY ON THE MONSTER, which is worth
+///     stating because the sentence above reads like a guarantee about the
+///     CELL. `apply` has no occupancy rule either, so THE PARTY MAY WALK INTO A
+///     HALTED HUNTER, and then the two share a cell until the party leaves.
+///     That is the same missing model seen from the other side, not a hole in
+///     the arrival rule.
+///   * MONSTERS DO NOT COLLIDE WITH EACH OTHER, for the same missing model.
+///     Two of them may stand in one cell. `test/22pursuit/` pins it so it is a
+///     decision rather than an accident.
 ///   * `creep_tick_cost` IS NOT APPLIED TO THE PARTY. §6.2 makes creeping cost ticks as
 ///     well as halving the noise. Monsters now have a movement-rate model
 ///     (`Tuning::monster_move_ticks`, gloam#29) and the party still does not:
@@ -122,9 +130,14 @@ struct Patrol {
   /// reason it is not a direction enum.
   bool reversed{false};
   /// Ticks still owed at the current waypoint, authored plus §6.4's jitter.
+  ///
+  /// A PATROL DEBT, AND ONLY A PATROL DEBT. A monster that leaves its route to
+  /// search or pursue (gloam#32) discards whatever pause it owed rather than
+  /// standing through it first — you made a noise and it looked up, so a
+  /// four-tick authored pause must not become four ticks of a monster ignoring
+  /// you. `approach_step` clears it, and the pause is re-authored the next time
+  /// the ping-pong arrives at that waypoint.
   std::int32_t dwell_left{0};
-  /// Ticks until this monster may step again (`monster_move_ticks`).
-  std::int32_t move_cooldown{0};
 
   [[nodiscard]] auto operator==(const Patrol&) const -> bool = default;
 };
@@ -149,6 +162,17 @@ struct Monster {
   /// off anything but hashed state could not reproduce them from a replay.
   Dir facing{Dir::North};
   Patrol patrol{};
+  /// Ticks until this monster may step again (`Tuning::monster_move_ticks`).
+  ///
+  /// ON THE MONSTER RATHER THAN INSIDE `Patrol`, since gloam#32. It is the
+  /// movement clock, not a patrol cursor: a route-LESS monster that pursues you
+  /// charges it too, and leaving it in `Patrol` would have meant a monster with
+  /// no route quietly writing patrol state — which `test/13replay/` asserts does
+  /// not happen, and was right to.
+  ///
+  /// Hashed in the position `Patrol::move_cooldown` used to occupy, so moving it
+  /// changed no digest byte and `kWorldHashVersion` did not have to move for it.
+  std::int32_t move_cooldown{0};
 
   [[nodiscard]] auto operator==(const Monster&) const -> bool = default;
 };
@@ -167,10 +191,27 @@ struct Monster {
 ///
 /// WHAT IT DOES NOT CHECK, because it is not told: where the monster is
 /// STANDING. A perfectly valid route paired with a monster placed off it — or
-/// on it but not at `route[waypoint]` — yields a monster that never moves
-/// again, and this function returns true. Rejoining a route is the walk
-/// gloam#32 defers, so until that lands the placement is the author's to get
-/// right; `test/19patrol/` pins the behaviour so it is at least not a surprise.
+/// on it but not at `route[waypoint]` — is still a route this function accepts.
+///
+/// THAT USED TO MEAN "a monster that never moves again", and it no longer does.
+/// gloam#32 answers the two halves differently, because they are different
+/// situations wearing one description:
+///
+///   * OFF the route entirely — the re-join rule walks it back to the nearest
+///     cell of its own route and resumes the ping-pong from there.
+///   * ON the route but not at `route[waypoint]` — the cursor is RESYNCED to
+///     the cell it is standing on, lowest index first, and it patrols from
+///     there. The position is authoritative and the cursor is advisory.
+///
+/// The second is not a nicety for malformed data: the pump produces that state
+/// in ordinary play, because a hunter halts at arm's reach — often on a cell of
+/// its own route — and then calms down. Treating the cursor as authoritative
+/// froze those monsters permanently, and a fuzz over valid data found 256,797
+/// of them in 8,000 trials while all 32 test cases stayed green.
+///
+/// The one case that still stands still is a route it cannot REACH — behind a
+/// shut door, or across rock — which is a level that disagrees with itself, and
+/// standing still is the same answer the pump gives every other kind of that.
 [[nodiscard]] auto valid_route(const Level& level, std::span<const Coord> route,
                                std::span<const std::uint8_t> dwell) -> bool;
 

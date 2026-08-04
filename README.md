@@ -34,6 +34,7 @@ diagnostic rather than a game. What exists is the deterministic simulation core:
 | The voice ring, the gain/pan mix, and the wall the sim talks through | §9.2, §9.3 |
 | The frame classes, the sustained percentile, and the one write syscall | §11 |
 | Patrol routes, the movement pump, and the monster you can hear | §6.4, §9 |
+| The pathfinder, the pursuit, and the walk home | §6.1, §5.2 |
 
 The **compositor** is still blocked upstream — see [UPSTREAM.md](UPSTREAM.md).
 termforge stretches a placed image to fill its cell rect and states that scaling
@@ -144,7 +145,7 @@ Then the harness measured something worth having:
 | Full recomposition, 24 placements | 1,596 B | 2,048 B | passes |
 | Animation-only frame | 137 B | 400 B | passes |
 | Idle frame | 0 B | 0 B | passes |
-| Sustained p95 | **8,321 B/s** | 8,192 B/s | **1.6% over** |
+| Sustained p95 | **8,459 B/s** | 8,192 B/s | **3.3% over** |
 
 §4.7's 140 ms step transition and §11's 8 KB/s sustained p95 are **mutually
 unreachable** at §4.1's own placement count and the current wire form — and the
@@ -202,6 +203,93 @@ makes that safe is that the pump steps only through `Level::walk` **and** requir
 the destination to be the waypoint the route named, so malformed data yields a
 monster that stands still rather than one that drifts or teleports. Fourteen
 refusals in `test/19patrol/` are what turn that from a claim into a guarantee.
+
+**And now it comes after you.** §6.1 calls the awareness tells "the deliverable,
+not the state machine", and three of the five translate a monster toward a
+target — *"leaves the patrol route, walks to the last known position"*,
+*"direct pursuit"*, *"walks back to the patrol route and resumes"*. §6 never
+says how a monster paths, and §5.2's *"same AI, same patrols, **same
+pathfinding**"* was the only mention of the word in the document: an assertion
+that two play modes share a thing that did not exist.
+
+`gloam`'s corridor trace now runs the whole §6.1 cycle rather than the first
+third of it — it patrols, notices you, leaves the route, closes to arm's reach,
+loses you when you back away, gives up, and walks home to resume the ping-pong:
+
+```
+  tick  monster  facing  awareness    lamp  you      sees you
+  13    (3,2)    north   unaware      0     (1,2)    no   <- crossing
+  15    (3,2)    west    suspicious   3     (1,2)    yes  <- crossing
+  16    (2,2)    west    searching    3     (1,2)    yes  <- off its route
+  17    (2,2)    west    hunting      3     (1,2)    yes  <- off its route
+  ...
+  27    (2,2)    west    hunting      0     (1,2)    yes  <- off its route
+  ...
+  33    (2,2)    east    hunting      0     (4,2)    no   <- off its route
+  40    (2,2)    south   lost-track   0     (5,2)    no   <- off its route
+  80    (3,2)    east    unaware      0     (5,2)    no   <- crossing
+```
+
+(Abridged — the binary prints one row per *event*, twenty-two of them, and
+carries on past tick 80 to show the ping-pong resume.)
+
+Two rows there are the mechanic rather than the plumbing. **Tick 27: the lamp is
+out and it still sees you**, because §6.3 keeps an unlit party visible at an
+adjacent cell — dousing does not save you from something already at arm's reach,
+and getting clear is what breaks the contact. **Tick 17: it stops one cell
+short.** That is the arrival rule, and it is the design decision
+[#32](https://github.com/gobha-me/gloam/issues/32) said had to be made before any
+code: there is no combat, no death and no cell-occupancy model at M0, so a
+monster standing *on* you is a more visible dead end than one that stands next to
+you and waits. When §7 lands, that halt becomes the attack and the pathing does
+not change.
+
+The primitive is a uniform-cost BFS over `Level::walk`, rooted at the **target**
+so that one search serves the whole roster — and pointedly not `propagate_noise`,
+which is a Dijkstra over `conducts_sound()`. A closed door is impassable and
+audible at once (§12's one graph, two readings), so a pathfinder that reused the
+noise search would walk a monster through a shut door. `test/21path/` pins that
+pair at §6.2's own numbers, along with the property that kills the greedy
+shortcut #32 rejected: every reached cell has a neighbour exactly one step
+closer, so a descent always exists and no pocket can trap anything.
+
+§6.1 also gained a row it shipped without — SEARCHING → LOST_TRACK — because
+pursuit's only other terminal state is a monster stranded on a stale cell for the
+rest of the session. It costs **no new tunable and no new tell**:
+`hunting_lost_ticks` already means "N ticks with no perception hit", and
+`Tell::CastsAbout` is already *"casts about at the last position"* — a phrase
+`world.cpp` recorded as vacuous until something could leave the spot it started
+on. Two more decisions were made rather than read, and both are in `UPSTREAM.md`
+item 18: monsters do not collide with each other, and leaving a route discards
+the pause it owed.
+
+**The determinism impact is the rare good one.** `kTuningFieldCount` stays 49, so
+`ruleset_hash` does not move and **no recorded replay is invalidated** — the
+opposite of §6.4's. `kWorldHashVersion` stays **2** and the golden hash moved
+anyway, which is the version byte doing its job in the direction nothing had
+exercised: the *set* of hashed state is unchanged, and the *values* changed
+because monsters now walk.
+
+Measured at §11's reference scale, a tick in which sixteen monsters path to
+sixteen different places costs **≈2,650 µs** against the 4 ms budget — stable
+across runs to within ~3%. The same sixteen sharing one target cost **170–330 µs**
+and a tick with no pathing at all **5–17 µs**; both of those are small enough to
+be dominated by run-to-run noise, so the cache is worth *roughly an order of
+magnitude* rather than any one figure. (The first version of this paragraph
+quoted single samples of the two noisy numbers as though they were measurements.
+They were the high end of a spread.)
+
+The reason the cache usually applies is not the cache: `step` rewrites every
+perceiving monster's `last_known` to the party's cell, so monsters that can see
+you agree about where you are by construction. Sixteen *distinct* targets need
+sixteen *stale* beliefs.
+
+That worst case is **67% of the budget here and over it on CI** — GCC on a
+GitHub runner measured 5,462 µs, and Clang on the same runner stayed under. A
+row that straddles its budget by machine and by compiler is not a stable
+assertion in either direction, so it is measured and printed rather than
+asserted, and [#36](https://github.com/gobha-me/gloam/issues/36) carries the
+escape route.
 
 Still unstarted: the **RtAudio device** — the stream, the resident PCM and the
 mixer. It is deliberately a separate change, because neither a GitHub runner nor
