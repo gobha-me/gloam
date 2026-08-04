@@ -53,6 +53,20 @@ using namespace gloam;
 // Clang spells it `__has_feature`; GCC spells it `__SANITIZE_ADDRESS__` and
 // `__SANITIZE_THREAD__`. UBSan is deliberately absent — it is recoverable and
 // barely affects timing, so the absolute budget stays asserted there.
+//
+// ONE ROW HAS SINCE FOUND AN EXCEPTION TO THAT LAST CLAUSE, and it is worth
+// knowing before trusting it again: gloam#32's pathfinder row is dense signed
+// integer arithmetic, which is exactly what UBSan instruments, and it measured
+// 1.9x slower under it — 2,695 us against 5,182 us at §11's reference scale on
+// GCC 14, which is the difference between 67% of the 4 ms budget and 130% of it.
+//
+// Neither compiler predefines a macro for UBSan, and `cmake/toolchain/
+// undefined.cmake` already ships `TEMPLATE_UBSAN` for that reason — so that row
+// reads the define that is already there rather than inventing a second one.
+// (An earlier attempt did invent one, and `check_artifacts.cmake`'s B3 rule
+// caught it: the UBSan define is a coupled pair across two files, and the rule
+// exists to keep it one pair rather than two.) Every OTHER absolute budget still
+// asserts under UBSan exactly as before.
 #if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
 #define GLOAM_TEST_SANITIZED 1
 #elif defined(__has_feature)
@@ -686,9 +700,10 @@ TEST_CASE("§11's tick budget holds when sixteen monsters PURSUE", "[budget]") {
   // distance cap on the primitive: a cap makes "far" and "unreachable" the same
   // answer and breaks the SEARCHING exit's honesty. Record the measurement and
   // take the decision in the open, the way the 13.6 ms finding was.
-#if defined(GLOAM_TEST_SANITIZED)
+#if defined(GLOAM_TEST_SANITIZED) || defined(TEMPLATE_UBSAN)
   WARN("§11's absolute tick budget is not asserted under a sanitizer — see the worst-case "
-       "sting row for the argument.");
+       "sting row for the argument, and this file's header for why UBSan is on that list "
+       "for THIS row and no other.");
 #else
   CHECK(distinct_us < budget::kMaxSimulationTickMs * 1000);
 #endif

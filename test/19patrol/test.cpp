@@ -122,14 +122,14 @@ TEST_CASE("a route that does not describe a walk makes a monster stand still", "
     // the division of labour `world.hpp` describes.
     CHECK_FALSE(valid_route(w.level, w.monsters[0].patrol.route, w.monsters[0].patrol.dwell));
     CHECK(w.monsters[0].at == Coord{3, 0});
-    walk_for(w, t, 40);
+    static_cast<void>(walk_for(w, t, 40));
     CHECK(w.level.navigable(w.monsters[0].at));
   }
 
   SECTION("dwell longer than route") {
     auto w = patrolling_world(route, no_dwell(9), Coord{3, 0});
     CHECK_FALSE(valid_route(w.level, w.monsters[0].patrol.route, w.monsters[0].patrol.dwell));
-    walk_for(w, t, 40);
+    static_cast<void>(walk_for(w, t, 40));
     CHECK(w.level.navigable(w.monsters[0].at));
   }
 
