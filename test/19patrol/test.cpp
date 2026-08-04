@@ -194,19 +194,38 @@ TEST_CASE("a route across an edge a body cannot cross makes a monster stand stil
   }
 }
 
-TEST_CASE("a cursor that indexes nothing makes a monster stand still", "[patrol]") {
+TEST_CASE("a cursor that indexes nothing is repaired from where the monster stands",
+          "[patrol]") {
+  // THIS USED TO READ "makes a monster stand still", and gloam#32 changed the
+  // answer for a reason worth recording rather than quietly editing.
+  //
+  // A garbage cursor and a cursor the PUMP desynced are the same state: a
+  // monster on `route[k]` whose cursor says `j` cannot report how it got there.
+  // And the pump does desync one — a hunter halts at arm's reach, which is
+  // often a cell of its own route, then calms to UNAWARE. Refusing to move
+  // froze that monster for ever (measured: 256,797 over 8,000 trials of valid
+  // data). Since the two are indistinguishable, recovery has to win, and the
+  // rule became: THE POSITION IS AUTHORITATIVE, THE CURSOR IS ADVISORY.
+  //
+  // The refusal this file is about is undamaged — nothing teleports, nothing
+  // reads out of bounds, and a monster standing OFF its route with a garbage
+  // cursor still walks home rather than jumping to it.
   const auto t = no_jitter();
   const auto route = crossing_route();
 
-  // These arrive from a `level.gloam` that disagrees with itself. A stationary
-  // monster is a reportable symptom; an out-of-bounds read is a crash somewhere
-  // else entirely, which is the outcome this refuses to have.
   const auto cursor = GENERATE(std::int32_t{999}, std::int32_t{-1}, INT32_MIN, INT32_MAX,
                                std::int32_t{5});
   INFO("waypoint " << cursor);
   auto w = patrolling_world(route, no_dwell(5), Coord{3, 0});
   w.monsters[0].patrol.waypoint = cursor;
-  CHECK(never_moved(w, t, 40));
+
+  // It is standing on route[0], so it adopts 0 and walks the route from there —
+  // the same opening the well-formed golden at the end of this file walks.
+  const auto walk = walk_for(w, t, 5);
+  CHECK(walk == std::vector<Coord>{Coord{3, 1}, Coord{3, 1}, Coord{3, 2}, Coord{3, 2},
+                                   Coord{3, 3}});
+  CHECK(w.monsters[0].patrol.waypoint == 3);
+  for (const auto at : walk) REQUIRE(w.level.navigable(at));
 }
 
 TEST_CASE("a monster standing off its own route walks back to it", "[patrol]") {

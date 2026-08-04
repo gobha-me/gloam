@@ -14,8 +14,21 @@ namespace {
 [[nodiscard]] auto search_order(Dir prefer) -> std::array<Dir, kDirCount> {
   std::array<Dir, kDirCount> order{};
   std::size_t n = 0;
-  order[n++] = prefer;
-  for (int d = 0; d < kDirCount; ++d) {
+
+  // AN ENUM CLASS DOES NOT ENFORCE ITS OWN RANGE, and `prefer` is `Monster::
+  // facing` — hashed state that can arrive from a save file or a test. Out of
+  // range, the loop below matches none of the four and appends all of them
+  // AFTER the preferred one, writing a fifth entry into a four-element array.
+  // Measured with AddressSanitizer, through `advance`, with `facing = Dir(200)`:
+  // "stack-buffer-overflow ... WRITE of size 1".
+  //
+  // Same defect and same fix as `world.cpp`'s `stream_index`, which was written
+  // against exactly this: a scoped enum is a promise about spelling, not about
+  // values. An unknown facing degrades to plain wire order, which is a monster
+  // that steps somewhere sensible rather than a corrupted stack.
+  if (static_cast<std::uint8_t>(prefer) < kDirCount) order[n++] = prefer;
+
+  for (int d = 0; d < kDirCount && n < order.size(); ++d) {
     const auto dir = static_cast<Dir>(d);
     if (dir != prefer) order[n++] = dir;
   }
@@ -82,10 +95,17 @@ auto propagate_distance(const Level& level, Coord source) -> DistanceField {
 
 auto step_down(const DistanceField& field, const Level& level, Coord from, Dir prefer)
     -> std::optional<Dir> {
-  // BOUNDS FIRST, AND NOT AS A TIDY-UP. `Coord::step` on INT32_MIN is signed
-  // overflow, which is UB the ubsan leg of the matrix reports as a crash inside
-  // whatever called this. A target is data — it can arrive from a `level.gloam`
-  // that disagrees with itself — so the guard is on the hot path by design.
+  // BELT AND BRACES, AND HONESTLY LABELLED AS SUCH. `Coord::step` on INT32_MIN
+  // is signed overflow, and a `from` is data — it can arrive from a
+  // `level.gloam` that disagrees with itself. But `DistanceField::at` below
+  // bounds-checks too and answers `kUnreachable`, which returns before any
+  // `walk` is attempted, so NO INPUT REACHES THIS LINE FIRST.
+  //
+  // It is kept rather than deleted because it makes the precondition local to
+  // the function that has it, the way `edge_attenuation` keeps a wall case it
+  // documents as unreachable behind `conducts_sound()`. What it is NOT is a
+  // guard the ubsan leg is exercising — an earlier version of this comment
+  // claimed that, and a mutation removing the line left every suite green.
   if (!level.in_bounds(from)) return std::nullopt;
 
   const auto here = field.at(level, from);

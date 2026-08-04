@@ -98,7 +98,16 @@ TEST_CASE("a source in solid rock seeds nothing, even beside floor", "[path]") {
   // lie — which is exactly the "party standing in rock" case.
   Level level{5, 3};
   level.carve(Coord{0, 1}, Dir::East, 5);
-  REQUIRE_FALSE(level.navigable(Coord{2, 0}));  // rock, directly north of floor
+
+  // THE OPEN EDGE IS THE WHOLE CASE, and without it this test proved nothing.
+  // `carve` leaves the rock cell sealed behind default Wall edges, so a field
+  // rooted there reaches nothing whether or not the guard exists — the monster
+  // is held by geometry, and deleting the guard left this green. Linking (2,0)
+  // to (2,1) makes the rock cell a place a body could walk OUT of, which is
+  // exactly the asymmetry the guard is for.
+  level.link(Coord{2, 0}, Dir::South, Edge{EdgeKind::Open, EdgeState::Open, 0, 0});
+  REQUIRE_FALSE(level.navigable(Coord{2, 0}));
+  REQUIRE(level.walk(Coord{2, 0}, Dir::South).has_value());  // it could leave
 
   const auto field = propagate_distance(level, Coord{2, 0});
   for (const auto c : navigable_cells(level)) CHECK_FALSE(field.reached(level, c));

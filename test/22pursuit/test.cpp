@@ -92,12 +92,20 @@ TEST_CASE("a SEARCHING monster with nothing remembered does not move", "[pursuit
   // SEARCHING is reached by two perception hits, each of which writes
   // `last_known`, so this is data that should not exist — which is exactly why
   // it is the first case. A loader, a save file or a test can produce it.
+  // THE FIXTURE HAS TO MAKE THE DEFAULT REACHABLE, or this proves nothing. A
+  // default `last_known` is `Coord{0,0}`, and in a corridor whose only floor is
+  // row 1 that cell is rock — so the monster would hold whether or not the
+  // `has_last_known` guard exists, and deleting the guard left this green. An
+  // open room makes (0,0) a real, reachable, three-cells-away target, so the
+  // ONLY thing standing between this monster and a walk is the flag.
   const auto t = no_jitter();
   Monster m{};
-  m.at = Coord{6, 1};
+  m.at = Coord{3, 3};
   m.kind = MonsterKind{Acuity::Dull, false};
   m.mind.state = Awareness::Searching;  // and has_last_known stays false
-  auto w = world_with(corridor(10), m, Coord{1, 1});
+  auto w = world_with(open_room(6, 6), m, Coord{5, 5});
+  REQUIRE(w.level.navigable(Coord{0, 0}));  // the default target IS walkable here
+  REQUIRE_FALSE(w.monsters[0].mind.has_last_known);
   CHECK(never_moved(w, t, 20));
 }
 
@@ -120,10 +128,16 @@ TEST_CASE("a target it cannot reach makes a monster stand still", "[pursuit]") {
   }
 
   SECTION("a target inside solid rock") {
+    // The open edge matters: `carve` seals rock behind default Wall edges, and a
+    // monster held by a wall is not evidence about the pathfinder. Linked, the
+    // monster is standing next to a cell it could step INTO if anything were
+    // willing to route it there.
+    auto level = corridor(10);
+    level.link(Coord{6, 1}, Dir::North, Edge{EdgeKind::Open, EdgeState::Open, 0, 0});
     Monster m{};
     m.at = Coord{6, 1};
     m.mind = mind_at(state, Coord{6, 0});  // the corridor is row 1; row 0 is rock
-    auto w = world_with(corridor(10), m, Coord{1, 1});
+    auto w = world_with(std::move(level), m, Coord{1, 1});
     REQUIRE_FALSE(w.level.navigable(Coord{6, 0}));
     CHECK(never_moved(w, t, 20));
   }
@@ -149,13 +163,18 @@ TEST_CASE("a target it cannot reach makes a monster stand still", "[pursuit]") {
   }
 
   SECTION("a monster itself standing in rock") {
-    // `Level::walk` lets a body OUT of rock and never into it, so this monster
-    // could legally take a step. It does not: the field is rooted at the target
-    // and a cell no path reaches reads unreachable from either end.
+    // `Level::walk` lets a body OUT of rock and never into it — but only across
+    // an edge that exists, so the link below is what makes the claim true for
+    // this fixture. It really could step south onto the corridor. It does not:
+    // the field is rooted at the target, and a source in rock seeds nothing, so
+    // the cell it stands on reads unreachable from either end.
+    auto level = corridor(10);
+    level.link(Coord{6, 0}, Dir::South, Edge{EdgeKind::Open, EdgeState::Open, 0, 0});
     Monster m{};
     m.at = Coord{6, 0};
     m.mind = mind_at(state, Coord{1, 1});
-    auto w = world_with(corridor(10), m, Coord{1, 1});
+    auto w = world_with(std::move(level), m, Coord{1, 1});
+    REQUIRE(w.level.walk(Coord{6, 0}, Dir::South).has_value());  // it COULD move
     CHECK(never_moved(w, t, 20));
   }
 }
@@ -190,12 +209,19 @@ TEST_CASE("a route of fewer than two cells is nothing to walk home to", "[pursui
   CHECK(never_moved(w, t, 20));
 }
 
-TEST_CASE("a garbage cursor still does not move a monster standing on its route",
+TEST_CASE("a monster standing on its route resyncs its cursor rather than freezing",
           "[pursuit]") {
-  // `test/19patrol/` asserts that a cursor indexing nothing makes a monster
-  // stand still. The re-join rule must not quietly repair it: a monster standing
-  // ON its route is home, whatever its cursor says, and silently rewriting the
-  // cursor would turn malformed data into behaviour nobody authored.
+  // THE BUG THIS CASE EXISTS FOR, found by fuzzing valid data rather than
+  // malformed data. A hunter halts at arm's reach — frequently on a cell of its
+  // OWN route that its cursor does not name — and then calms to UNAWARE. With
+  // the cursor treated as authoritative, `at_its_waypoint` was false for ever
+  // and the walk-home refused because it was already home: a monster dead on
+  // its feet, from a route `valid_route` accepts and a spawn that was coherent.
+  // Measured: 256,797 frozen monsters over 8,000 trials.
+  //
+  // The rule is now that the POSITION is authoritative. A garbage cursor and a
+  // desynced one are the same state, so this also decides the malformed case —
+  // `test/19patrol/` carries that half.
   const auto t = no_jitter();
   const auto cursor = GENERATE(999, -1, std::numeric_limits<std::int32_t>::min(),
                                std::numeric_limits<std::int32_t>::max());
@@ -208,7 +234,18 @@ TEST_CASE("a garbage cursor still does not move a monster standing on its route"
   m.patrol.waypoint = cursor;
   auto w = world_with(corridor(10), m, Coord{9, 1});
   INFO("cursor " << cursor);
-  CHECK(never_moved(w, t, 20));
+
+  const auto walk = walk_for(w, t, 20);
+  CHECK(w.monsters[0].patrol.waypoint >= 0);
+  CHECK(w.monsters[0].patrol.waypoint < 3);
+  // It patrols — asserted as "it visited a cell it did not start on", because a
+  // ping-pong over three cells returns to the middle one regularly and the
+  // final position is no evidence either way.
+  CHECK(std::find_if(walk.begin(), walk.end(),
+                     [](Coord c) { return c != Coord{2, 1}; }) != walk.end());
+  for (const auto at : walk) {
+    REQUIRE(std::find(m.patrol.route.begin(), m.patrol.route.end(), at) != m.patrol.route.end());
+  }
 }
 
 TEST_CASE("pursuit survives degenerate movement rates", "[pursuit]") {
@@ -226,6 +263,21 @@ TEST_CASE("pursuit survives degenerate movement rates", "[pursuit]") {
   INFO("monster_move_ticks " << rate);
   for (const auto at : walk) {
     REQUIRE(w.level.navigable(at));  // P1 still holds at any rate
+  }
+  // THE CLAMP, ASSERTED WHERE IT SHOWS. Below 1 is clamped to 1 at the point of
+  // use, so 0 and the negatives step EVERY tick and 1 does too — a monster five
+  // cells from its target is standing on it after five. Without the clamp a
+  // cooldown of 0 or less would still step every tick and this would be
+  // identical, so the discriminating value is the SPEED, not the endpoint: the
+  // case below counts steps rather than only looking at where it stopped.
+  int steps = 0;
+  Coord previous = Coord{6, 1};
+  for (const auto at : walk) {
+    if (at != previous) ++steps;
+    previous = at;
+  }
+  if (rate == 1 || rate <= 0) {
+    CHECK(steps == 4);  // (6,1) -> (2,1), one cell per tick, then held at the standoff
   }
   if (rate == std::numeric_limits<std::int32_t>::max()) {
     // Charged once and never ready again. Not a special case in the code — it
@@ -347,12 +399,18 @@ TEST_CASE("P12: pursuit never steps more often than monster_move_ticks allows",
   // P3 for the other mover. The clock is shared — `ready_to_move` and
   // `charge_step` are the same pair the patrol pump uses — so this is really an
   // assertion that nobody gave pursuit a clock of its own.
+  // THE CORRIDOR HAS TO BE LONGER THAN THE BOUND, or the case cannot fail. At
+  // ten cells of walk against a bound of twenty steps, a monster given its own
+  // faster clock still tops out at ten and the assertion passes — measured, by
+  // giving `approach_step` a one-tick cooldown and watching this stay green.
+  // Forty-one cells is more walk than forty ticks can cover at ANY legal rate,
+  // so the bound is the only thing limiting the count.
   const auto t = no_jitter();
   Monster m{};
-  m.at = Coord{11, 1};
+  m.at = Coord{41, 1};
   m.kind = MonsterKind{Acuity::Dull, false};
-  m.mind = mind_at(Awareness::Searching, Coord{1, 1});
-  auto w = world_with(corridor(14), m, Coord{13, 1});
+  m.mind = mind_at(Awareness::Searching, Coord{0, 1});
+  auto w = world_with(corridor(44), m, Coord{43, 1});
 
   constexpr int kTicks = 40;
   auto previous = w.monsters[0].at;
@@ -537,4 +595,76 @@ TEST_CASE("a halted hunter keeps facing you as you walk past it", "[pursuit]") {
   CHECK(w.monsters[0].at == Coord{2, 2});      // it never stepped
   CHECK(w.monsters[0].facing == Dir::South);   // and it turned all the way round
   CHECK(w.monsters[0].mind.state == Awareness::Hunting);
+}
+
+TEST_CASE("a rejoin onto a route that names one cell twice takes the LOWEST index",
+          "[pursuit]") {
+  // `lowest_index_of` argues for this in as many words — "a route may name one
+  // cell twice and the two indices are different waypoints with different
+  // dwells and different neighbours" — and until this case existed no route in
+  // the suite named a cell twice, so returning the HIGHEST match left every
+  // test green. An argued semantics with no coverage is a comment, not a rule.
+  //
+  // The route walks out and back: (1,1) (2,1) (3,1) (2,1). Index 1 and index 3
+  // are the same CELL, and they differ in where the ping-pong goes next — from
+  // 1 the forward leg is east to (3,1), from 3 it is the end of the route and
+  // the walk reverses.
+  //
+  // THE MONSTER HAS TO ARRIVE ON THE DUPLICATED CELL BY REJOINING, which is the
+  // only path that consults `lowest_index_of`. Reaching it by ordinary
+  // ping-pong does not: the cursor is already coherent and simply advances. So
+  // the monster comes down a side passage whose nearest route cell IS (2,1).
+  const auto t = no_jitter();
+  Level level = corridor(10);
+  if (auto* cell = level.at_mut(Coord{2, 0})) cell->kind = CellKind::Floor;
+  level.link(Coord{2, 0}, Dir::South, Edge{EdgeKind::Open, EdgeState::Open, 0, 0});
+
+  Monster m{};
+  m.at = Coord{2, 0};  // off the route, one step north of the duplicated cell
+  m.kind = MonsterKind{Acuity::Dull, false};
+  m.patrol.route = {Coord{1, 1}, Coord{2, 1}, Coord{3, 1}, Coord{2, 1}};
+  m.patrol.dwell = {0, 0, 0, 0};
+  auto w = world_with(std::move(level), m, Coord{9, 1});
+
+  const auto home = walk_for(w, t, 2);
+  const auto& mon = w.monsters[0];
+  REQUIRE(mon.at == Coord{2, 1});
+  CHECK(mon.patrol.waypoint == 1);  // NOT 3, though both name (2,1)
+
+  // And the leg it takes next is the one index 1 implies: east, toward (3,1).
+  // From index 3 the ping-pong would have turned back west instead, so this is
+  // the assertion that makes the index choice observable rather than internal.
+  const auto next = walk_for(w, t, 2);
+  CHECK(next.back() == Coord{3, 1});
+}
+
+TEST_CASE("the trail gate agrees with perception about which tick is the eighth",
+          "[pursuit]") {
+  // `advance` decides whether to ASK the trail question using
+  // `ticks_since_hit + 1 >= hunting_lost_ticks`, and `step` then tests
+  // `ticks_since_hit >= hunting_lost_ticks` after having incremented it. The
+  // `+ 1` is exactly that compensation, and nothing covered it: dropping it
+  // delays SEARCHING -> LOST_TRACK by one tick and left all seven suites green.
+  //
+  // test/04perception/ cannot see it — that file drives `step` directly with
+  // `trail_exhausted` hand-set, so the derivation is not in the picture. This
+  // case goes through `advance`, which is the only place the two halves meet,
+  // and asserts the EXACT tick rather than the eventual outcome.
+  const auto t = no_jitter();
+  Monster m{};
+  m.at = Coord{4, 1};  // standing ON the last known position: trail exhausted
+  m.kind = MonsterKind{Acuity::Dull, false};
+  m.mind = mind_at(Awareness::Searching, Coord{4, 1});
+  auto w = world_with(corridor(10), m, Coord{9, 1});
+
+  // Nothing perceives anything from here, so `ticks_since_hit` climbs on every
+  // tick and the give-up lands on the eighth.
+  for (int i = 1; i < t.hunting_lost_ticks; ++i) {
+    advance(w, t);
+    INFO("tick " << i);
+    REQUIRE(w.monsters[0].mind.state == Awareness::Searching);
+  }
+  advance(w, t);
+  CHECK(w.monsters[0].mind.state == Awareness::LostTrack);
+  CHECK(w.tick == static_cast<std::uint32_t>(t.hunting_lost_ticks));
 }

@@ -470,6 +470,31 @@ class FieldCache {
       // walk home to.
       if (at_its_waypoint(m)) return patrol_step(m, level, tuning, patrol);
       if (m.patrol.route.size() < 2) return false;
+
+      // THE POSITION IS AUTHORITATIVE AND THE CURSOR IS ADVISORY, and getting
+      // that backwards froze monsters in ordinary play. A hunter halts at arm's
+      // reach, which is frequently a cell OF ITS OWN ROUTE that its cursor does
+      // not name; it then calms to UNAWARE, `at_its_waypoint` is false for ever,
+      // and the walk-home refuses because it is already home. Measured before
+      // this line existed: 256,797 frozen monsters over 8,000 trials of valid
+      // data — no malformed route anywhere, the desync produced by the pump
+      // itself.
+      //
+      // So: standing on a route cell RESYNCS the cursor to it, lowest index
+      // first, and patrols from there. That also settles what a garbage cursor
+      // means, because the two states are indistinguishable — a monster on
+      // `route[k]` whose cursor says `j` cannot report how it got there. The
+      // failure matrix used to read "a cursor that indexes nothing makes a
+      // monster stand still"; it now reads "a cursor that indexes nothing is
+      // repaired from where the monster is standing", which is still total,
+      // still never a teleport, and no longer a permanent freeze.
+      //
+      // NO DWELL IS PAID, because it did not arrive this tick — the same rule
+      // `Patrol::dwell` states for the cell a monster is SPAWNED on.
+      if (const auto index = lowest_index_of(m.patrol.route, m.at); index >= 0) {
+        m.patrol.waypoint = index;
+        return patrol_step(m, level, tuning, patrol);
+      }
       return rejoin_step(m, level, fields.for_route(level, m.patrol.route), tuning, patrol);
 
     case Awareness::Searching:
@@ -762,8 +787,15 @@ auto advance(World& w, const Tuning& tuning, audio::Sink* voices) -> void {
     // cost two searches. On a tick with no hit, `last_known` does not move and
     // the same cached field serves both. The residue is one extra field on the
     // exact tick a cold-trailed searcher SEES you — on which it hunts anyway.
+    //
+    // WIDENED BEFORE THE ADD, for `pay_arrival_dwell`'s reason one file over:
+    // `perception.cpp`'s `tick_up` deliberately SATURATES `ticks_since_hit` at
+    // INT32_MAX, so `+ 1` on it is signed overflow — UB that ubsan reports here
+    // and that made the branch compiler-dependent. Caught by a fuzzer that set
+    // the field directly, which a loader or an editor can also do.
+    const auto since_hit = static_cast<std::int64_t>(m.mind.ticks_since_hit) + 1;
     if (m.mind.state == Awareness::Searching && !senses.heard &&
-        m.mind.ticks_since_hit + 1 >= tuning.hunting_lost_ticks) {
+        since_hit >= static_cast<std::int64_t>(tuning.hunting_lost_ticks)) {
       if (!m.mind.has_last_known) {
         senses.trail_exhausted = true;  // nothing remembered is nothing left to search
       } else {

@@ -83,6 +83,13 @@ class DistanceField {
       : m_width{level.width()}, m_distance(level.cell_count(), kUnreachable) {}
 
   [[nodiscard]] auto at(const Level& level, Coord c) const -> std::int32_t {
+    // THE WIDTH CHECK IS WHAT MAKES THE SENTENCE ABOVE TRUE. A size check alone
+    // lets a field built for a 10x10 answer a 4x4's question with an in-range
+    // number: `index_of` is `y * width + x`, so a narrower level maps the same
+    // coordinate to a different cell and the answer is confidently wrong rather
+    // than refused. Measured: a field built for 10x10 reported distance 2 at
+    // (3,2) against a 4x4 level, where its own level says 5.
+    if (level.width() != m_width) return kUnreachable;
     if (!level.in_bounds(c)) return kUnreachable;
     const auto i = level.index_of(c);
     return i < m_distance.size() ? m_distance[i] : kUnreachable;
@@ -133,6 +140,9 @@ class DistanceField {
 /// §6.1's "direct pursuit", and costs one parameter. Without it every tied
 /// monster in the game prefers north, which is a visible artefact on an open
 /// floor rather than a neutral default.
+///
+/// `from` outside the level answers `nullopt` through `at()`'s own bounds check
+/// rather than through a guard of its own — see the note in `path.cpp`.
 ///
 /// The tie-break is free to be anything BECAUSE every step strictly decreases
 /// the distance: no rule over a strictly decreasing sequence can produce a
