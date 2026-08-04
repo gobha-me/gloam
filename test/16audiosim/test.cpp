@@ -264,8 +264,17 @@ TEST_CASE("the sting's gain is exactly what the propagation says it is", "[audio
   REQUIRE(w.monsters[0].mind.state == Awareness::Hunting);
   REQUIRE(log.count(audio::SoundId::HuntingSting) == 1);
 
+  // READ AT THE CELL IT ARRIVED ON, NOT THE ONE IT STARTED FROM. Since gloam#32
+  // the tick that carries the sting also carries a step — §6.1's "gait changes,
+  // DIRECT PURSUIT" is a translation, and `advance` emits from the cell the
+  // monster reached, which is the cell a listener would place the sound at.
+  // Recomputed rather than relaxed to an inequality: the exactness is the point
+  // of the case, and an inequality here would pass for a mix computed from the
+  // wrong cell entirely.
+  const auto arrived = w.monsters[0].at;
+  CHECK(arrived != monster);  // the pursuit happened, so the distinction is real
   const auto expected =
-      audio::mix_for(w.level, party, Dir::East, monster, audio::kStingEmission, t);
+      audio::mix_for(w.level, party, Dir::East, arrived, audio::kStingEmission, t);
   REQUIRE(expected.gain > audio::kGainSilent);  // the case is not vacuous
 
   for (const auto& e : log.entries) {
@@ -488,11 +497,31 @@ TEST_CASE("no other tell makes a sound", "[audio][sting]") {
   // — which is exactly what test/04perception guards against on the perception
   // side, phrased there as "otherwise the audio sting stops meaning anything".
   const Tuning& t = kDefaultTuning;
-  auto w = sighting_world();
-  // Far away and unlit: the monster can escalate on noise alone, which walks
-  // UNAWARE -> SUSPICIOUS -> SEARCHING without ever reaching a sighting.
-  w.party = Coord{0, 1};
+
+  // UNLIT AND FAR IS NO LONGER ENOUGH, and the reason is gloam#32. A SEARCHING
+  // monster used to hold position, so "escalates on noise alone" was a state it
+  // could not walk out of. Now it walks to the last known position — and §6.3
+  // makes even a doused party visible at an ADJACENT cell, so an unlit party at
+  // the far end of an open corridor is a party the monster eventually finds.
+  // The old arrangement stopped testing "no other tell makes a sound" and
+  // started testing "the pursuit is slower than twenty ticks".
+  //
+  // So: audible and genuinely UNREACHABLE. A closed door is impassable to a body
+  // and still conducts sound (§6.2 attenuates it, §12 keeps one graph with two
+  // readings), and `Edge::attenuation_override` is exactly the authored value
+  // SCHEMAS.md provides for "an authored test level can pin an unusual value".
+  // The monster hears you through the door, escalates, walks up to it, and can
+  // never see you.
+  Level level{10, 3};
+  level.carve(Coord{0, 1}, Dir::East, 10);
+  level.link(Coord{4, 1}, Dir::East,
+             Edge{EdgeKind::Door, EdgeState::Closed, 0, /*attenuation_override=*/4});
+
+  std::vector<Monster> monsters{Monster{Coord{6, 1}, MonsterKind{Acuity::Keen, false}, {}}};
+  auto w = make_world(0x5EEDULL, std::move(level), std::move(monsters));
+  w.party = Coord{2, 1};
   w.lamp_level = 0;
+  w.armour = Armour::Plate;  // loud, so the door is the only thing stopping it
   Log log;
 
   for (int i = 0; i < 10; ++i) {
@@ -505,6 +534,10 @@ TEST_CASE("no other tell makes a sound", "[audio][sting]") {
   // It noticed something, and it never claimed to have found anyone.
   CHECK(w.monsters[0].mind.state != Awareness::Unaware);
   CHECK(log.count(audio::SoundId::HuntingSting) == 0);
+  // And it never got through: an unreachable target is a monster that HOLDS, not
+  // one that drifts toward the wall between you. That is the failure mode
+  // gloam#32 rejected greedy stepping to avoid, asserted where it would show.
+  CHECK(w.monsters[0].at == Coord{6, 1});
 }
 
 // ── the footfall: inheriting apply()'s rules rather than restating them ─────
@@ -512,10 +545,25 @@ TEST_CASE("no other tell makes a sound", "[audio][sting]") {
 TEST_CASE("a silent tick emits nothing at all", "[audio][footfall]") {
   const Tuning& t = kDefaultTuning;
   auto w = corridor_world();
+
+  // DOUSED, which this case did not have to be until gloam#32. `corridor_world`
+  // starts at the default lamp level, and the monster at (7,1) has clear line of
+  // sight to a lit party six cells away — inside a Normal monster's sight. It
+  // has ALWAYS been escalating here; it simply could not act on it, so the tick
+  // looked silent. Now it walks toward you and §9's first-named sound is its
+  // footfall, which is the subsystem working.
+  //
+  // Dousing restores what the case is actually about: no input, no perception,
+  // no sound. §6.3's pillar is what makes that reachable in one line.
+  w.lamp_level = 0;
+
   Log log;
   advance(w, t, &log);
   advance(w, t, &log);
   CHECK(log.entries.empty());
+  // The guard that keeps the line above meaning something: nothing perceived
+  // anything, so silence is the absence of a cause rather than a lost voice.
+  for (const auto& m : w.monsters) CHECK(m.mind.state == Awareness::Unaware);
 }
 
 TEST_CASE("a step into an impassable edge is not a footfall", "[audio][footfall]") {

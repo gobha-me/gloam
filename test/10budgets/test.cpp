@@ -12,6 +12,7 @@
 
 #include <catch2/catch_all.hpp>
 
+#include <array>
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
@@ -596,7 +597,12 @@ TEST_CASE("§11's tick budget holds when EVERY monster stings on one tick", "[bu
   // Within sight distance of the party and in clear line of sight, so the
   // SEARCHING -> HUNTING row fires for each of them on the same tick.
   constexpr int kMonsters = 16;
-  const Coord party{16, 16};
+  // OFF THE MONSTERS' OWN CELLS, which it did not have to be until gloam#32. At
+  // (16,16) one of the sixteen spawned exactly on the party, and a monster that
+  // has already arrived does not step — so the roster below would have been
+  // fifteen steppers and one bystander for no stated reason. Six cells south is
+  // still inside a Normal monster's sight from every one of them.
+  const Coord party{16, 20};
 
   // One step below HUNTING, looking in the right place. Re-applied before every
   // timed tick below, so each one is a fresh worst case.
@@ -633,14 +639,37 @@ TEST_CASE("§11's tick budget holds when EVERY monster stings on one tick", "[bu
   // numbers stay directly comparable. Each repeat resets every monster to
   // SEARCHING outside the timed region, so every timed tick is a fresh worst
   // case rather than a monster that is already hunting.
+  //
+  // POSITIONS ARE RESET TOO, SINCE gloam#32, and leaving them out was a real
+  // hole rather than an omission. A hunting monster now WALKS, so across fifty
+  // repeats the roster closed on the party and parked at arm's reach — and
+  // because the silent pass runs first, by the time the sink was attached every
+  // monster had already arrived and none of them stepped again. The voice total
+  // below stayed exactly right for a scenario that had quietly stopped being the
+  // one described: sixteen monsters stinging while standing still. Resetting the
+  // position makes every timed tick the tick this case is named after, on which
+  // each monster both steps AND stings.
   audio::RecordingSink<> sink;
   audio::Command drained{};
   constexpr int kRepeats = 50;
 
+  std::vector<Coord> spawn;
+  spawn.reserve(world.monsters.size());
+  for (const auto& m : world.monsters) spawn.push_back(m.at);
+
   const auto rearm = [&] {
-    for (auto& m : world.monsters) m.mind = searching_mind(party);
+    for (std::size_t i = 0; i < world.monsters.size(); ++i) {
+      world.monsters[i].mind = searching_mind(party);
+      world.monsters[i].at = spawn[i];
+      world.monsters[i].move_cooldown = 0;
+    }
     world.pending_noise = step_noise(world.armour, world.creeping, t);
   };
+
+  // BY EMITTER, NEVER BY `pushed()`. A total is satisfiable by the wrong mix —
+  // the lesson this file has now learned twice — and the whole point of the
+  // reset above is that the mix changed.
+  std::array<std::uint64_t, 8> heard{};
 
   const auto time_ticks = [&](audio::Sink* voices) {
     rearm();
@@ -648,6 +677,7 @@ TEST_CASE("§11's tick budget holds when EVERY monster stings on one tick", "[bu
     if (voices != nullptr) {
       while (sink.ring().try_pop(drained)) {}
       sink.ring().reset_counters();
+      heard.fill(0);
     }
 
     std::chrono::steady_clock::duration total{};
@@ -657,7 +687,7 @@ TEST_CASE("§11's tick budget holds when EVERY monster stings on one tick", "[bu
       advance(world, t, voices);
       total += std::chrono::steady_clock::now() - start;
       if (voices != nullptr) {
-        while (sink.ring().try_pop(drained)) {}
+        while (sink.ring().try_pop(drained)) ++heard[static_cast<std::size_t>(drained.sound)];
       }
     }
     return std::chrono::duration_cast<std::chrono::microseconds>(total).count() / kRepeats;
@@ -676,8 +706,14 @@ TEST_CASE("§11's tick budget holds when EVERY monster stings on one tick", "[bu
   INFO("monsters that reached HUNTING on the last tick: " << hunting);
   CHECK(hunting == kMonsters);
   INFO("voices over " << kRepeats << " worst-case ticks: " << sink.ring().pushed());
-  CHECK(sink.ring().pushed() ==
-        static_cast<std::uint64_t>(kRepeats) * (static_cast<std::uint64_t>(kMonsters) + 1));
+  const auto repeats = static_cast<std::uint64_t>(kRepeats);
+  const auto monsters_n = static_cast<std::uint64_t>(kMonsters);
+  CHECK(heard[static_cast<std::size_t>(audio::SoundId::HuntingSting)] == repeats * monsters_n);
+  CHECK(heard[static_cast<std::size_t>(audio::SoundId::PartyFootfall)] == repeats);
+  CHECK(heard[static_cast<std::size_t>(audio::SoundId::MonsterFootfall)] == repeats * monsters_n);
+  // Which is `2N + 1` per tick — the bound the ring-headroom case reasons about
+  // and, until gloam#32, could not construct.
+  CHECK(sink.ring().pushed() == repeats * (2 * monsters_n + 1));
 
   // ── What audio COSTS, which is the durable form of the question ──────────
   //
@@ -806,9 +842,33 @@ struct FrameState {
   /// quietly falsify this case's upper-bound claim while CI stayed green.
   ///
   /// It was cheaper to capture then than to remember now, and the case that
-  /// cashes it is at the end of this file. The 200-tick harness's own monsters
-  /// stay route-less, so this field costs it nothing.
+  /// cashes it is at the end of this file.
+  ///
+  /// NOTE WHAT STOPPED BEING TRUE ABOUT IT WITH gloam#32: this used to add that
+  /// "the 200-tick harness's own monsters stay route-less, so this field costs
+  /// it nothing". Pursuit needs no route, so route-less stopped meaning
+  /// stationary, and the harness's monsters now move under it.
   std::vector<Coord> positions{};
+
+  // AND A `facings` FIELD IS DELIBERATELY NOT HERE, which is worth writing down
+  // because it looks like the obvious next one. The argument for it: a monster
+  // halted at arm's reach re-faces its target on every tick it holds, so its
+  // POSE could change while its awareness and position do not — an Animation
+  // frame that would classify Idle and be asserted at zero bytes.
+  //
+  // It was added, and then removed, because the frame it describes is not
+  // reachable. Every facing write in `advance` is driven by a target that only
+  // moves when the PARTY moves — `mind.last_known` is written from
+  // `senses.party_position` — and a tick on which the party moves is a
+  // Recomposition by the first rule, whatever the monsters did. Checked by
+  // mutation rather than by argument: with the field in place, deleting it from
+  // `classify_frame` left the whole suite green, which is the signature of a
+  // branch no scenario reaches.
+  //
+  // If §7 ever gives a monster a reason to turn that the party did not cause —
+  // an idle look-around, a head turn toward another monster — this is the field
+  // to add, and `test/22pursuit/`'s "a halted hunter keeps facing you" is where
+  // the behaviour is pinned meanwhile.
 };
 
 auto snapshot(const World& w) -> FrameState {

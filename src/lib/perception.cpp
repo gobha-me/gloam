@@ -110,7 +110,40 @@ auto step(Perception& p, const Senses& senses, const MonsterKind& kind, const Tu
 
     case Awareness::Searching:
       // LOS clear AND party lit AND range <= sight — which is exactly `saw`.
-      if (saw) next = Awareness::Hunting;
+      if (saw) {
+        next = Awareness::Hunting;
+      } else if (senses.trail_exhausted && p.ticks_since_hit >= tuning.hunting_lost_ticks) {
+        // §6.1 SHIPPED WITHOUT THIS ROW, and until gloam#32 nothing could
+        // notice: a monster that could not translate had nowhere to search, so
+        // "searching forever" and "standing still" were the same picture. Once
+        // it walks to the last known position, finds nothing, and has no exit,
+        // it stands on a cell where you once made a noise for the rest of the
+        // session — and it does so OFF its route, so the world loses a patrol
+        // as well. That is worse for §6.4's "the world feels alive" than the
+        // hold-position boundary it replaces.
+        //
+        // TWO CONDITIONS, and the trail one is why this is not just a timer.
+        // A monster still walking toward the last known position has not
+        // finished searching, however long the walk; giving up mid-corridor
+        // reads as a monster losing interest rather than as one drawing a
+        // blank. It gives up where it was going, which is the picture §6.1
+        // already authored for LOST_TRACK.
+        //
+        // NO NEW TUNABLE. `hunting_lost_ticks` is "N ticks with no perception
+        // hit" and the meaning transfers exactly, so `ruleset_hash` does not
+        // move and no recorded replay is invalidated by this row.
+        //
+        // AND NO NEW TELL, which is the part worth arguing rather than
+        // asserting. gloam#12's rule is that two paths into one state must not
+        // read alike when they MEAN different things — "found you" against
+        // "never lost you". These two mean the identical thing: the trail went
+        // cold here. `Tell::CastsAbout` is already "casts about AT THE LAST
+        // POSITION, turning in place", which is literally what a monster
+        // standing on `last_known` with nothing to show for it is doing —
+        // `world.cpp` recorded that phrase as vacuous until gloam#32, and this
+        // is the row that cashes it.
+        next = Awareness::LostTrack;
+      }
       break;
 
     case Awareness::Hunting:

@@ -122,9 +122,14 @@ struct Patrol {
   /// reason it is not a direction enum.
   bool reversed{false};
   /// Ticks still owed at the current waypoint, authored plus §6.4's jitter.
+  ///
+  /// A PATROL DEBT, AND ONLY A PATROL DEBT. A monster that leaves its route to
+  /// search or pursue (gloam#32) discards whatever pause it owed rather than
+  /// standing through it first — you made a noise and it looked up, so a
+  /// four-tick authored pause must not become four ticks of a monster ignoring
+  /// you. `approach_step` clears it, and the pause is re-authored the next time
+  /// the ping-pong arrives at that waypoint.
   std::int32_t dwell_left{0};
-  /// Ticks until this monster may step again (`monster_move_ticks`).
-  std::int32_t move_cooldown{0};
 
   [[nodiscard]] auto operator==(const Patrol&) const -> bool = default;
 };
@@ -149,6 +154,17 @@ struct Monster {
   /// off anything but hashed state could not reproduce them from a replay.
   Dir facing{Dir::North};
   Patrol patrol{};
+  /// Ticks until this monster may step again (`Tuning::monster_move_ticks`).
+  ///
+  /// ON THE MONSTER RATHER THAN INSIDE `Patrol`, since gloam#32. It is the
+  /// movement clock, not a patrol cursor: a route-LESS monster that pursues you
+  /// charges it too, and leaving it in `Patrol` would have meant a monster with
+  /// no route quietly writing patrol state — which `test/13replay/` asserts does
+  /// not happen, and was right to.
+  ///
+  /// Hashed in the position `Patrol::move_cooldown` used to occupy, so moving it
+  /// changed no digest byte and `kWorldHashVersion` did not have to move for it.
+  std::int32_t move_cooldown{0};
 
   [[nodiscard]] auto operator==(const Monster&) const -> bool = default;
 };

@@ -209,13 +209,39 @@ TEST_CASE("a cursor that indexes nothing makes a monster stand still", "[patrol]
   CHECK(never_moved(w, t, 40));
 }
 
-TEST_CASE("a monster standing off its own route never moves", "[patrol]") {
-  // gloam#32's gap, ASSERTED rather than described. Rejoining a route needs the
-  // pathfinder §6 never specifies, so this monster stands where it is forever.
-  // When #32 lands this case goes red, which is the intended way to find it.
+TEST_CASE("a monster standing off its own route walks back to it", "[patrol]") {
+  // gloam#32's gap, CASHED. This case used to read "a monster standing off its
+  // own route never moves", and said: "When #32 lands this case goes red, which
+  // is the intended way to find it." It landed on 2026-08-04, and it did.
+  //
+  // ONE CORRECTION TO HOW IT WENT RED, worth recording because it nearly did
+  // not. The old case started the monster at (1,2) — which is the cell
+  // `patrolling_world` parks the PARTY on. Under the pathfinder that monster
+  // escalates to HUNTING within three ticks and then holds, because the arrival
+  // rule stops it where it already stands. It would have gone on passing, for a
+  // reason with nothing to do with its name. The start below is off the route
+  // AND off the party, which is what the case always meant.
   const auto t = no_jitter();
-  auto w = patrolling_world(crossing_route(), no_dwell(5), Coord{1, 2});
-  CHECK(never_moved(w, t, 200));
+  auto w = patrolling_world(crossing_route(), no_dwell(5), Coord{5, 2});
+
+  // Two steps west along the main corridor to reach (3,2), which is `route[2]`
+  // — the nearest cell of its own route, and the one the multi-source field
+  // finds without anybody looping over candidates. One step per
+  // `monster_move_ticks`, so the walk is four ticks long and three ticks of it
+  // are visible here.
+  const auto home = walk_for(w, t, 3);
+  CHECK(home == std::vector<Coord>{Coord{4, 2}, Coord{4, 2}, Coord{3, 2}});
+
+  const auto& m = w.monsters[0];
+  REQUIRE(m.mind.state == Awareness::Unaware);  // it walked home, it did not chase
+  CHECK(m.at == Coord{3, 2});
+  CHECK(m.patrol.waypoint == 2);  // the index of the cell it arrived on
+
+  // And it resumes the ping-pong from there rather than standing on it: §6.1's
+  // tell is "walks back to the patrol route AND RESUMES". South down the side
+  // passage, which is where `route[2] -> route[3]` goes.
+  const auto after = walk_for(w, t, 4);
+  CHECK(after == std::vector<Coord>{Coord{3, 2}, Coord{3, 3}, Coord{3, 3}, Coord{3, 4}});
 }
 
 TEST_CASE("degenerate tunables do not break the pump", "[patrol]") {
@@ -351,13 +377,27 @@ TEST_CASE("P3: a monster never steps more often than monster_move_ticks allows",
   CHECK(moves <= kTicks / t.monster_move_ticks);
 }
 
-TEST_CASE("P4: a monster's position is always a cell of its own route", "[patrol][property]") {
+TEST_CASE("P4: a monster that never leaves UNAWARE stays on its own route",
+          "[patrol][property]") {
+  // RE-SCOPED BY gloam#32, AND THE INNER REQUIRE IS THE POINT. The old name was
+  // "a monster's position is always a cell of its own route", which stopped
+  // being true the moment a monster could leave the route to search — and this
+  // case would have gone on PASSING, because its monster is Dull under a doused
+  // lamp and never escalates. A property that silently narrows to its fixture is
+  // worse than one that breaks: it keeps its name, keeps its green tick, and
+  // stops covering the thing it is named after.
+  //
+  // So the precondition is now asserted rather than assumed. If a future
+  // perception change makes this monster notice the party, this case goes red on
+  // the state line instead of quietly measuring nothing. The companion claim —
+  // that a monster which DID leave comes back — is P13 in `test/22pursuit/`.
   const auto t = kDefaultTuning;
   const auto route = crossing_route();
   auto w = patrolling_world(route, {2, 0, 0, 0, 2}, Coord{3, 0});
 
   for (int i = 0; i < 200; ++i) {
     advance(w, t);
+    REQUIRE(w.monsters[0].mind.state == Awareness::Unaware);
     const auto at = w.monsters[0].at;
     REQUIRE(std::find(route.begin(), route.end(), at) != route.end());
   }
@@ -500,16 +540,31 @@ TEST_CASE("P8: the SUSPICIOUS tell halts for exactly one tick and turns the head
   CHECK_FALSE(w.monsters[0].at == before);
 }
 
-TEST_CASE("P9: awareness at SEARCHING or above pins the position", "[patrol][property]") {
-  // gloam#32's boundary, asserted so that removing it is a deliberate red test
-  // rather than a silent behaviour change.
+TEST_CASE("P9a: LOST_TRACK pins the position, and is now the only state that does",
+          "[patrol][property]") {
+  // WHAT SURVIVES OF P9. It used to read "awareness at SEARCHING or above pins
+  // the position" and covered all three states — gloam#32's boundary, asserted
+  // so that removing it would be a deliberate red test. #32 landed, and
+  // SEARCHING and HUNTING now translate; their replacements are P9b and P9c in
+  // `test/22pursuit/`.
+  //
+  // LOST_TRACK still holds, and that is a decision rather than a leftover:
+  // §6.1's tell for it is "casts about at the last position, TURNING IN PLACE",
+  // so a monster that walked while casting about would be performing a
+  // different tell from the one the design authored. Its timers stop with it,
+  // for the reason `world.cpp` gives — a monster that has stopped moving is not
+  // quietly accruing the right to a step it will take the instant it calms down.
+  //
+  // NOTE WHAT THIS FIXTURE DOES NOT GIVE THE MONSTER: a `last_known`. That makes
+  // the case narrower than it looks, so P9b/P9c carry the version with a memory
+  // and this one is only about the state.
   const auto t = no_jitter();
-  for (const auto state : {Awareness::Searching, Awareness::Hunting, Awareness::LostTrack}) {
-    auto w = patrolling_world(crossing_route(), no_dwell(5), Coord{3, 0});
-    w.monsters[0].mind.state = state;
-    // Held for long enough that §6.1's timers cannot carry it back to UNAWARE.
-    CHECK(never_moved(w, t, 20));
-  }
+  auto w = patrolling_world(crossing_route(), no_dwell(5), Coord{3, 0});
+  w.monsters[0].mind.state = Awareness::LostTrack;
+  w.monsters[0].mind.has_last_known = true;
+  w.monsters[0].mind.last_known = Coord{3, 4};  // somewhere it could walk to, and does not
+  // Held for long enough that §6.1's timers cannot carry it back to UNAWARE.
+  CHECK(never_moved(w, t, 20));
 }
 
 // ── Goldens, last ───────────────────────────────────────────────────────────
