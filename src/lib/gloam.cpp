@@ -4,7 +4,16 @@
 
 namespace gloam {
 
-auto version_string() -> const char* { return PROGRAM_NAME.data(); }
+// The version, not the project name. This returned PROGRAM_NAME for the first
+// eight tags, which made `gloam --version` print `gloam` and the banner read
+// `GLOAM gloam - simulation core`. Every call site was already correct; the one
+// function all three of them shared was not. test/00version/ is what keeps it
+// that way.
+//
+// .data() is NUL-terminated here because VERSION_STRING is a view over a string
+// literal in the generated header — the same reason the old body was allowed to
+// hand out PROGRAM_NAME.data().
+auto version_string() -> const char* { return VERSION_STRING.data(); }
 
 auto version_at_least(std::uint32_t major, std::uint32_t minor, std::uint32_t patch) -> bool {
   // Component-major-first: each component settles the answer outright unless it

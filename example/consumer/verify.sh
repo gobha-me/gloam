@@ -6,10 +6,16 @@
 #   example/consumer/verify.sh                 # $CXX or the platform default
 #   CXX=clang++ example/consumer/verify.sh     # the other compiler
 #
-# Every mode must produce a binary that prints the project name. Printing it is
-# the point: version_string() is defined in the library's translation unit, so a
-# consumer that got the headers but not the archive fails to link rather than
-# passing while testing nothing.
+# Every mode must produce a binary that prints two lines: the project name, then
+# the version. Printing them is the point: version_string() is defined in the
+# library's translation unit, so a consumer that got the headers but not the
+# archive fails to link rather than passing while testing nothing.
+#
+# The two lines are checked differently ON PURPOSE. The name is compared exactly
+# (it is derived from the directory, so a wrong one means the wrong project got
+# linked); the version is checked for SHAPE only, because it differs by mode.
+# Until v0.8.0 there was one line and it was the name — because version_string()
+# returned the project name, a bug this check required in order to stay green.
 #
 # Everything is built under mktemp -d, so this leaves no build dirs behind and
 # needs no .gitignore entry.
@@ -39,17 +45,26 @@ run_mode() {
         "$@" > "${build}.log" 2>&1 \
      && cmake --build "${build}" --parallel >> "${build}.log" 2>&1
   then
-    local got
+    local got got_name got_version
     got="$("${build}/consumer")"
-    if [ "${got}" = "${NAME}" ]; then
-      echo "PASS ${mode}: consumer printed '${got}'"
+    got_name="$(printf '%s\n' "${got}" | sed -n 1p)"
+    got_version="$(printf '%s\n' "${got}" | sed -n 2p)"
+
+    if [ "${got_name}" != "${NAME}" ]; then
+      # A wrong name is not a near-miss. It means the consumer linked a different
+      # project than it meant to — the classic cause being FetchContent's
+      # <name>-src checkout directory renaming a directory-derived project.
+      echo "FAIL ${mode}: expected name '${NAME}', got '${got_name}'"
+    elif ! printf '%s' "${got_version}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+      # Shape, not value. The one thing it must never be again is the project
+      # name — which this rejects, along with an empty line from a library that
+      # linked but returned nothing.
+      echo "FAIL ${mode}: expected a vMAJOR.MINOR.PATCH version, got '${got_version}'"
+    else
+      echo "PASS ${mode}: consumer printed '${got_name}' ${got_version}"
       pass=$((pass + 1))
       return 0
     fi
-    # A wrong name is not a near-miss. It means the consumer linked a different
-    # project than it meant to — the classic cause being FetchContent's
-    # <name>-src checkout directory renaming a directory-derived project.
-    echo "FAIL ${mode}: expected '${NAME}', got '${got}'"
   else
     echo "FAIL ${mode}: configure or build failed"
     tail -n 30 "${build}.log" | sed 's/^/     | /'

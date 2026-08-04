@@ -224,6 +224,15 @@ and PRs note what was actually run to verify (per "How to verify" above).
 - `include/version.hpp.in.cmake` is configured into `include/version.hpp` at
   build time; edit the `.in.cmake` source, not the generated file. If you touch
   it, keep the `#include <cstdint>` (std::uint32_t needs it).
+  `VERSION_STRING` in that file is what `gloam::version_string()` returns and
+  what `--version` prints; it is substituted from the same CMake variables as
+  `VERSION_MAJOR/MINOR/PATCH` so the two cannot drift, and `test/00version/`
+  asserts they agree. It carries no `-dirty` or commits-since-tag suffix on
+  purpose — read `VERSION_DIRTY` / `VERSION_TWEAK` if you want build identity.
+  Worth knowing why the test exists: `version_string()` returned `PROGRAM_NAME`
+  from v0.1.0 to v0.8.0, and the only check that read it — the `consumer`
+  acceptance script — compared it against the project name, so the gate *required*
+  the bug. A check that pins the wrong value is worse than no check.
 - Version parsing is pure string logic in `cmake/version_parse.cmake`
   (`parse_git_describe`); `cmake/version.cmake` just runs `git describe` and calls
   it. If you change the parsing, add a row to and re-run the self-test:
