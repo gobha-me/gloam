@@ -2,14 +2,28 @@
 // template's library can be *consumed* — the same way a real project would use
 // it, and identically across all three acquisition modes (see verify.sh).
 //
-// It prints the project name so the caller can check it, which is what makes
-// this a link test rather than a compile test: version_string() is declared in
-// the public header and defined in the library's translation unit, so a build
-// that gets the include directory but not the archive fails at link. That
-// distinction is the reason include/lib.hpp exists at all — a header of pure
-// constexpr would compile and "pass" while linking nothing.
+// It prints two lines, and they check different things — see verify.sh:
+//
+//   1. the project name, out of the generated header, which catches the
+//      consumer linking a *different* project than it meant to;
+//   2. the version, out of the library's archive, which is what makes this a
+//      link test rather than a compile test: version_string() is declared in the
+//      public header and defined in the library's translation unit, so a build
+//      that gets the include directory but not the archive fails at link. That
+//      distinction is the reason include/lib.hpp exists at all — a header of
+//      pure constexpr would compile and "pass" while linking nothing.
+//
+// The two used to be ONE line, because version_string() wrongly returned the
+// project name and this check compared it to the directory name. That made the
+// consumer gate the thing keeping a real bug alive: fixing version_string()
+// turned it red. Splitting the two properties apart is what stops one from
+// being able to hold the other hostage again.
 
 #include <gloam/gloam.hpp>
+
+// The generated header, for PROGRAM_NAME. cmake/install.cmake installs it
+// deliberately and says why; this is the consumer that proves the claim.
+#include <version.hpp>
 
 #include <cstdio>
 
@@ -30,9 +44,19 @@
 #endif
 
 auto main() -> int {
+  // Line 1 — constexpr, from the installed header. verify.sh compares it to the
+  // repo directory name, which is what catches FetchContent's <name>-src
+  // checkout renaming a directory-derived project out from under us.
+  std::printf("%s\n", PROGRAM_NAME.data());
+
+  // Line 2 — a real call into the archive. verify.sh checks it is version-shaped
+  // rather than checking it equals anything: the version legitimately differs
+  // between the three modes (the FetchContent snapshot has no tags, so it takes
+  // the 0.0.0 fallback), and pinning an exact string would just re-create the
+  // over-tight assertion this file used to carry.
   std::printf("%s\n", gloam::version_string());
 
-  // A second call, through the other half of the public API, so the check is
+  // A third call, through the other half of the public API, so the link check is
   // not one symbol wide.
   return gloam::version_at_least(0, 0, 0) ? 0 : 1;
 }

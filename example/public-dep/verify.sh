@@ -247,8 +247,12 @@ fi
 
 # ── D. A downstream project can consume the result ──────────────────────────
 # Runs the binary rather than only linking it, for the reason
-# example/consumer/verify.sh gives: the printed name is what proves the library
-# was linked rather than merely found.
+# example/consumer/verify.sh gives: the printed name proves the library was
+# linked rather than merely found, and the version line proves the call into the
+# archive returned the build's version rather than the project's name.
+#
+# Same two-line contract as example/consumer/verify.sh, because this reuses that
+# consumer verbatim — keep the two checks in step.
 CONSUMER="${FORK}/example/consumer"
 if cmake -S "${CONSUMER}" -B "${WORK}/consumer-fp" \
       -DCONSUMER_MODE=find_package \
@@ -257,10 +261,14 @@ if cmake -S "${CONSUMER}" -B "${WORK}/consumer-fp" \
    && cmake --build "${WORK}/consumer-fp" --parallel >> "${WORK}/D-consumer.log" 2>&1
 then
   got="$("${WORK}/consumer-fp/consumer")"
-  if [ "${got}" = "${NAME}" ]; then
-    ok "D: find_package on the installed fork works and runs"
+  got_name="$(printf '%s\n' "${got}" | sed -n 1p)"
+  got_version="$(printf '%s\n' "${got}" | sed -n 2p)"
+  if [ "${got_name}" != "${NAME}" ]; then
+    bad "D: consumer printed name '${got_name}', expected '${NAME}'"
+  elif ! printf '%s' "${got_version}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+    bad "D: consumer printed version '${got_version}', expected vMAJOR.MINOR.PATCH"
   else
-    bad "D: consumer printed '${got}', expected '${NAME}'"
+    ok "D: find_package on the installed fork works and runs"
   fi
 else
   bad "D: the installed package could not be consumed"

@@ -90,7 +90,11 @@
 
 namespace gloam {
 
-/// The build's version, as a NUL-terminated string.
+/// The build's version, as a NUL-terminated string: exactly `vMAJOR.MINOR.PATCH`,
+/// and never the project name. No `-dirty` marker and no commits-since-tag
+/// suffix — those live in VERSION_DIRTY / VERSION_TWEAK in the generated header.
+///
+/// The shape is a promise, not a description: test/00version/ parses it.
 ///
 /// Declared here and defined in the library's translation unit on purpose: a
 /// header of pure constexpr would compile and "pass" in a consumer that never
