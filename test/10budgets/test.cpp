@@ -281,23 +281,48 @@ TEST_CASE("§9.2's dropped-voice-command budget, measured over its own window", 
 
   Level level{16, 3};
   level.carve(Coord{0, 1}, Dir::East, 16);
+  // A MIXED ROSTER, SO THE WINDOW CARRIES ALL THREE EMITTERS, and getting that
+  // right took a correction worth recording. The first attempt gave all eight
+  // monsters routes and left them Keen under a bright lamp — so every one of
+  // them escalated within a few ticks and, since a monster at SEARCHING or
+  // above holds position (gloam#32), NOT ONE OF THEM EVER TOOK A STEP. The
+  // routes were decoration and the window carried exactly the traffic it had
+  // carried before §6.4 existed.
+  //
+  // So: two Keen listeners with no route, who hear the party's plate through
+  // the corridor and sting; and six Dull patrollers, whose threshold of 70 is
+  // above anything a 44-emission step can deliver at this range, so they never
+  // notice and never stop walking. Doused, so nothing is seen either.
   std::vector<Monster> monsters;
   for (int m = 0; m < 8; ++m) {
-    monsters.push_back(Monster{Coord{4 + m, 1}, MonsterKind{Acuity::Keen, false}, {}});
+    const Coord start{4 + m, 1};
+    Monster mon{};
+    mon.at = start;
+    if (m < 2) {
+      mon.kind = MonsterKind{Acuity::Keen, false};  // escalates, stings, then holds
+    } else {
+      mon.kind = MonsterKind{Acuity::Dull, false};
+      mon.patrol.route = {start, start.step(Dir::East)};
+      mon.patrol.dwell = {0, 0};
+    }
+    monsters.push_back(mon);
   }
 
   auto world = make_world(0xA0D10ULL, std::move(level), std::move(monsters));
   world.party = Coord{1, 1};
   world.armour = Armour::Plate;   // loudest emitter, so every tick has a voice
-  world.lamp_level = kLampLevelMax;
+  world.lamp_level = kLampLevelMin;
 
   audio::RecordingSink<> sink;
   audio::Command drained{};
+  int monster_footfalls = 0;
 
   for (int tick = 0; tick < budget::kDroppedVoiceCommandWindowTicks; ++tick) {
     world.pending_noise = step_noise(world.armour, world.creeping, t);
     advance(world, t, &sink);
-    while (sink.ring().try_pop(drained)) {}  // the audio thread's one look
+    while (sink.ring().try_pop(drained)) {  // the audio thread's one look
+      if (drained.sound == audio::SoundId::MonsterFootfall) ++monster_footfalls;
+    }
   }
 
   // The window must have carried real traffic. Without this the row below is
@@ -306,6 +331,12 @@ TEST_CASE("§9.2's dropped-voice-command budget, measured over its own window", 
   INFO("voices pushed over the window: " << sink.ring().pushed());
   CHECK(sink.ring().pushed() >= static_cast<std::uint64_t>(
                                    budget::kDroppedVoiceCommandWindowTicks));
+
+  // AND BY EMITTER, because the total above is met by the party's own footfall
+  // on every tick. These monsters were given routes so the window would carry
+  // roughly twice the traffic; a total-only guard cannot tell whether it did.
+  INFO("monster footfalls over the window: " << monster_footfalls);
+  CHECK(monster_footfalls > 0);
 
   INFO("dropped " << sink.ring().dropped() << " of " << sink.ring().pushed());
   CHECK(sink.ring().dropped() ==
@@ -383,6 +414,106 @@ TEST_CASE("§11's simulation tick budget, measured", "[budget]") {
   INFO("per-tick " << per_tick_us << " us against a budget of "
                    << budget::kMaxSimulationTickMs * 1000 << " us");
   CHECK(per_tick_us < budget::kMaxSimulationTickMs * 1000);
+}
+
+TEST_CASE("§11's tick budget still holds with sixteen monsters PATROLLING", "[budget]") {
+  // THE ROW MOST AT RISK FROM §6.4, and the reason this case mirrors the one
+  // above cell for cell: the two numbers are meant to be compared.
+  //
+  // What §6.4 adds to a tick is O(monsters) integer bookkeeping and, when a
+  // monster moves with a sink attached, a SECOND propagation from the party.
+  // One field per tick, not one per moving monster — which is the same
+  // discipline `world.cpp:230-236` records paying 13.6 ms to learn. A footfall
+  // field seeded at 14 reaches seven cells rather than the sting field's
+  // forty-five, so it is the cheaper of the two, but "cheaper than the thing
+  // that nearly blew the budget" is not an argument. This measures it.
+  const Tuning& t = kDefaultTuning;
+
+  constexpr int kSide = 32;
+  Level level{kSide, kSide};
+  for (int y = 0; y < kSide; ++y) level.carve(Coord{0, y}, Dir::East, kSide);
+  for (int x = 0; x < kSide; ++x) level.carve(Coord{x, 0}, Dir::South, kSide);
+
+  // Every monster on its own four-cell east-west route, all of them walking at
+  // once. Nothing in play makes sixteen monsters step on the same tick forever;
+  // that is why it is the budget's case rather than the game's.
+  constexpr int kMonsters = 16;
+  std::vector<Monster> monsters;
+  for (int m = 0; m < kMonsters; ++m) {
+    const Coord start{2 + (m % 7) * 4, 2 + m / 4};
+    Monster mon{};
+    mon.at = start;
+    mon.kind = MonsterKind{Acuity::Normal, false};
+    mon.patrol.route = {start, start.step(Dir::East), start.step(Dir::East).step(Dir::East)};
+    mon.patrol.dwell = {0, 0, 0};
+    monsters.push_back(mon);
+  }
+
+  auto world = make_world(0xB0DEB0DEULL, std::move(level), std::move(monsters));
+  world.party = Coord{1, 1};
+  world.armour = Armour::Plate;
+
+  audio::RecordingSink<> sink;
+  audio::Command drained{};
+  int footfalls = 0;
+
+  constexpr int kTicks = 100;
+  const auto start = std::chrono::steady_clock::now();
+  for (int tick = 0; tick < kTicks; ++tick) {
+    world.pending_noise = step_noise(world.armour, world.creeping, t);
+    advance(world, t, &sink);
+    while (sink.ring().try_pop(drained)) {
+      if (drained.sound == audio::SoundId::MonsterFootfall) ++footfalls;
+    }
+  }
+  const auto elapsed = std::chrono::steady_clock::now() - start;
+  const auto per_tick_us =
+      std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count() / kTicks;
+
+  // The traffic guard, for the reason `roused > 0` exists above: a pump that
+  // silently stopped moving anything would make this the fastest row in the
+  // file and measure nothing at all.
+  //
+  // COUNTED BY EMITTER, not by `pushed()`. The party emits a footfall on every
+  // one of these ticks, so a total above `kTicks` is satisfied by the party
+  // alone — the guard would have stayed green with the entire patrol subsystem
+  // switched off, which is precisely the class of vacuous pass this file's other
+  // guards exist to refuse.
+  INFO("monster footfalls over " << kTicks << " ticks: " << footfalls);
+  CHECK(footfalls > kTicks);
+  CHECK(sink.ring().dropped() == 0);
+
+  INFO("per-tick with patrols " << per_tick_us << " us against a budget of "
+                                << budget::kMaxSimulationTickMs * 1000 << " us");
+#if defined(GLOAM_TEST_SANITIZED)
+  WARN("§11's absolute tick budget is not asserted under a sanitizer — see the worst-case "
+       "sting row for the argument.");
+#else
+  CHECK(per_tick_us < budget::kMaxSimulationTickMs * 1000);
+#endif
+}
+
+TEST_CASE("§9.2's ring has headroom for every voice one tick can carry", "[budget]") {
+  // The worst tick is `2N + 1`: the party's own footfall, plus a footfall and a
+  // sting for each of N monsters. At §11's reference scale that is 33 against a
+  // capacity of 64.
+  //
+  // ASSERTED AS THE BOUND ON N RATHER THAN AS THE NUMBER 33, because the number
+  // is what changes. `2N + 1 <= 64` gives N <= 31, so the commit that raises
+  // the monster count past thirty-one lands on this line and has to think about
+  // the ring instead of discovering it as dropped voices in a dark corridor.
+  //
+  // Note it is NOT the tighter bound this slice could justify. Today a monster
+  // cannot move and sting on the same tick — `Tell::GaitChanges` only arrives
+  // from SEARCHING, which holds position (gloam#32) — which would make the
+  // worst case `N + 1`. Depending on that would be depending on a scope
+  // boundary, and boundaries move.
+  constexpr std::size_t kReferenceMonsters = 16;
+  STATIC_REQUIRE(2 * kReferenceMonsters + 1 <= audio::kVoiceRingCapacity);
+
+  constexpr std::size_t kMaxMonsters = (audio::kVoiceRingCapacity - 1) / 2;
+  STATIC_REQUIRE(kMaxMonsters == 31);
+  STATIC_REQUIRE(2 * (kMaxMonsters + 1) + 1 > audio::kVoiceRingCapacity);
 }
 
 TEST_CASE("§11's tick budget still holds with the audio sink attached", "[budget]") {
@@ -669,11 +800,14 @@ struct FrameState {
   Dir facing{};
   std::int32_t lamp_level{};
   std::vector<Awareness> minds{};
-  /// Captured even though `advance` never moves a monster today (`world.hpp`
-  /// says so). When §6.4's patrols land, a tick where a monster relocates
-  /// WITHOUT changing awareness would otherwise classify as idle, emit nothing,
-  /// and quietly falsify this case's upper-bound claim while CI stayed green.
-  /// Cheaper to capture now than to remember later.
+  /// Captured one slice BEFORE `advance` could move a monster, against exactly
+  /// the day §6.4's patrols landed: a tick where a monster relocates WITHOUT
+  /// changing awareness would otherwise classify as idle, emit nothing, and
+  /// quietly falsify this case's upper-bound claim while CI stayed green.
+  ///
+  /// It was cheaper to capture then than to remember now, and the case that
+  /// cashes it is at the end of this file. The 200-tick harness's own monsters
+  /// stay route-less, so this field costs it nothing.
   std::vector<Coord> positions{};
 };
 
@@ -765,7 +899,12 @@ auto model_recomposition(emit::ByteSink& sink, const World& w) -> int {
 }
 
 /// §4.6's "two or three placements, not twenty-four": the light field, plus the
-/// sprite of every monster whose awareness moved.
+/// sprite of every monster whose awareness OR POSITION moved.
+///
+/// Position joined that list with §6.4. A monster that relocates without
+/// changing awareness needs re-placing for exactly the same reason one that
+/// changes pose does, and a model that skipped it would under-count an
+/// animation frame — reporting headroom this row does not have.
 auto model_animation(emit::ByteSink& sink, const World& w, const FrameState& before) -> int {
   int placements = 0;
 
@@ -774,7 +913,9 @@ auto model_animation(emit::ByteSink& sink, const World& w, const FrameState& bef
   ++placements;
 
   for (std::size_t m = 0; m < w.monsters.size(); ++m) {
-    if (m < before.minds.size() && before.minds[m] == w.monsters[m].mind.state) continue;
+    const bool mind_still = m < before.minds.size() && before.minds[m] == w.monsters[m].mind.state;
+    const bool body_still = m < before.positions.size() && before.positions[m] == w.monsters[m].at;
+    if (mind_still && body_still) continue;
     place(sink, static_cast<std::uint32_t>(200 + m), layer::Band::Sprites,
           static_cast<int>(m), geometry::kDepths[2]);
     ++placements;
@@ -808,6 +949,12 @@ TEST_CASE("§11's per-frame rows, over a 200-tick scripted replay", "[budget]") 
   Level level{kRunLength + 2, 3};
   level.carve(Coord{0, 1}, Dir::East, kRunLength + 2);
 
+  // ROUTE-LESS, AND THAT IS A DECISION RATHER THAN A DEFAULT. These three
+  // monsters must never patrol. `CHECK(idles > 0)` below is what keeps the
+  // zero-byte row from going vacuous, and a monster stepping on its own
+  // schedule turns idle ticks into animation ticks until there are none left.
+  // The patrol rows have their own cases; this one measures §11's headline
+  // number and needs a roster that only reacts.
   std::vector<Monster> monsters;
   for (int m = 0; m < 3; ++m) {
     monsters.push_back(Monster{Coord{4 + 5 * m, 1}, MonsterKind{Acuity::Normal, false}, {}});
@@ -817,6 +964,7 @@ TEST_CASE("§11's per-frame rows, over a 200-tick scripted replay", "[budget]") 
   world.party = Coord{0, 1};
   world.facing = Dir::East;
   world.armour = Armour::Leather;
+  for (const auto& m : world.monsters) REQUIRE(m.patrol.route.empty());
 
   std::vector<replay::Record> script;
   script.reserve(kTicks);
@@ -973,4 +1121,70 @@ TEST_CASE("§11's per-frame rows, over a 200-tick scripted replay", "[budget]") 
   // red upward, something made emission much more expensive and that is a
   // regression rather than a re-measurement.
   CHECK(*p95 * 100 / budget::kMaxSustainedBytesPerSecond <= 105);
+}
+
+TEST_CASE("a monster that relocates without changing awareness is an ANIMATION frame",
+          "[budget]") {
+  // CASHING A COMMENT THAT WAS WRITTEN BEFORE THERE WAS ANYTHING TO CASH IT.
+  //
+  // `FrameState::positions` was captured in this file's harness while `advance`
+  // still could not move a monster, against exactly this day: without it a
+  // patrolling monster would classify IDLE, be asserted at zero bytes, emit
+  // nothing, and quietly falsify the upper-bound claim the 200-tick case makes
+  // while CI stayed green. §6.4 is what makes that reachable.
+  //
+  // BUDGETS.md's animation row is "monster pose, lamp flicker" at <= 400 B, and
+  // a monster crossing a cell boundary is the purest example the design has.
+  const Tuning& t = kDefaultTuning;
+
+  Level level{12, 3};
+  level.carve(Coord{0, 1}, Dir::East, 12);
+
+  // Dull, doused and far from the party: nothing here can move an awareness
+  // state, so a change of CLASS can only have come from the body moving.
+  Monster mon{};
+  mon.at = Coord{8, 1};
+  mon.kind = MonsterKind{Acuity::Dull, false};
+  mon.patrol.route = {Coord{8, 1}, Coord{9, 1}};
+  mon.patrol.dwell = {0, 0};
+
+  auto world = make_world(0x9A14ULL, std::move(level), {mon});
+  world.party = Coord{1, 1};
+  world.facing = Dir::East;
+  world.lamp_level = 0;
+
+  emit::ByteSink sink;
+  meter::FrameMeter frame_meter;
+
+  int animations = 0;
+  int idles = 0;
+  constexpr int kTicks = 12;
+  for (int tick = 0; tick < kTicks; ++tick) {
+    const auto before = snapshot(world);
+    advance(world, t);
+    const auto after = snapshot(world);
+
+    // The party never acts, so nothing can classify as a recomposition.
+    const auto klass = classify_frame(before, after);
+    REQUIRE(klass != meter::FrameClass::Recomposition);
+    REQUIRE(before.minds == after.minds);  // awareness is NOT what moved
+
+    sink.clear();
+    if (klass == meter::FrameClass::Animation) {
+      static_cast<void>(model_animation(sink, world, before));
+      ++animations;
+    } else {
+      ++idles;
+    }
+    frame_meter.record(klass, sink.size());
+  }
+
+  // Both classes exercised, or the two rows below are peak() over an empty set.
+  INFO("frames: " << animations << " animation, " << idles << " idle");
+  CHECK(animations > 0);
+  CHECK(idles > 0);
+
+  CHECK(frame_meter.peak(meter::FrameClass::Idle) == 0);
+  CHECK(frame_meter.peak(meter::FrameClass::Animation) <= budget::kMaxAnimationFrameBytes);
+  CHECK(frame_meter.peak(meter::FrameClass::Animation) > 0);
 }

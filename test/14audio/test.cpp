@@ -387,10 +387,22 @@ TEST_CASE("an out-of-bounds source or listener is silent, not a crash", "[audio]
 
 // ── the smoke check ─────────────────────────────────────────────────────────
 
-TEST_CASE("the two sound ids and their scales are what §9 froze", "[audio]") {
+TEST_CASE("the sound ids and their scales are what §9 froze", "[audio]") {
+  // The VALUES are the contract, not just the names: a `Command` crosses a
+  // lock-free ring as a plain store, and a mixer sizes its arena by the count.
+  // Renumbering one of these is renumbering a wire format.
   CHECK(static_cast<int>(SoundId::None) == 0);
   CHECK(static_cast<int>(SoundId::PartyFootfall) == 1);
   CHECK(static_cast<int>(SoundId::HuntingSting) == 2);
+  CHECK(static_cast<int>(SoundId::MonsterFootfall) == 3);
+  CHECK(kSoundIdCount == 4);
+
+  // §6.2's units, and NEITHER is a `Tuning` field — see audio.hpp's preamble.
+  // A monster is about as loud as a leather-shod party member; the sting sits
+  // at melee-hit loudness.
+  CHECK(kMonsterFootfallEmission == kDefaultTuning.noise_step_leather);
+  CHECK(kStingEmission == kDefaultTuning.noise_melee_hit);
+  CHECK(kMonsterFootfallEmission < kStingEmission);
 
   // Powers of two, so the device's conversion to float is exact.
   CHECK(kGainUnity == 1024);

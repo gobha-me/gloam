@@ -74,13 +74,20 @@ struct AudioRun {
   gloam::audio::RecordingSink<> sink{};
   std::uint64_t footfalls{0};
   std::uint64_t stings{0};
+  std::uint64_t monster_footfalls{0};
 
   /// Drain what the simulation queued, as the audio callback would.
+  ///
+  /// ONE COUNTER PER EMITTER, and `check_audio_mute.cmake` requires each of them
+  /// by name. Its own comment records why: killing the footfall path entirely
+  /// once left that gate green on the sting alone. A third emitter that reported
+  /// into a shared total would inherit the same hole.
   auto drain() -> void {
     gloam::audio::Command c{};
     while (sink.ring().try_pop(c)) {
       if (c.sound == gloam::audio::SoundId::PartyFootfall) ++footfalls;
       if (c.sound == gloam::audio::SoundId::HuntingSting) ++stings;
+      if (c.sound == gloam::audio::SoundId::MonsterFootfall) ++monster_footfalls;
     }
   }
 
@@ -88,7 +95,7 @@ struct AudioRun {
     drain();
     std::cerr << "gloam_replay: " << what << " voices=" << sink.ring().pushed()
               << " dropped=" << sink.ring().dropped() << " footfalls=" << footfalls
-              << " stings=" << stings << '\n';
+              << " stings=" << stings << " monster_footfalls=" << monster_footfalls << '\n';
   }
 };
 
@@ -108,9 +115,40 @@ struct AudioRun {
   level.carve(Coord{0, 1}, Dir::East, 9);
   level.carve(Coord{4, 1}, Dir::North, 2);
 
+  // The first monster PATROLS the alcove, and that is load-bearing rather than
+  // scenery. `check_audio_mute.cmake` requires a non-zero `monster_footfalls`
+  // by name, so without a monster that actually walks, the gate fails rather
+  // than passing vacuously — which is the arrangement §19 step 9 asks for.
+  //
+  // It also makes `check_replay_determinism.cmake` measure something new for
+  // free: this is the first scripted session in which a tick DRAWS from an RNG
+  // stream, so the two recording processes now have to agree about `Stream::
+  // Patrol` as well as about the world.
+  //
+  // IT SOUNDS ONCE, AND THAT IS THE BEHAVIOUR RATHER THAN A THIN SCENARIO.
+  // This session walks a lit party to within two cells of the alcove, so the
+  // monster escalates almost immediately — and a monster at SEARCHING or above
+  // holds position (gloam#32). One step, then it stops patrolling and starts
+  // paying attention to you. Lengthening the route or removing the pause does
+  // not change that; only §6.1's timers running back down to UNAWARE would, and
+  // those are 48 ticks against this session's 10.
+  //
+  // THE PAUSE IS ON WAYPOINT 1, NOT WAYPOINT 0, AND THAT IS NOT COSMETIC. The
+  // pump owes a dwell on ARRIVING at a waypoint, so the dwell of the cell a
+  // monster is spawned standing on is never read — it has not arrived there,
+  // it started there. With the pause on waypoint 0 this session took zero draws
+  // from `Stream::Patrol`, and the claim above about carrying an RNG draw
+  // across a process boundary was quietly false. Measured: the stream's state
+  // was bit-identical before and after the whole session.
+  Monster alcove{};
+  alcove.at = Coord{4, 0};
+  alcove.kind = MonsterKind{Acuity::Keen, false};
+  alcove.patrol.route = {Coord{4, 0}, Coord{4, 1}};
+  alcove.patrol.dwell = {0, 1};
+
   std::vector<Monster> monsters{
       Monster{Coord{7, 1}, MonsterKind{Acuity::Normal, false}, {}},
-      Monster{Coord{4, 0}, MonsterKind{Acuity::Keen, false}, {}},
+      alcove,
   };
 
   auto w = make_world(0xDEADBEEF12345678ULL, std::move(level), std::move(monsters));

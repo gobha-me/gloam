@@ -32,16 +32,19 @@
 ///
 /// WHAT IS NOT MODELLED YET, AND IS NOT PRETENDED TO BE
 ///
-///   * MONSTERS DO NOT MOVE. §6.4's patrol routes do not exist, so `advance`
-///     runs each monster's awareness and leaves it where it stands. This is
-///     what the reference tick did; naming it here stops it reading as a bug.
-///   * NOTHING DRAWS FROM AN RNG STREAM. `Perception::step` is deterministic
-///     given its senses. `rng_state` is carried and hashed anyway, so that the
-///     first subsystem to draw does not also have to change the replay format.
-///   * `creep_tick_cost` IS NOT APPLIED HERE. §6.2 makes creeping cost ticks as
-///     well as halving the noise, but there is no movement-rate model to charge
-///     them against — how often a `Step` may legally appear is the driver's
-///     rule, not `advance`'s. `step_noise` already halves.
+///   * A MONSTER THAT HAS NOTICED YOU DOES NOT COME AFTER YOU. §6.4's patrol
+///     routes are here, and a monster walks one — but three of §6.1's five
+///     tells ("walks to the last known position", "direct pursuit", "walks back
+///     to the patrol route") translate a monster toward a target, and §6 never
+///     says how a monster paths. At SEARCHING and above it holds position.
+///     That is gloam#32, and `test/19patrol/` asserts it, so removing it is a
+///     deliberate red test rather than a silent change.
+///   * `creep_tick_cost` IS NOT APPLIED TO THE PARTY. §6.2 makes creeping cost ticks as
+///     well as halving the noise. Monsters now have a movement-rate model
+///     (`Tuning::monster_move_ticks`, gloam#29) and the party still does not:
+///     how often a `Step` may legally appear is the driver's rule, not
+///     `advance`'s, and there is no driver until gloam#7. `step_noise` already
+///     halves. The two become one decision the day a frame loop exists.
 
 #include <array>
 #include <cstdint>
@@ -76,18 +79,100 @@ class Sink;
 
 namespace gloam {
 
-/// One monster: where it is, what it is, and what it currently believes.
+/// §6.4's patrol route, plus the cursor walking it (gloam#28).
+///
+/// `SCHEMAS.md` §1's record is `patrol { monster_type:u8, route:[]CellIndex,
+/// dwell:[]u8 }`. The first two members below ARE that record minus its
+/// `monster_type`, which is the reason a route lives on a `Monster` rather than
+/// in a shared table: the schema puts the monster inside the patrol, so a
+/// `patrol` record is a spawn and there is no route id to index. The rest is
+/// cursor — state a record does not carry, because a record describes a route
+/// and this describes a monster part-way along one.
+///
+/// COORD, NOT CELLINDEX, and the wire form keeps the index. A `CellIndex` means
+/// nothing without the level width, so storing one here would let a level
+/// resize silently re-point every route in it. `level.gloam`'s loader converts
+/// at load, which is the one place the width is in scope.
+///
+/// TRAVERSAL IS ALWAYS PING-PONG — forward to the end, then back. The tempting
+/// alternative, "it is a cycle iff `back()` is adjacent to `front()`", makes
+/// behaviour turn on an accident of authoring; a route that happens to close
+/// would silently mean something else. A loop is authored by listing the cells
+/// there and back.
+struct Patrol {
+  /// Cell-by-cell, each adjacent to and reachable from the last. Empty means
+  /// this monster does not patrol, which is the ONE representation of standing
+  /// still — `size() == 1` is malformed, not a synonym.
+  std::vector<Coord> route{};
+  /// Parallel to `route`: ticks owed ON ARRIVING at that waypoint, and paid IN
+  /// ADDITION to `Tuning::monster_move_ticks` rather than concurrently with it —
+  /// so a dwell of 1 at a period of 2 means three ticks between steps, not two.
+  ///
+  /// "On arriving" is literal, and has one consequence worth knowing before
+  /// authoring a route: the dwell of the cell a monster is SPAWNED on is never
+  /// paid, because it did not arrive there. A pause authored at `route[waypoint]`
+  /// for a freshly-placed monster is dead until the ping-pong brings it back.
+  std::vector<std::uint8_t> dwell{};
+
+  /// Index into `route`. Out-of-range is survivable, not undefined: the pump
+  /// reads it through a bounds check and a monster with a nonsense cursor
+  /// simply does not move.
+  std::int32_t waypoint{0};
+  /// Which leg of the ping-pong. A `bool` has no invalid value, which is the
+  /// reason it is not a direction enum.
+  bool reversed{false};
+  /// Ticks still owed at the current waypoint, authored plus §6.4's jitter.
+  std::int32_t dwell_left{0};
+  /// Ticks until this monster may step again (`monster_move_ticks`).
+  std::int32_t move_cooldown{0};
+
+  [[nodiscard]] auto operator==(const Patrol&) const -> bool = default;
+};
+
+/// One monster: where it is, what it is, what it currently believes, and where
+/// it is walking.
 ///
 /// `perception.hpp`'s `Perception` is an awareness state with no position and
 /// no kind attached, because it was written to be driven by a caller holding
 /// both. This is that caller, made into a type.
+///
+/// `facing` and `patrol` are APPENDED rather than inserted, so every aggregate
+/// initialiser in the tree that names the first three members still compiles
+/// and value-initialises the rest into "does not patrol, looking north".
 struct Monster {
   Coord at{};
   MonsterKind kind{};
   Perception mind{};
+  /// Which way its head is pointing. Simulation state because §6.1 makes two of
+  /// its five tells a head turn and nothing else — "head turns toward the
+  /// source", "casts about... turning in place" — so a renderer that read this
+  /// off anything but hashed state could not reproduce them from a replay.
+  Dir facing{Dir::North};
+  Patrol patrol{};
 
   [[nodiscard]] auto operator==(const Monster&) const -> bool = default;
 };
+
+/// Every invariant §6.4's route needs and `SCHEMAS.md`'s record cannot express:
+/// empty or at least two cells; `dwell` parallel to `route`; every cell in
+/// bounds and navigable; consecutive cells adjacent AND reachable through a
+/// passable edge; no cell repeated back-to-back.
+///
+/// For `level.gloam`'s loader (§12) and for tests. `advance` DOES NOT CALL IT.
+/// A hot path that re-validates its data every tick pays for a check the load
+/// gate owes, and what makes skipping it safe is that the pump steps only
+/// through `Level::walk` — an invalid route yields a monster that does not
+/// move, never a teleport and never an out-of-bounds read. Same idiom as
+/// `apply` refusing an impassable step and `Level::at` returning the void cell.
+///
+/// WHAT IT DOES NOT CHECK, because it is not told: where the monster is
+/// STANDING. A perfectly valid route paired with a monster placed off it — or
+/// on it but not at `route[waypoint]` — yields a monster that never moves
+/// again, and this function returns true. Rejoining a route is the walk
+/// gloam#32 defers, so until that lands the placement is the author's to get
+/// right; `test/19patrol/` pins the behaviour so it is at least not a surprise.
+[[nodiscard]] auto valid_route(const Level& level, std::span<const Coord> route,
+                               std::span<const std::uint8_t> dwell) -> bool;
 
 /// Every byte of simulation state, and nothing else.
 ///
@@ -136,7 +221,10 @@ auto save_stream(World& w, Stream s, const Rng& generator) -> void;
 /// one, a reordering. Without it, "the golden hash moved because we started
 /// hashing the lamp" and "the golden hash moved because the simulation is
 /// non-deterministic" are the same observation, and they have opposite fixes.
-inline constexpr std::uint8_t kWorldHashVersion = 1;
+///
+/// 1 -> 2: §6.4's patrols. `Monster` gained `facing` and a `Patrol`, so the set
+/// of hashed state grew by seven fields including two variable-length vectors.
+inline constexpr std::uint8_t kWorldHashVersion = 2;
 
 /// Every byte of simulation state, and nothing from the render layer.
 ///
@@ -177,18 +265,31 @@ auto apply(World& w, replay::Event event, std::uint16_t payload, const Tuning& t
 ///   1. `audio::Sink::play` returns void and takes scalars by value, so there is
 ///      no expression in `advance` that can read anything back from a sink.
 ///      §9.2's "Audio -> sim is nothing. Ever." is closed by the type system.
-///   2. `World` gains no field, so `world_hash`'s coverage cannot grow and
-///      `kWorldHashVersion` does not move. Every `replay.gloam` recorded before
-///      §9 existed stays valid — checkable in one `git diff` of `world.cpp`.
+///   2. Nothing a sink is handed is a field a sink can write. §9 added no state
+///      to `World` at all, and §6.4 added `Monster::facing` and `Patrol` — both
+///      written by the pump, which never sees `voices`.
 ///   3. Everything handed to `play` is derived from state that is already final
 ///      for the tick, through const-qualified reads.
-///   4. No `Tuning` field moved, so `ruleset_hash` is unchanged and the §12 load
-///      gate cannot start refusing files it used to accept.
+///   4. THE ONE THAT IS NOT FREE, AND IT ARRIVED WITH §6.4. `advance` now draws
+///      from `Stream::Patrol`, and `rng_state` IS hashed — so the identity holds
+///      only because that draw is taken unconditionally, outside any
+///      `voices != nullptr` test. Gating it on the sink to "save work when
+///      muted" would make a muted world and a voiced world diverge within a few
+///      ticks, and every other fact in this list would still be true.
+///      `test/19patrol/`'s stream-isolation property and `test/16audiosim/`'s
+///      "patrols run identically muted and unmuted" are what hold it.
 ///   5. The only thing a non-null sink changes is work performed — extra
 ///      propagations — never a byte written into `w`.
 ///
 /// `test/16audiosim/` proves it empirically as well, including against a sink
 /// that deliberately allocates and thrashes inside `play`.
+///
+/// What this list deliberately no longer claims: that no replay is invalidated.
+/// That was true of §9 and is NOT true of §6.4 — `kWorldHashVersion` went 1 -> 2
+/// and `kTuningFieldCount` 47 -> 49, so every file recorded before it is refused
+/// at load. The `--mute` identity and replay compatibility are separate
+/// properties, and running them together in one list is how the second gets
+/// asserted by a comment nobody re-derived.
 auto advance(World& w, const Tuning& tuning, audio::Sink* voices = nullptr) -> void;
 
 /// Run a whole input log: every record applied on its own tick, ticks in

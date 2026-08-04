@@ -87,6 +87,30 @@ struct Tuning {
   /// LOST_TRACK -> UNAWARE after this many ticks.
   std::int32_t lost_track_ticks{40};
 
+  // ── §6.4 Patrols ─────────────────────────────────────────────────────────
+  /// Ticks between a patrolling monster's steps.
+  ///
+  /// SPEC §5.2 says "monsters consume N ticks per action" and never names N;
+  /// this is N (gloam#29). Two, because at `replay::kTickHz` = 10 that is 200 ms
+  /// per cell, which is the fastest step the pump can express and therefore
+  /// exactly the fastest legal party walk. A monster that outruns the party is a
+  /// balance decision, and there is no game to balance yet; equal is the reading
+  /// that assumes least.
+  ///
+  /// A value below 1 is clamped to 1 at the point of use rather than here: a
+  /// `Tuning` is data, it arrives from a file, and a constructor that corrects
+  /// it would make `ruleset_hash` disagree with the bytes that produced it.
+  std::int32_t monster_move_ticks{2};
+
+  /// §6.4's "idle variation": extra ticks added to an AUTHORED dwell on arrival,
+  /// drawn from `Stream::Patrol` (gloam#31).
+  ///
+  /// Applied only where `dwell` is already non-zero, so a route with no authored
+  /// pause is a metronome and the author decides where it is not. Zero disables
+  /// the draw entirely, which is the lever every exact-sequence test in
+  /// `test/19patrol/` pulls.
+  std::int32_t patrol_idle_jitter_ticks{2};
+
   // ── §4.4 Lamp fuel, per 100 ticks, indexed by lamp level 0..5 ────────────
   std::int32_t fuel_per_100_ticks[kLampLevelCount]{0, 1, 1, 2, 3, 4};
 
@@ -130,6 +154,8 @@ struct Tuning {
 
     f(suspicious_second_hit_window); f(suspicious_los_ticks);
     f(hunting_lost_ticks);           f(lost_track_ticks);
+
+    f(monster_move_ticks);           f(patrol_idle_jitter_ticks);
 
     for (const auto v : fuel_per_100_ticks) f(v);
     for (const auto v : mana_cost) f(v);
@@ -177,7 +203,7 @@ inline constexpr std::size_t kTuningFieldCount = [] {
   return n;
 }();
 
-static_assert(kTuningFieldCount == 47,
+static_assert(kTuningFieldCount == 49,
               "a tunable was added or removed: update visit_fields and this count together, "
               "then expect every recorded replay to be rejected at load — which is correct");
 

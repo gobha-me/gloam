@@ -109,6 +109,31 @@ struct Coord {
   }
 };
 
+/// The cardinal direction from `from` toward `to`; `fallback` when they are the
+/// same cell.
+///
+/// A head turn, not a step: nothing here consults the level, because §6.1's
+/// "head turns toward the source" is about where a monster is looking and a
+/// monster can look at a wall. `Level::walk` is the predicate for moving.
+///
+/// Ties go to the horizontal. The choice only has to be DETERMINISTIC — the
+/// same argument `perception.cpp`'s raycast makes about its own tie-break — and
+/// a rule stated here is one that cannot drift between callers.
+///
+/// The subtraction is widened deliberately. A route cell is data, and data
+/// reaches this function unvalidated: `to.x - from.x` at `INT32_MIN` is signed
+/// overflow, which is UB that the ubsan leg of the matrix would report as a
+/// crash in whatever called it.
+[[nodiscard]] constexpr auto facing_toward(Coord from, Coord to, Dir fallback) -> Dir {
+  const auto dx = static_cast<std::int64_t>(to.x) - static_cast<std::int64_t>(from.x);
+  const auto dy = static_cast<std::int64_t>(to.y) - static_cast<std::int64_t>(from.y);
+  const auto ax = dx < 0 ? -dx : dx;
+  const auto ay = dy < 0 ? -dy : dy;
+  if (ax == 0 && ay == 0) return fallback;
+  if (ax >= ay) return dx > 0 ? Dir::East : Dir::West;
+  return dy > 0 ? Dir::South : Dir::North;
+}
+
 struct Cell {
   CellKind kind{CellKind::Void};
   Edge edges[kDirCount]{};

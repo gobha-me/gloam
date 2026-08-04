@@ -33,6 +33,7 @@ diagnostic rather than a game. What exists is the deterministic simulation core:
 | `replay.gloam`, the world hash, and the golden-replay harness | §12, §13.2 |
 | The voice ring, the gain/pan mix, and the wall the sim talks through | §9.2, §9.3 |
 | The frame classes, the sustained percentile, and the one write syscall | §11 |
+| Patrol routes, the movement pump, and the monster you can hear | §6.4, §9 |
 
 The **compositor** is still blocked upstream — see [UPSTREAM.md](UPSTREAM.md).
 termforge stretches a placed image to fill its cell rect and states that scaling
@@ -95,9 +96,12 @@ an identity proved over silence is not evidence.
 That property holds by construction rather than by care. `Sink::play` returns
 `void` and takes scalars by value, so there is no expression in `advance` that
 can read anything back; §9.2's *"Audio → sim is nothing. Ever."* is closed by the
-type system. `World` gains no field, so `kWorldHashVersion` does not move and
-**no recorded replay is invalidated** — `ruleset_hash`, the golden world hash and
-`replay.gloam`'s bytes are all unchanged from the commit before.
+type system. `World` gained no field for §9, so `kWorldHashVersion` did not move
+and **no recorded replay was invalidated by the audio slice** — `ruleset_hash`,
+the golden world hash and `replay.gloam`'s bytes were all unchanged from the
+commit before. (§6.4 below *does* move both; the two are separate properties, and
+the `--mute` identity survives it because the patrol RNG draw is taken
+unconditionally rather than behind `voices != nullptr`.)
 
 What is in `gloam::lib` is the SPSC ring, the `VoiceCommand` type and the
 arithmetic that turns §6.2's propagation into a gain and a pan — integers and
@@ -156,13 +160,54 @@ Still `PENDING` and honest about it: every **cold-start** row. All three need th
 transmit path that `kitty.hpp` reserves and does not implement, and behind it
 `pack::Codec::Png`, kitty's `o=z`, or upstream's shared-memory transfer.
 
+**Monsters move.** §6.4's patrol routes are the one thing left on the critical
+path that never needed termforge, and #8's gate is a sentence about a monster
+crossing an intersection — so a monster that could not cross one could not answer
+it. `gloam` now ticks a real world in its trace and shows exactly that: doused,
+the thing walks past the intersection twice and never knows you are there; light
+the lamp and on the next crossing it halts, turns its head toward you, and
+escalates. One `lamp_level`, both behaviours.
+
+The slice's boundary is one sentence — *it moves monsters along authored routes
+and turns their heads; it never translates a monster toward the party* — which
+maps exactly onto "needs no pathfinder". Three of §6.1's five tells are a walk
+toward a target, and §6 never says how a monster paths; that, plus the fact that
+**arrival has no defined outcome** at M0 (no combat, no collision rule, no
+cell-occupancy rule), is [#32](https://github.com/gobha-me/gloam/issues/32). A
+monster that pursues you and then stands *on* you is a more visible dead end than
+one that holds position. The two tells that are only a head turn — §6.1's
+`PatrolRhythmBreaks` and `CastsAbout` — *are* performed, and `Monster::facing` is
+hashed state for that reason: a tell a replay cannot reproduce is not a tell.
+
+§6.4 is **three sentences**, so four things had to be decided rather than read,
+and each is `UPSTREAM.md` items 14–17 with a mirrored issue: the route
+representation and re-join rule ([#28](https://github.com/gobha-me/gloam/issues/28)
+— a full cell-by-cell path, ping-pong, validated by `valid_route` at load and not
+in the tick); §5.2's unnamed movement rate
+([#29](https://github.com/gobha-me/gloam/issues/29) — `monster_move_ticks = 2`,
+the fastest step 10 Hz can express); the monster footfall §6.2 has no row for
+([#30](https://github.com/gobha-me/gloam/issues/30) — diegetic at 14, a leather
+step, and *not* a `Tuning` field, because nothing in the simulation hears it);
+and what "idle variation" means
+([#31](https://github.com/gobha-me/gloam/issues/31) — a bounded extension of an
+*authored* dwell, so a corridor leg takes no draw and a monster with no authored
+pause is a metronome).
+
+This is the first subsystem in the tree to draw from an RNG stream, which §6.4
+requires be `patrol` and "never the shared one" — asserted rather than assumed:
+after 1000 patrolling ticks, only `rng_state[Stream::Patrol - 1]` has moved.
+`kWorldHashVersion` goes 1 → 2 and `kTuningFieldCount` 47 → 49, so every recorded
+replay is invalidated, deliberately. `advance` never calls `valid_route`; what
+makes that safe is that the pump steps only through `Level::walk` **and** requires
+the destination to be the waypoint the route named, so malformed data yields a
+monster that stands still rather than one that drifts or teleports. Fourteen
+refusals in `test/19patrol/` are what turn that from a claim into a guarantee.
+
 Still unstarted: the **RtAudio device** — the stream, the resident PCM and the
 mixer. It is deliberately a separate change, because neither a GitHub runner nor
 this project's dev box has an audio device, so it can be compiled but not
 observed. §11's tick-to-first-sample row stays `PENDING` until it lands, and says
-so rather than reporting a number it cannot measure. Also unstarted: monster
-footfalls, which §9 names first and which need §6.4's patrols to exist — monsters
-do not move yet.
+so rather than reporting a number it cannot measure.
 
 ## Design
 

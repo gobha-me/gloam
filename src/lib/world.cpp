@@ -90,6 +90,154 @@ class Absorb {
   return static_cast<std::size_t>(raw - 1);
 }
 
+/// Saturating countdown. A cooldown that went negative would be a cooldown that
+/// never fires again, which reads as "this monster stopped patrolling" and is
+/// the hardest kind of bug to attribute.
+auto count_down(std::int32_t& ticks) -> void {
+  if (ticks > 0) --ticks;
+}
+
+/// `dwell[i]`, or zero when the vectors are not parallel.
+///
+/// `valid_route` refuses a mismatched pair, and `advance` does not call it —
+/// which makes this the line that keeps the pump total over data the loader let
+/// through. Zero rather than a clamp to the last element: a missing dwell is an
+/// absent pause, not the previous one repeated.
+[[nodiscard]] auto dwell_at(const Patrol& p, std::int32_t index) -> std::int32_t {
+  if (index < 0 || static_cast<std::size_t>(index) >= p.dwell.size()) return 0;
+  return static_cast<std::int32_t>(p.dwell[static_cast<std::size_t>(index)]);
+}
+
+/// §6.4's pump: one tick of patrol for one monster. True if it changed cell.
+///
+/// Reports movement rather than emitting anything, and that is not tidiness.
+/// The draw from `Stream::Patrol` happens in here; if this function could also
+/// emit, the temptation would be to give it the sink, and a draw taken behind
+/// `voices != nullptr` makes `--mute` and `--audio` produce different worlds.
+/// §19 step 9's identity is a property of where the RNG lives.
+[[nodiscard]] auto patrol_step(Monster& m, const Level& level, Tell tell, const Tuning& tuning,
+                               Rng& patrol) -> bool {
+  // §6.1's two tells that are a head turn and nothing else. Both are performed
+  // here rather than by a renderer because `facing` is hashed state — a tell a
+  // replay cannot reproduce is not a tell, it is an animation.
+  //
+  // BEFORE THE TIMERS TICK, and that is what makes the halt cost anything. Run
+  // after them, a halt only withholds a step on the one tick in `period` where
+  // a step was actually due — at the default of 2 that is half of them, so
+  // §6.1's "halt for one tick" would be observable or not depending on the
+  // parity of the tick you were noticed on. Returning here delays the whole
+  // schedule by exactly one tick, every time.
+  switch (tell) {
+    case Tell::PatrolRhythmBreaks:
+      // "patrol rhythm breaks — halt for one tick, head turns toward the
+      // source." ONE TICK, not a freeze: the monster patrols again next tick.
+      // The source is where it believes you were, so a monster that heard you
+      // through a wall turns toward the wall, which is correct and is most of
+      // why the tell reads.
+      if (m.mind.has_last_known) m.facing = facing_toward(m.at, m.mind.last_known, m.facing);
+      return false;
+    case Tell::CastsAbout:
+      // "casts about at the last position, turning in place." Turning in place
+      // is a facing write; "at the last position" is satisfied vacuously today,
+      // because a monster that never pursued you never left where it stood.
+      // That stops being vacuous with gloam#32.
+      m.facing = static_cast<Dir>((static_cast<int>(m.facing) + 1) % kDirCount);
+      return false;
+    default: break;
+  }
+
+  // gloam#32: three of §6.1's five tells translate a monster toward a target,
+  // and §6 never says how a monster paths. Above SUSPICIOUS it holds position —
+  // and its timers stop too, because a monster that has stopped patrolling is
+  // not quietly accruing the right to a step it will take the instant it calms
+  // down.
+  if (m.mind.state != Awareness::Unaware && m.mind.state != Awareness::Suspicious) return false;
+
+  const auto& route = m.patrol.route;
+  if (route.size() < 2) return false;  // empty is "does not patrol"; one cell is malformed
+  const auto count = static_cast<std::int32_t>(route.size());
+
+  // A cursor off the end is survivable, not undefined. It can arrive from a
+  // `level.gloam` that disagrees with itself, and a monster that stands still is
+  // a reportable symptom where an out-of-bounds read is a crash somewhere else.
+  if (m.patrol.waypoint < 0 || m.patrol.waypoint >= count) return false;
+
+  // SEQUENTIALLY, NOT IN PARALLEL, and the difference is the whole meaning of
+  // `dwell`. Ticking both every tick makes the effective pause `max(dwell,
+  // move_cooldown)` rather than `move_cooldown + dwell` — so at the default
+  // period of 2, an authored dwell of 1 or 2 is a complete no-op and an author
+  // gets no pause and no diagnostic. Measured before this line existed: dwell 0,
+  // 1 and 2 all produced 20 moves in 40 ticks, and only dwell 3 moved the
+  // number. `world.hpp` calls dwell "ticks owed on arriving", which is a debt
+  // paid IN ADDITION to the cost of the step, not concurrently with it.
+  if (m.patrol.dwell_left > 0) {
+    --m.patrol.dwell_left;
+  } else {
+    count_down(m.patrol.move_cooldown);
+  }
+  if (m.patrol.move_cooldown > 0 || m.patrol.dwell_left > 0) return false;
+
+  // Ping-pong (gloam#28). `count >= 2` above is what makes both branches land
+  // inside the route.
+  bool reversed = m.patrol.reversed;
+  std::int32_t next = 0;
+  if (reversed) {
+    if (m.patrol.waypoint == 0) {
+      reversed = false;
+      next = 1;
+    } else {
+      next = m.patrol.waypoint - 1;
+    }
+  } else {
+    if (m.patrol.waypoint == count - 1) {
+      reversed = true;
+      next = count - 2;
+    } else {
+      next = m.patrol.waypoint + 1;
+    }
+  }
+
+  // THE ONE MOVEMENT PREDICATE, and then a check that it went where the route
+  // said. `Level::walk` alone would happily step somewhere adjacent when the
+  // route names a cell that is not — a malformed route, or a monster standing
+  // off its own route (gloam#32's gap). Requiring the destination to BE the
+  // waypoint turns both into "does not move" instead of "drifts".
+  const Coord target = route[static_cast<std::size_t>(next)];
+  const Dir dir = facing_toward(m.at, target, m.facing);
+  const auto destination = level.walk(m.at, dir);
+  if (!destination || *destination != target) return false;
+
+  m.at = *destination;
+  m.facing = dir;
+  m.patrol.waypoint = next;
+  m.patrol.reversed = reversed;
+
+  // Below 1 is clamped HERE, not in `Tuning` — tuning.hpp says why: a struct
+  // that corrected itself would make `ruleset_hash` disagree with the bytes
+  // that produced it.
+  //
+  // `period`, NOT `period - 1`, and the difference is a tick. `count_down` runs
+  // at the top of this function, so the cooldown is already one lower by the
+  // time the gate above reads it — charging `period - 1` here bought only
+  // `period - 1` ticks of gap, and at the default of 2 that is a monster
+  // stepping every single tick while the tunable says otherwise. Caught by P3
+  // and by the M0 golden, which is the pair worth having: one states the bound,
+  // the other shows the walk.
+  const auto period = tuning.monster_move_ticks > 1 ? tuning.monster_move_ticks : 1;
+  m.patrol.move_cooldown = period;
+
+  // §6.4's idle variation (gloam#31): only where the author already put a pause,
+  // so a plain corridor leg takes no draw and a route with no pauses is a
+  // metronome. Widened to 64 bits before the add because `dwell` tops out at 255
+  // and the jitter is a tunable that could arrive from a file as INT32_MAX.
+  const auto owed = dwell_at(m.patrol, next);
+  auto total = static_cast<std::int64_t>(owed);
+  if (owed > 0) total += patrol.range(0, tuning.patrol_idle_jitter_ticks);
+  constexpr auto kMaxDwell = static_cast<std::int64_t>(INT32_MAX);
+  m.patrol.dwell_left = static_cast<std::int32_t>(total > kMaxDwell ? kMaxDwell : total);
+  return true;
+}
+
 }  // namespace
 
 auto make_world(std::uint64_t seed, Level level, std::vector<Monster> monsters) -> World {
@@ -107,6 +255,33 @@ auto stream_of(const World& w, Stream s) -> Rng { return Rng{w.rng_state[stream_
 
 auto save_stream(World& w, Stream s, const Rng& generator) -> void {
   w.rng_state[stream_index(s)] = generator.state();
+}
+
+auto valid_route(const Level& level, std::span<const Coord> route,
+                 std::span<const std::uint8_t> dwell) -> bool {
+  // Empty is legal and means "does not patrol". A single cell is NOT a synonym
+  // for that: `world.hpp` makes empty the one representation of standing still,
+  // and a one-cell route is data that meant to say something else.
+  if (route.empty()) return dwell.empty();
+  if (route.size() < 2) return false;
+  if (route.size() != dwell.size()) return false;
+
+  for (std::size_t i = 0; i < route.size(); ++i) {
+    if (!level.navigable(route[i])) return false;  // covers out of bounds: the void is not floor
+    if (i + 1 == route.size()) break;
+    if (route[i] == route[i + 1]) return false;
+
+    // ADJACENT AND REACHABLE, checked with the predicate that will actually be
+    // used to walk it. Testing adjacency alone would accept a route that steps
+    // through a wall, which is exactly the data error a monster cannot report.
+    bool reachable = false;
+    for (int d = 0; d < kDirCount && !reachable; ++d) {
+      const auto next = level.walk(route[i], static_cast<Dir>(d));
+      reachable = next && *next == route[i + 1];
+    }
+    if (!reachable) return false;
+  }
+  return true;
 }
 
 auto world_hash(const World& w) -> hash::Digest {
@@ -159,6 +334,30 @@ auto world_hash(const World& w) -> hash::Digest {
     in.i32(m.mind.last_known.x);
     in.i32(m.mind.last_known.y);
     in.boolean(m.mind.has_last_known);
+
+    // §6.4's route and its cursor. BOTH VECTORS GET THEIR OWN LENGTH PREFIX,
+    // for the reason the cell-contents prefix above states and one more: these
+    // two are adjacent and are supposed to be parallel, so a single shared
+    // count would make route {A} + dwell {B} and route {A,B} + dwell {} feed
+    // the digest the same bytes — and telling those apart is the entire job of
+    // a hash over data a loader might have got wrong.
+    in.enumeration(m.facing);
+    in.u32(static_cast<std::uint32_t>(m.patrol.route.size()));
+    for (const auto c : m.patrol.route) {
+      in.i32(c.x);
+      in.i32(c.y);
+    }
+    in.u32(static_cast<std::uint32_t>(m.patrol.dwell.size()));
+    for (const auto d : m.patrol.dwell) in.u8(d);
+
+    // The CURSOR is hashed, not just the route. A replay resumed at tick N must
+    // resume mid-dwell and mid-cooldown; a monster that reset to the top of its
+    // route on load would diverge from the recording within two ticks while the
+    // route itself compared equal.
+    in.i32(m.patrol.waypoint);
+    in.boolean(m.patrol.reversed);
+    in.i32(m.patrol.dwell_left);
+    in.i32(m.patrol.move_cooldown);
   }
 
   // Every stream EXCEPT Ambience, which rng.hpp calls "non-simulation flavour;
@@ -175,10 +374,14 @@ auto apply(World& w, replay::Event event, std::uint16_t payload, const Tuning& t
   switch (event) {
     case replay::Event::Step: {
       const auto dir = static_cast<Dir>(payload);
-      const auto destination = w.party.step(dir);
-      if (!w.level.edge(w.party, dir).passable()) return;
-      if (!w.level.navigable(destination)) return;
-      w.party = destination;
+      // ONE MOVEMENT PREDICATE, and `Level::walk` is it. This used to open-code
+      // the passable-edge and navigable-destination pair, which was correct and
+      // was also the second copy of a rule §6.4's patrols need a third of. A
+      // party that can step somewhere a monster cannot is a bug nobody would
+      // think to test for, because both halves look right in isolation.
+      const auto destination = w.level.walk(w.party, dir);
+      if (!destination) return;
+      w.party = *destination;
       // Two inputs can share a tick (§3), and two footfalls 100 ms apart are
       // one sound event rather than a louder one. MAX, not sum: summing would
       // let an input stream manufacture arbitrary loudness out of nothing,
@@ -243,6 +446,31 @@ auto advance(World& w, const Tuning& tuning, audio::Sink* voices) -> void {
   NoiseField sting_field{};
   bool sting_field_built = false;
 
+  // A SECOND lazy field, and it cannot be the one above. Same shape, same
+  // reasoning, different seed — and the difference is load-bearing rather than
+  // tidy. `gain_from_loudness` clamps to unity when the arriving loudness meets
+  // the emission, so reading the 90-seeded sting field for a 14-emission
+  // footfall would report every monster in the level walking at full volume.
+  // `audio::kMonsterFootfallEmission` carries the arithmetic and the escape.
+  //
+  // Built lazily for the sting field's reason and one more: most ticks move no
+  // monster at all, because `monster_move_ticks` is 2 and dwells are longer.
+  NoiseField step_field{};
+  bool step_field_built = false;
+
+  // §6.4: "drawn from the `patrol` RNG stream, never the shared one."
+  //
+  // ONE generator for the whole roster, drawn in roster order, saved once below
+  // UNCONDITIONALLY — saving after a tick with no draws writes the same value
+  // back, and one code path is worth more than the store it saves. Built here
+  // rather than per monster because a generator per monster would advance eight
+  // independent copies of the same state and make the draw order unobservable.
+  //
+  // Note what this is NOT gated on: `voices`. `test/19patrol/` asserts that
+  // after 1000 ticks only this stream has moved, and §19 step 9's `--mute`
+  // identity depends on the draw being taken either way.
+  Rng patrol = stream_of(w, Stream::Patrol);
+
   for (auto& m : w.monsters) {
     Senses senses{};
     senses.heard =
@@ -255,6 +483,25 @@ auto advance(World& w, const Tuning& tuning, audio::Sink* voices) -> void {
     // The tell used to be discarded here. §6.1 calls it "the deliverable, not
     // the state machine", and this is the line that finally makes that true.
     const Tell tell = step(m.mind, senses, m.kind, tuning);
+
+    // §6.4's pump. AFTER `step`, so this tick's tell and this tick's awareness
+    // both drive it — a monster that just became SUSPICIOUS halts on the tick it
+    // noticed you, not on the one after.
+    const bool moved = patrol_step(m, w.level, tell, tuning, patrol);
+
+    // §9's first-named sound, emitted from the cell the monster ARRIVED at.
+    // Before the sting below, so that a tick carrying both puts them in the
+    // order they happened: this monster took a step, and then something about
+    // it changed. Roster order across monsters, step-then-sting within one.
+    if (voices != nullptr && moved) {
+      if (!step_field_built) {
+        step_field = propagate_noise(w.level, w.party, audio::kMonsterFootfallEmission, tuning);
+        step_field_built = true;
+      }
+      const auto mix = audio::mix_reciprocal(step_field, w.level, w.party, w.facing, m.at,
+                                             audio::kMonsterFootfallEmission);
+      voices->play(audio::SoundId::MonsterFootfall, mix.gain, mix.pan);
+    }
 
     // §6.1: "gait changes, direct pursuit, ONE AUDIO STING."
     //
@@ -278,6 +525,8 @@ auto advance(World& w, const Tuning& tuning, audio::Sink* voices) -> void {
       voices->play(audio::SoundId::HuntingSting, mix.gain, mix.pan);
     }
   }
+
+  save_stream(w, Stream::Patrol, patrol);
 
   w.pending_noise = 0;
   ++w.tick;

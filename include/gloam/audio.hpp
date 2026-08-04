@@ -82,27 +82,35 @@ namespace gloam::audio {
 /// and for a weaker but real version of the same reason: a `SoundId` recorded in
 /// a bug report or a mix log should not change meaning under someone's feet.
 ///
-/// TWO ENTRIES, AND STOPPING THERE IS THE POINT. These are the only two things
-/// `world.cpp` can produce today. `apply()` writes `pending_noise` from
-/// `Event::Step` and from nothing else, and `step()` returns a `Tell` that
-/// `advance()` is the only caller of. §6.2's other emitter rows — door, melee,
-/// fall, cast — have no emitter in the simulation: there is no door event in
-/// `replay::Event`, combat is M2, and §8's casting waits on the M0 gate. Adding
-/// their ids now would put values in every `switch` that no test can drive.
-/// They arrive with their emitters.
+/// THREE ENTRIES, AND STOPPING THERE IS STILL THE POINT. These are the only
+/// three things `world.cpp` can produce. `apply()` writes `pending_noise` from
+/// `Event::Step` and from nothing else; `step()` returns a `Tell` that
+/// `advance()` is the only caller of; and §6.4's pump is the only thing that
+/// relocates a monster.
+///
+/// `MonsterFootfall` is what "they arrive with their emitters" looks like in
+/// practice. It was absent while monsters could not move and arrived in the
+/// same commit that moved them — §9 names it FIRST among the things the player
+/// must hear, and until §6.4's patrols existed there was nothing to sound.
+///
+/// §6.2's remaining emitter rows — door, melee, fall, cast — still have no
+/// emitter: there is no door event in `replay::Event`, combat is M2, and §8's
+/// casting waits on the M0 gate. Adding their ids now would put values in every
+/// `switch` that no test can drive.
 ///
 /// Note what is ALSO absent: a per-armour footfall. Armour audibility is already
 /// carried by `step_noise` -> `propagate_noise` -> gain, and a second sample per
 /// armour would be a second place armour weight is expressed. §9.3's whole
 /// argument is that there is exactly one.
 enum class SoundId : std::uint8_t {
-  None = 0,           ///< a default-constructed Command is inert
-  PartyFootfall = 1,  ///< §6.2's step emitter, read at the party's own cell
-  HuntingSting = 2,   ///< §6.1 SEARCHING -> HUNTING, and ONLY that transition
+  None = 0,             ///< a default-constructed Command is inert
+  PartyFootfall = 1,    ///< §6.2's step emitter, read at the party's own cell
+  HuntingSting = 2,     ///< §6.1 SEARCHING -> HUNTING, and ONLY that transition
+  MonsterFootfall = 3,  ///< §6.4's pump moved a monster one cell
 };
 
 /// How many ids exist. A mixer sizes its arena by this.
-inline constexpr std::size_t kSoundIdCount = 3;
+inline constexpr std::size_t kSoundIdCount = 4;
 
 // ── Gain and pan ────────────────────────────────────────────────────────────
 
@@ -141,6 +149,36 @@ inline constexpr Pan kPanFull = 256;
 /// requires clear line of sight and range within sight distance before this can
 /// fire, so an audible sting is guaranteed wherever it is legal to emit one.
 inline constexpr std::int32_t kStingEmission = 90;
+
+/// A monster's footfall, in §6.2's units.
+///
+/// NOT a `Tuning` field, for `kStingEmission`'s reason exactly: nothing in the
+/// simulation hears a monster — `audio.hpp`'s preamble states that monsters do
+/// not listen to each other — so this cannot move `world_hash`, so it must not
+/// be able to reject a replay through `ruleset_hash`.
+///
+/// §6.2's emitter table is PARTY-SIDE ONLY and has no monster row at all; this
+/// is gloam#30. Sits at `noise_step_leather` (14): the thing in the corridor is
+/// about as loud as you are. At `atten_open_cell` it dies at seven open cells,
+/// just past §3's four-cell sight distance — so hearing one you cannot see is
+/// the COMMON case rather than the rare one, which is the §9 sentence this
+/// constant exists to serve.
+///
+/// ONE TRAP, AND IT IS NOT HYPOTHETICAL. `mix_reciprocal`'s sizing rule below
+/// says to build the field with the SAME emission. For this sound that rule is
+/// stricter than "the same or louder": `gain_from_loudness` clamps to unity
+/// when `heard >= emission`, so reading a field seeded at `kStingEmission` (90)
+/// for a 14-emission source reports every footfall in the level at FULL VOLUME,
+/// out to roughly 38 cells. `advance` therefore builds a second lazy field
+/// seeded at exactly this value. A test that only asks whether a footfall was
+/// emitted passes either way; `test/16audiosim/` asks what its gain was.
+///
+/// The escape, named so it is a decision and not an oversight: a two-emission
+/// overload could read one field at an exact offset, since `propagate_noise`
+/// yields `max(0, E - mincost)` and a larger seed only ever adds paths already
+/// inaudible at the smaller one. Not taken — it needs its own failure matrix,
+/// and the tick budget does not need it.
+inline constexpr std::int32_t kMonsterFootfallEmission = 14;
 
 /// What a listener hears: how loud, and from which side.
 struct Mix {

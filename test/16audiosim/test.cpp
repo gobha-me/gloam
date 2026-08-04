@@ -275,6 +275,183 @@ TEST_CASE("the sting's gain is exactly what the propagation says it is", "[audio
   }
 }
 
+TEST_CASE("a monster that moves sounds once; one that does not is silent",
+          "[audio][footfall]") {
+  // §9 names monster footfalls FIRST among the things the player must hear, and
+  // until §6.4's patrols existed there was nothing to sound.
+  const auto t = kDefaultTuning;
+
+  Level level{9, 3};
+  level.carve(Coord{0, 1}, Dir::East, 9);
+
+  Monster walker{};
+  walker.at = Coord{5, 1};
+  walker.kind = MonsterKind{Acuity::Dull, false};
+  walker.patrol.route = {Coord{5, 1}, Coord{6, 1}, Coord{7, 1}};
+  walker.patrol.dwell = {0, 0, 0};
+
+  Monster sitter{};
+  sitter.at = Coord{3, 1};
+  sitter.kind = MonsterKind{Acuity::Dull, false};  // no route at all
+
+  auto w = make_world(0xF007ULL, std::move(level), {walker, sitter});
+  w.party = Coord{1, 1};
+  w.lamp_level = 0;
+
+  Log log;
+  for (int i = 0; i < 6; ++i) advance(w, t, &log);
+
+  // The walker covered the route; the sitter never sounded. If footfalls were
+  // keyed on anything but "this monster changed cell" — a tick counter, an
+  // awareness state, the mere presence of a route — the sitter would show up.
+  CHECK(log.count(audio::SoundId::MonsterFootfall) == 3);
+  CHECK(w.monsters[1].at == Coord{3, 1});
+}
+
+TEST_CASE("the monster footfall's gain is exactly what the propagation says it is",
+          "[audio][footfall]") {
+  // THE CASE THAT CATCHES REUSING THE STING FIELD, and nothing else does.
+  //
+  // `advance` builds a SECOND lazy field per tick, seeded at
+  // `kMonsterFootfallEmission` (14) rather than `kStingEmission` (90). Reading
+  // the 90-seeded field here would still emit exactly one footfall, still count
+  // as one voice, and still be louder than silence — every count-based
+  // assertion in this file survives the mistake. What it would NOT survive is
+  // the number: `gain_from_loudness` clamps to unity once the arriving loudness
+  // meets the emission, so a 90-seeded read reports FULL VOLUME for a monster
+  // seven cells away that should be most of the way to inaudible.
+  //
+  // As with the sting, the expected value is computed by `mix_for`, which
+  // propagates from the MONSTER and reads at the PARTY — the opposite ends from
+  // what `advance` does — so this pins reciprocity as well as magnitude.
+  const auto t = kDefaultTuning;
+
+  constexpr std::int32_t kSeparation = 6;
+  const Coord party{1, 1};
+  const Coord from{party.x + kSeparation, 1};
+  const Coord to{from.x - 1, 1};  // it steps TOWARD the party
+
+  Level level{16, 3};
+  level.carve(Coord{0, 1}, Dir::East, 16);
+
+  Monster walker{};
+  walker.at = from;
+  walker.kind = MonsterKind{Acuity::Dull, false};
+  walker.patrol.route = {from, to};
+  walker.patrol.dwell = {0, 0};
+  walker.patrol.reversed = false;
+
+  auto w = make_world(0xB007ULL, std::move(level), {walker});
+  w.party = party;
+  w.facing = Dir::East;
+  w.lamp_level = 0;
+
+  Log log;
+  advance(w, t, &log);
+
+  REQUIRE(w.monsters[0].at == to);
+  REQUIRE(log.count(audio::SoundId::MonsterFootfall) == 1);
+
+  // Read at the cell it ARRIVED at, which is where the foot landed.
+  const auto expected =
+      audio::mix_for(w.level, party, Dir::East, to, audio::kMonsterFootfallEmission, t);
+  REQUIRE(expected.gain > audio::kGainSilent);   // not vacuous...
+  REQUIRE(expected.gain < audio::kGainUnity);    // ...and not clamped, which is the whole point
+
+  for (const auto& e : log.entries) {
+    if (e.sound != audio::SoundId::MonsterFootfall) continue;
+    CHECK(e.gain == expected.gain);
+    CHECK(e.pan == expected.pan);
+  }
+}
+
+TEST_CASE("the party sounds first, then monsters in roster order", "[audio][order]") {
+  // Emission order within a tick is a RULE, not an accident, and a mixer that
+  // ever needs to resolve two voices deterministically will depend on it.
+  //
+  // WHAT THIS CASE CANNOT REACH, stated so the gap is on the record rather than
+  // discovered: `advance` also orders a monster's own footfall BEFORE its own
+  // sting, and no world can currently exercise that. `Tell::GaitChanges` only
+  // arrives from SEARCHING, and a monster at SEARCHING holds position
+  // (gloam#32) — so within one tick a monster either steps or stings, never
+  // both. When #32 lands, that pairing becomes constructible and belongs here.
+  const auto t = kDefaultTuning;
+
+  Level level{14, 3};
+  level.carve(Coord{0, 1}, Dir::East, 14);
+
+  Monster near{};
+  near.at = Coord{5, 1};
+  near.kind = MonsterKind{Acuity::Dull, false};
+  near.patrol.route = {Coord{5, 1}, Coord{6, 1}};
+  near.patrol.dwell = {0, 0};
+
+  Monster far{};
+  far.at = Coord{10, 1};
+  far.kind = MonsterKind{Acuity::Dull, false};
+  far.patrol.route = {Coord{10, 1}, Coord{11, 1}};
+  far.patrol.dwell = {0, 0};
+
+  auto w = make_world(0x0DDULL, std::move(level), {near, far});
+  w.party = Coord{1, 1};
+  w.facing = Dir::East;
+  w.lamp_level = 0;
+  w.armour = Armour::Plate;
+
+  Log log;
+  apply(w, replay::Event::Step, static_cast<std::uint16_t>(Dir::East), t);
+  advance(w, t, &log);
+
+  REQUIRE(log.entries.size() == 3);
+  CHECK(log.entries[0].sound == audio::SoundId::PartyFootfall);
+  CHECK(log.entries[1].sound == audio::SoundId::MonsterFootfall);
+  CHECK(log.entries[2].sound == audio::SoundId::MonsterFootfall);
+
+  // Roster order, and it is the GAINS that prove it rather than the ids: the
+  // near monster is five cells closer, so a reversed roster would swap two
+  // otherwise identical-looking entries.
+  CHECK(log.entries[1].gain > log.entries[2].gain);
+}
+
+TEST_CASE("patrols run identically muted and unmuted", "[audio][determinism]") {
+  // §19 step 9's criterion, now that something in the tick draws from an RNG.
+  // The draw in `patrol_step` is deliberately NOT behind `voices != nullptr`;
+  // if it ever moves there, the two worlds below diverge within a few ticks and
+  // this is what says so.
+  const auto t = kDefaultTuning;
+
+  auto build = [] {
+    Level level{9, 5};
+    level.carve(Coord{1, 2}, Dir::East, 5);
+    level.carve(Coord{3, 2}, Dir::North, 3);
+    level.carve(Coord{3, 2}, Dir::South, 3);
+
+    Monster m{};
+    m.at = Coord{3, 0};
+    m.kind = MonsterKind{Acuity::Normal, false};
+    m.patrol.route = {Coord{3, 0}, Coord{3, 1}, Coord{3, 2}, Coord{3, 3}, Coord{3, 4}};
+    m.patrol.dwell = {2, 0, 1, 0, 2};  // authored pauses, so §6.4's jitter draws
+
+    auto w = make_world(0x9A7401ULL, std::move(level), {m});
+    w.party = Coord{1, 2};
+    w.armour = Armour::Plate;
+    return w;
+  };
+
+  auto muted = build();
+  auto voiced = build();
+
+  Log log;
+  for (int i = 0; i < 200; ++i) {
+    advance(muted, t, nullptr);
+    advance(voiced, t, &log);
+  }
+
+  REQUIRE(log.count(audio::SoundId::MonsterFootfall) > 0);  // not proved over silence
+  CHECK(world_hash(muted) == world_hash(voiced));
+  CHECK(muted.rng_state == voiced.rng_state);
+}
+
 TEST_CASE("LOST_TRACK -> HUNTING is SILENT, and that silence is the tell",
           "[audio][sting]") {
   // GLOAM ISSUE #12's DECISION, MADE AUDIBLE.

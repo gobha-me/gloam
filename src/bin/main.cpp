@@ -222,6 +222,80 @@ void trace_corridor() {
   }
 }
 
+/// SPEC 6, first sentence, as a trace: "you glimpse a monster crossing a distant
+/// intersection, left to right, and you do not know whether it registered you."
+///
+/// This is the one block in the binary that ticks a real World rather than
+/// calling the model's pieces by hand. Everything above reads a static
+/// arrangement; 6.4's pump is the first thing in the tree with a schedule, and a
+/// schedule has to be watched to be judged.
+///
+/// It is also the closest the project gets to answering gloam#8 without a
+/// renderer. The gate asks whether the crossing produces tension, and that
+/// question needs pixels - but "is the monster where the model says, when the
+/// model says, and does it know about me" is answerable here and is the half
+/// that has to be right before the pixels can help.
+void trace_patrol() {
+  const Tuning& t = kDefaultTuning;
+
+  // The monster walks the side passage: (3,0) south to (3,4) and back, crossing
+  // the intersection at (3,2). The party stands west along row 2 and watches.
+  Monster m{};
+  m.at = Coord{3, 0};
+  m.kind = MonsterKind{Acuity::Normal, /*sees_unlit=*/false};
+  m.patrol.route = {Coord{3, 0}, Coord{3, 1}, Coord{3, 2}, Coord{3, 3}, Coord{3, 4}};
+  m.patrol.dwell = {1, 0, 0, 0, 1};  // a pause at each end, so 6.4's jitter draws
+
+  auto world = make_world(0x6104A3ULL, build_corridor(), {m});
+  world.party = Coord{1, 2};
+  world.facing = Dir::East;
+  world.lamp_level = kLampLevelMin;  // doused: you are watching from the dark
+
+  // The lamp comes up here, and that is the whole point of the trace. Doused,
+  // the monster patrols past you unaware; lit, it registers you. One integer,
+  // both behaviours - which is SPEC 6.3's pillar and 4.4's plate selector being
+  // the same number.
+  constexpr std::uint32_t kLampUpAtTick = 14;
+  constexpr int kTicks = 22;
+
+  std::printf("\nM0 corridor - the patrol, ticked (SPEC 6.4)\n");
+  std::printf("  party at (%d,%d) facing east; monster patrols (3,0)..(3,4) through\n",
+              world.party.x, world.party.y);
+  std::printf("  the intersection at (3,2), one step every %d ticks. You start doused,\n",
+              t.monster_move_ticks);
+  std::printf("  and light the lamp at tick %u.\n\n", kLampUpAtTick);
+
+  std::printf("  %-5s %-8s %-7s %-12s %-5s %s\n", "tick", "monster", "facing", "awareness",
+              "lamp", "sees you");
+
+  static const char* kFacings[] = {"north", "east", "south", "west"};
+  static const char* kStates[] = {"unaware", "suspicious", "searching", "hunting", "lost-track"};
+
+  for (int tick = 0; tick < kTicks; ++tick) {
+    if (world.tick == kLampUpAtTick) {
+      apply(world, replay::Event::Lamp, 3, t);
+    }
+    advance(world, t);
+    const auto& mon = world.monsters[0];
+
+    // Read the same way the simulation does, so this table cannot disagree with
+    // the tick that produced it.
+    const bool los = line_of_sight(world.level, mon.at, world.party);
+    const bool seen = party_visible(world.lamp_level, mon.kind.sees_unlit, los,
+                                    range_between(mon.at, world.party),
+                                    t.sight_distance(mon.kind.acuity));
+
+    std::printf("  %-5u (%d,%d)    %-7s %-12s %-5d %s%s\n", world.tick, mon.at.x, mon.at.y,
+                kFacings[static_cast<int>(mon.facing)],
+                kStates[static_cast<int>(mon.mind.state)], world.lamp_level,
+                seen ? "yes" : "no", mon.at == Coord{3, 2} ? "   <- crossing" : "");
+  }
+
+  std::printf("\n  Doused, it walks past and never knows. Lit, it stops - and then it\n"
+              "  stands there, because every SPEC 6.1 tell that would bring it TOWARD\n"
+              "  you needs a pathfinder SPEC 6 never specifies (gloam#32).\n");
+}
+
 }  // namespace
 
 auto main(int argc, char** argv) -> int {
@@ -259,7 +333,10 @@ auto main(int argc, char** argv) -> int {
   // are "printed every run", and a flag that silences an instrument makes the
   // instrument optional.
   const bool instrumented = print_instruments();
-  if (!quiet) trace_corridor();
+  if (!quiet) {
+    trace_corridor();
+    trace_patrol();
+  }
 
   // Non-zero when the instruments could not be printed at all. Step 4's contract
   // is that they are printed every run; a script that reads $? and sees success
