@@ -43,6 +43,8 @@
 add_library(${PROJECT_NAME}_lib STATIC
   assets.cpp
   audio.cpp
+  base64.cpp
+  deflate.cpp
   gloam.cpp
   kitty.cpp
   level.cpp
@@ -50,6 +52,7 @@ add_library(${PROJECT_NAME}_lib STATIC
   meter.cpp
   noise.cpp
   pack.cpp
+  png.cpp
   path.cpp
   perception.cpp
   plate.cpp

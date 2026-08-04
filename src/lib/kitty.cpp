@@ -8,12 +8,16 @@
 
 #include "gloam/kitty.hpp"
 
+#include <algorithm>
 #include <array>
 #include <charconv>
+#include <cstddef>
 #include <cstdint>
+#include <span>
 #include <string_view>
 #include <system_error>
 
+#include "gloam/base64.hpp"
 #include "gloam/emit.hpp"
 #include "gloam/layer.hpp"
 
@@ -168,6 +172,68 @@ auto emit_delete_placement(emit::ByteSink& sink, std::uint32_t image_id,
   append_key(sink, ",p=", placement_id);
   sink.write(",q=2");
   sink.write(kApcEnd);
+
+  return EmitResult{EmitError::None, sink.size() - before};
+}
+
+auto emit_transmit(emit::ByteSink& sink, std::span<const std::byte> payload,
+                   std::uint32_t image_id) -> EmitResult {
+  if (image_id == 0) return EmitResult{EmitError::ZeroImageId, 0};
+  // Refused rather than emitted as a zero-length transfer. Kitty answers that
+  // with an error, and every command in this file carries q=2, so the reply is
+  // suppressed — this is the only place an empty upload can be noticed at all.
+  if (payload.empty()) return EmitResult{EmitError::EmptyPayload, 0};
+
+  const auto before = sink.size();
+
+  // One chunk's worth of base64, on the stack. The whole point of the caller-
+  // owned-span discipline is that this module allocates nothing; 4 KB is the
+  // largest buffer the protocol can use, so it is also the largest this needs.
+  std::array<char, kTransmitChunkBase64Bytes> encoded{};
+  static_assert(kTransmitChunkBase64Bytes == base64::encoded_size(kTransmitChunkPayloadBytes),
+                "the chunk constants must stay a matched pair, or a full chunk overruns");
+
+  std::size_t offset = 0;
+  bool first = true;
+
+  while (offset < payload.size()) {
+    const auto take = std::min(kTransmitChunkPayloadBytes, payload.size() - offset);
+    const auto chunk = payload.subspan(offset, take);
+
+    // No refusal is checked here and none is possible: `take` is capped at the
+    // raw chunk size, and the static_assert above ties the buffer to exactly the
+    // encoding of that. Making the impossibility a compile-time fact rather than
+    // a runtime branch is what keeps this function free of a path no test can
+    // reach — change either constant and the build stops, not the terminal.
+    const auto coded = base64::encode(chunk, std::span<char>{encoded});
+
+    offset += take;
+    const bool last = offset >= payload.size();
+
+    sink.write(kApcStart);
+    if (first) {
+      // a=t: transmit only. The display is a separate placement command, because
+      // §4.6's diff places and un-places plates that were uploaded once.
+      sink.write("a=t");
+      append_key(sink, ",i=", image_id);
+      // f=100: the payload is PNG. Kitty reads the geometry from the datastream
+      // for this format, so no s=/v= is sent — png::encode declared it in IHDR.
+      // t=d: direct, the payload is in the escape sequence.
+      sink.write(",f=100,t=d");
+      if (!last) sink.write(",m=1");
+    } else {
+      // Continuation chunks carry only the m key: kitty associates them with the
+      // transfer already in progress, and repeating i= would start a new one.
+      sink.write(last ? "m=0" : "m=1");
+    }
+    sink.write(",q=2");
+
+    sink.write(';');
+    sink.write(std::string_view{encoded.data(), coded.bytes});
+    sink.write(kApcEnd);
+
+    first = false;
+  }
 
   return EmitResult{EmitError::None, sink.size() - before};
 }

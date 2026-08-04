@@ -43,6 +43,14 @@ issue so the call gets made rather than absorbed.
    five of which are deliberately excluded from the `gloam/gloam.hpp` umbrella —
    that header says so, and says why.
 
+   The upload path is the same argument at larger scale: `png.hpp`,
+   `deflate.hpp`, `base64.hpp` and `palette.hpp` turn a plate into the bytes of a
+   cold start, and every one of them takes a caller-owned span and reports the
+   size it needs. **None of them allocates, and none of them owns a plate** —
+   `deflate::Scratch` is a quarter of a megabyte of match tables and it belongs
+   to whoever calls the compressor, which is `src/bin/`. A compressor with a
+   `static` table would be the same violation wearing a different hat.
+
    **That write now exists, and it is `src/bin/tty_writer.cpp`.** It is the only
    file in the tree that calls `write(2)`, and it is what makes `BUDGETS.md`'s
    "the counters measure what actually left the process" true rather than

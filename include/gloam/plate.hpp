@@ -10,10 +10,19 @@
 ///
 /// Stealing a palette entry for transparency would cost 25% of a palette that IS
 /// the entire art direction. The stencil costs 50% more bytes on a payload
-/// already an eighth the size of RGBA, and is exactly what a PNG alpha or `tRNS`
-/// channel would carry — so `pack::Codec::Png` stays a re-container rather than a
-/// re-pack. Both planes are row-major with byte-aligned rows and MSB-first bit
-/// order, which is PNG's order, for the same reason.
+/// already an eighth the size of RGBA. Both planes are row-major with byte-
+/// aligned rows and MSB-first bit order, which is PNG's order.
+///
+/// THIS NOTE USED TO CLAIM MORE THAN THAT, and the transmit path proved it wrong:
+/// it said the stencil "is exactly what a PNG alpha or `tRNS` channel would
+/// carry — so `pack::Codec::Png` stays a re-container rather than a re-pack".
+/// `tRNS` is per-PALETTE-ENTRY, not per-pixel, so five states cannot be carried
+/// by four entries plus an alpha channel: `png.hpp` merges the two planes into
+/// one 4-bit index over a five-entry palette. It is a re-pack. What survives is
+/// the half that was load-bearing — the bit ORDER is PNG's, so the merge never
+/// has to reverse anything — and the decision above is unaffected, because the
+/// entry a transparent pixel occupies is invented at transmit and never costs
+/// the palette an ink.
 ///
 ///
 /// NOTHING HERE OWNS A PLATE
@@ -74,8 +83,9 @@ inline constexpr int kInkCount = 4;
 // ── The bit order, stated once ──────────────────────────────────────────────
 //
 // MSB-first is a FORMAT COMMITMENT, not an implementation detail: it is PNG's
-// order, which is what keeps `pack::Codec::Png` a re-container rather than a
-// re-pack. So the shift lives here, in the header, rather than in whichever
+// order, which is what keeps `png.hpp`'s merge of the two planes a repacking of
+// bits that are already in the right sequence rather than a reversal of every
+// byte on the upload path. So the shift lives here, in the header, rather than in whichever
 // .cpp happened to need it first — `lightfield.cpp` packs stencil bytes
 // directly for speed and must not re-derive the convention, or flipping it
 // would silently desynchronise the writer from every reader.
