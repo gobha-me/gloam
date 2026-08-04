@@ -240,17 +240,22 @@ auto put_distance(BitWriter& w, std::size_t distance) -> void {
   // 0 means "no position recorded"; positions are stored one-based so that the
   // table needs no separate emptiness flag and no fill with a sentinel.
   //
-  // BOTH tables are cleared, and the second one is not obviously necessary —
-  // every chain starts from a `head` written during this call. It is necessary
-  // anyway: a chain's FIRST link is read out of `prev`, so a stale link from a
-  // previous call is reachable, and a compressor whose output depends on what it
-  // compressed an hour ago is not the deterministic function §10's build gate
-  // needs it to be. Two hundred and fifty-six kilobytes of memset, six times per
-  // process.
+  // ONLY `head` IS CLEARED, and the asymmetry is the interesting part. An
+  // earlier version cleared `prev` too and claimed it had to — "a chain's FIRST
+  // link is read out of `prev`, so a stale link from a previous call is
+  // reachable". That is false, and mutation testing is what established it: with
+  // `prev` deliberately poisoned from outside and its fill removed, the output
+  // is byte-identical, because every chain starts at a `head` entry written
+  // during THIS call and the insertion below always writes `prev` before it
+  // writes `head`. No stale link is reachable.
+  //
+  // So the determinism §10's build gate rests on is `head.fill(0)` alone — and
+  // that one IS load-bearing: remove it and `24deflate-test` and `25png-test`
+  // both go red. A second memset that changes nothing is worse than no memset,
+  // because it makes the real guarantee look like it lives somewhere it does not.
   auto& head = scratch.head;
   auto& prev = scratch.prev;
   head.fill(0);
-  prev.fill(0);
 
   BitWriter w{out};
   w.bits(1, 1);  // BFINAL

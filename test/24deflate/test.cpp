@@ -231,21 +231,77 @@ TEST_CASE("a run longer than the maximum match length is encoded in pieces",
 
 TEST_CASE("a match at the window edge is found, and one past it is not",
           "[deflate]") {
-  // The distance limit is 32,768. A back-reference one byte further is illegal,
-  // so an encoder that computed the distance off by one would emit a stream an
-  // inflater rejects — or worse, one that another inflater accepts differently.
+  // The distance limit is 32,768. A back-reference one byte further is ILLEGAL —
+  // its extra bits overflow the 13-bit field — so an encoder that computed the
+  // distance off by one emits a stream that decodes to the wrong bytes.
+  //
+  // THIS CASE USED TO ASSERT NEITHER HALF OF ITS OWN NAME, and mutation testing
+  // is what caught it: halving the window, raising it by one and raising it by
+  // 4,096 all left the suite green, and two of those three make the encoder emit
+  // an illegal stream. The reason was structural — the filler was `noise`, so the
+  // whole input was incompressible and went to a STORED block, where the
+  // matcher's distance limit is never on the emitted path at all.
+  //
+  // The filler is therefore compressible now, and the sizes are compared rather
+  // than merely round-tripped: at the edge the marker is found and costs a
+  // back-reference; one past it, the marker has to be spelled out again.
   const std::string_view marker = "GLOAM-MARKER-32768";
 
-  for (const std::size_t gap : {kWindowBytes - marker.size() - 1, kWindowBytes + 4'096}) {
-    CAPTURE(gap);
+  const auto encode_with_gap = [&](std::size_t gap) {
     std::vector<std::byte> input;
     for (const char c : marker) input.push_back(static_cast<std::byte>(c));
-    const auto filler = noise(gap, 3);
-    input.insert(input.end(), filler.begin(), filler.end());
+    for (std::size_t i = 0; i < gap; ++i) {
+      input.push_back(static_cast<std::byte>(i % 64 == 0 ? 0x22 : 0x00));
+    }
     for (const char c : marker) input.push_back(static_cast<std::byte>(c));
+    return round_trip(input);  // round_trip REQUIREs the bytes back, illegal or not
+  };
 
-    round_trip(input);  // correctness holds either way; only the size differs
+  const auto at_edge = encode_with_gap(kWindowBytes - marker.size() - 1);
+  const auto past_edge = encode_with_gap(kWindowBytes + 4'096);
+
+  INFO("at the window edge " << at_edge << " B, past it " << past_edge << " B");
+  CHECK(at_edge < past_edge);
+}
+
+TEST_CASE("a compressible payload containing every byte value round-trips",
+          "[deflate]") {
+  // RFC 1951's fixed literal table is two ranges: symbols 0-143 are 8 bits and
+  // 144-255 are NINE. The second branch had no coverage at all until this case,
+  // and mutation testing is how that was found — widening the branch by one
+  // symbol left every one of the 37 tests green while producing a stream no
+  // inflater accepts.
+  //
+  // Nothing else here can reach it. Every other fixed-Huffman case in this file
+  // draws from a handful of low bytes, and the one input that does use high
+  // bytes — `noise` — is incompressible, so it goes to a stored block where
+  // `put_symbol` is never called at all.
+  std::vector<std::byte> input;
+  for (int rep = 0; rep < 8; ++rep) {
+    for (int v = 0; v < 256; ++v) input.push_back(static_cast<std::byte>(v));
   }
+
+  const auto size = round_trip(input);
+  INFO("2,048 B of every byte value compressed to " << size << " B");
+  // It really did take the fixed-Huffman path: a stored fallback could not be
+  // smaller than the input.
+  CHECK(size < input.size());
+}
+
+TEST_CASE("the matcher's constants are pinned by an encoded size, not a ratio",
+          "[deflate]") {
+  // The two determinism cases above compare the encoder against ITSELF, so a
+  // constant that shifts every output equally is invisible to them, and the
+  // ratio bands elsewhere in this file (`< size/20`, `< size/100`) are orders of
+  // magnitude too loose to notice. Mutation testing found exactly that hole:
+  // `kMinMatch` 3 -> 4 changes the wire bytes and left the whole suite green.
+  //
+  // A pinned size closes it. The encoder is deterministic across compilers —
+  // `test/25png/`'s digest asserts the same thing about a whole file — so this
+  // is a byte-level pin that costs one line and goes red the day a matcher
+  // constant moves.
+  CHECK(compress_ok(periodic(50'000, 5)).size == 351);
+  CHECK(compress_ok(bytes_of("gloam gloam gloam gloam gloam gloam")).size == 16);
 }
 
 TEST_CASE("periodic data — what a light field actually is — compresses hard",

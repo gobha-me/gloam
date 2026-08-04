@@ -287,6 +287,24 @@ TEST_CASE("PLTE is the five entries palette.hpp names, and tRNS is one byte",
     CHECK(static_cast<std::uint8_t>(chunks[1].data[static_cast<std::size_t>(i) * 3 + 2]) == rgb.b);
   }
 
+  // The loop above is pinned against the same function the encoder reads, so it
+  // catches a wrong ENTRY. Pinned as literals here as well, because the two are
+  // different claims and the second one is what a look decision would break.
+  const std::array<std::uint8_t, 15> expected{0, 0, 0, 0, 0, 0, 85, 85, 85, 170, 170, 170, 255, 255, 255};
+  for (std::size_t i = 0; i < expected.size(); ++i) {
+    CAPTURE(i);
+    CHECK(static_cast<std::uint8_t>(chunks[1].data[i]) == expected[i]);
+  }
+
+  // AND A GAP, STATED RATHER THAN PAPERED OVER. Neither check above can see the
+  // red and blue channels transposed in `png.cpp`'s packing loop — mutation
+  // testing confirmed a swap leaves this whole suite green — because §10's ramp
+  // is grey and a grey triple is symmetric. Nothing in the tree can distinguish
+  // channel order while that is true. The first non-grey palette entry is what
+  // makes it testable, and gloam#37 (which owns the palette values) carries the
+  // note; whoever lands it must add an asymmetric entry to this case in the same
+  // commit, or the ordering ships unverified.
+
   // tRNS is a PREFIX of the palette, not a sparse map — which is the entire
   // reason palette.hpp puts the transparent entry first.
   REQUIRE(chunks[2].data.size() == 1);
