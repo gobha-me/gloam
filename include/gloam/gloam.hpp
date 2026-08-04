@@ -71,7 +71,7 @@
 /// `src/bin/main.cpp` — is the wrong default. Include them by name when you want
 /// them.
 ///
-/// `sha256.hpp` is the twelfth, and it is a special case in both directions. It
+/// `sha256.hpp` is the sixteenth, and it is a special case in both directions. It
 /// is not `#include`d below — so it is genuinely off the list above — but it
 /// reaches every consumer anyway, transitively through `replay.hpp` and
 /// `world.hpp`, because both name `hash::Digest` in their own interfaces.

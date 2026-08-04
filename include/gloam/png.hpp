@@ -13,8 +13,10 @@
 ///
 /// `pack::Codec::Png` exists as a versioned door and `validate_record` still
 /// refuses it. That is deliberate and this header is where the reason belongs:
-/// the pack is a PIXEL SOURCE and its hash is a build gate (§10, "two pipeline
-/// runs must produce byte-identical packs"). Baking PNG into it would put the
+/// the pack is a PIXEL SOURCE and its hash is a build gate — §10 requires "the
+/// pipeline run twice on the same input" to "produce byte-identical plates", and
+/// BUILD-ORDER step 5 makes byte-identical PACKS the acceptance criterion.
+/// Baking PNG into the pack would put the
 /// compressor, the palette and the filter choice inside `pack_sha256`, so
 /// improving the encoder or touching one grey value would invalidate every
 /// baked pack and re-open a build gate that has nothing to do with either.

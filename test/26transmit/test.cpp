@@ -1,11 +1,18 @@
 // SPEC §4.1, §11 — the cold-start upload, on the wire.
 //
-// This suite exists because of an asymmetry: every plate GLOAM ships today
-// compresses to well under one 3,072-byte chunk, so the CHUNKING PATH HAS NO
-// PRODUCTION COVERAGE AT ALL and will not acquire any until the first authored
-// wall plate crosses the boundary. A bug there ships silently and surfaces as a
-// corrupt image months later, in a plate nobody touched. So the boundaries are
-// tested synthetically, here, before any real payload exists.
+// This suite was written on the assumption that the chunking path had no
+// production coverage — that every plate GLOAM ships compresses to well under
+// one 3,072-byte chunk. THAT WAS FALSE, and measuring it rather than asserting
+// it is what caught it: lamp levels 1 and 2 encode to 3,212 B and 3,490 B and
+// transmit as TWO chunks each. Four of the six fit in one. The multi-chunk path
+// runs on every cold start today.
+//
+// Which makes the synthetic boundaries below more important rather than less.
+// The production coverage is real but ACCIDENTAL — it depends on how well two
+// particular procedural plates happen to compress, and a better matcher would
+// remove it without anybody noticing. So the boundaries are pinned here at
+// 3,071 / 3,072 / 3,073 / 6,144 / 6,145, and the last case in this file pins
+// the fact that at least one real plate still crosses one.
 //
 // The specific failure this file is built around: chunking the BASE64 OUTPUT at
 // 4,096 instead of the RAW INPUT at 3,072 emits `=` padding into the middle of
@@ -27,8 +34,12 @@
 #include <vector>
 
 #include "gloam/base64.hpp"
+#include "gloam/deflate.hpp"
 #include "gloam/emit.hpp"
 #include "gloam/kitty.hpp"
+#include "gloam/lightfield.hpp"
+#include "gloam/plate.hpp"
+#include "gloam/png.hpp"
 
 using gloam::emit::ByteSink;
 using gloam::kitty::EmitError;
@@ -283,4 +294,54 @@ TEST_CASE("the three chunked wire forms are byte-for-byte what they were",
   const auto middle = chunks_of(transmitted(ramp(kTransmitChunkPayloadBytes * 2 + 1), 1));
   REQUIRE(middle.size() == 3);
   CHECK(control_of(middle[1]) == "m=1,q=2");
+}
+
+TEST_CASE("the real plate set exercises the chunked path, and this says which",
+          "[transmit]") {
+  // The correction this file's header records. The synthetic cases above were
+  // written believing no shipped plate chunks; two of the six do. Pinned here so
+  // that the claim is a measurement rather than an assumption — and so that a
+  // change to the compressor which moved every plate under the boundary would
+  // announce itself as a red test rather than as silently lost coverage.
+  std::vector<std::byte> blob(
+      gloam::plate::blob_bytes(gloam::lightfield::kWidthPx, gloam::lightfield::kHeightPx));
+  std::vector<std::byte> scanlines(
+      gloam::png::scratch_bytes(gloam::lightfield::kWidthPx, gloam::lightfield::kHeightPx));
+  std::vector<std::byte> encoded(
+      gloam::png::bound(gloam::lightfield::kWidthPx, gloam::lightfield::kHeightPx));
+  gloam::deflate::Scratch matcher;
+
+  int chunked_plates = 0;
+  for (int level = 0; level < gloam::lightfield::kFieldCount; ++level) {
+    CAPTURE(level);
+    REQUIRE(gloam::lightfield::bake(level, blob));
+    const auto image = gloam::png::encode(
+        gloam::plate::PlateView{blob, gloam::lightfield::kWidthPx, gloam::lightfield::kHeightPx},
+        scanlines, matcher, encoded);
+    REQUIRE(image.error == gloam::png::PngError::None);
+
+    ByteSink sink;
+    REQUIRE(emit_transmit(sink, std::span{encoded}.first(image.bytes),
+                          static_cast<std::uint32_t>(level) + 1)
+                .error == EmitError::None);
+
+    const auto chunks = chunks_of(sink.view());
+    const auto expected = (image.bytes + kTransmitChunkPayloadBytes - 1) / kTransmitChunkPayloadBytes;
+    INFO("lamp " << level << ": " << image.bytes << " B of PNG in " << chunks.size() << " chunk(s)");
+    CHECK(chunks.size() == expected);
+    if (chunks.size() > 1) ++chunked_plates;
+
+    // And every one of them round-trips, chunk boundaries included.
+    std::vector<char> whole(gloam::base64::encoded_size(image.bytes));
+    const auto r = gloam::base64::encode(std::span{encoded}.first(image.bytes),
+                                         std::span<char>{whole});
+    REQUIRE(r.error == gloam::base64::Base64Error::None);
+    std::string joined;
+    for (const auto& c : chunks) joined += payload_of(c);
+    CHECK(joined == std::string(whole.data(), r.bytes));
+  }
+
+  INFO("light fields whose transmission is chunked: " << chunked_plates << " of "
+                                                      << gloam::lightfield::kFieldCount);
+  CHECK(chunked_plates >= 1);
 }

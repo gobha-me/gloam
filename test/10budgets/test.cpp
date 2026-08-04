@@ -151,9 +151,9 @@ TEST_CASE("§11 timing budgets are declared", "[budget]") {
   CHECK(budget::kMaxAudioLatencyMs == 20);
   CHECK(budget::kMaxColdStartPayloadBytes == 1'200'000);
 
-  // PENDING M0: cold start needs the UPLOAD path — see the pack case below,
-  //             which measures what exists (§19 step 5) and says plainly why
-  //             that is not this row.
+  // The cold-start rows are no longer PENDING: the transmit path landed, and
+  // all three are measured below — the payload row on the real stream, the two
+  // timing rows on a real encode and a real write(2).
   // PENDING M0: compose+diff+emit needs the compositor (§19 step 6).
   // PENDING M2: the END-TO-END audio row needs a DEVICE. §19 step 9 landed the
   //             ring, not the RtAudio stream, and "tick -> first sample" cannot
@@ -296,8 +296,11 @@ TEST_CASE("§11's cold-start payload row, measured on the real stream", "[budget
   INFO("pack " << assets::image_bytes() << " B, PNG " << png_bytes << " B, base64 "
                << base64_bytes << " B, whole stream " << stream_bytes << " B, budget "
                << budget::kMaxColdStartPayloadBytes << " B");
+  // Tenths, not integer percent: the true figure is 1.4%, and a percentage
+  // truncated to 1% reads LOWER than the claim the prose makes from it.
   WARN("cold-start payload: " << stream_bytes << " B on the wire ("
-                              << stream_bytes * 100 / budget::kMaxColdStartPayloadBytes
+                              << stream_bytes * 1000 / budget::kMaxColdStartPayloadBytes / 10 << "."
+                              << stream_bytes * 1000 / budget::kMaxColdStartPayloadBytes % 10
                               << "% of §11's budget), from " << png_bytes << " B of PNG");
 
   CHECK(assets::image_bytes() <= budget::kMaxColdStartPayloadBytes);

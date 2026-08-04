@@ -196,7 +196,7 @@ auto print_instruments() -> bool {
             num(budget::kMaxColdStartLocalMs) + " ms (measured here)\n";
   report +=
       "                f=100 indexed PNG, GLOAM's own DEFLATE. The f=32 route\n"
-      "                this replaces was 4.6x OVER the payload row  (gloam#17)\n";
+      "                this replaces cost 4.6x the payload row      (gloam#17)\n";
 
   report +=
       "  measured      0 emit bytes this run. There is no compositor (gloam#7),\n"

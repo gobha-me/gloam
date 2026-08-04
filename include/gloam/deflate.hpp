@@ -3,7 +3,7 @@
 /// SPEC §4.1, §11 — a zlib stream, because §11's cold-start budget needs one.
 ///
 /// This is the whole reason the cold-start payload row is met rather than
-/// recorded as blown. The arithmetic that put it 4.6x over (gloam#17) was
+/// recorded as blown. The arithmetic that put it at 4.6x the budget (gloam#17) was
 /// `f=32` RGBA: 480x360x4 bytes per plate, times six light fields, times base64's
 /// four-thirds. §10's plate is 3 bits per pixel in the pack and PNG can carry it
 /// at 4 — but even 4 bits per pixel is 520,560 B of scanline for the six fields,
@@ -26,10 +26,18 @@
 ///     encoder and a tree builder, which is where cross-compiler determinism
 ///     bugs live, and it is worth a fraction of a budget already met with an
 ///     order of magnitude to spare.
-///   * Greedy matching, never lazy or optimal. Measured at a few percent on
-///     screen-door data.
-///   * No decompressor. Nothing in GLOAM reads PNG. `test/24deflate/` carries an
-///     inflater for round-trip verification and it stays in the test tree.
+///   * Greedy matching, never lazy or optimal. This note used to say "measured
+///     at a few percent", which was not measured and was optimistic. What IS
+///     measured, on lamp level 3's filtered scanline: this encoder produces a
+///     2,220 B IDAT where a real zlib at the SAME block type (level 9,
+///     `Z_FIXED`) produces 1,832 — so the greedy path costs about 21%. That
+///     figure is lazy matching and a deeper chain together and cannot be split
+///     without implementing one of them. It is 0.03% of a budget already met
+///     with two orders of magnitude to spare, which is the actual argument.
+///   * No decompressor. Nothing in GLOAM reads PNG.
+///     `test/include/gloam_test/inflate.hpp` carries one for round-trip
+///     verification, shared by `test/24deflate/` and `test/25png/`, and it stays
+///     in the test tree.
 ///
 /// Every one of those is a size/complexity trade taken in the direction of
 /// "verifiable", because the thing being protected is a build gate, not a

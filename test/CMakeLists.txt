@@ -244,7 +244,8 @@ endif ()
 # Remove that cap and this suite does not fail, it stops finishing: an uncapped
 # chain over 300,000 identical bytes is quadratic. A hung runner reports nothing,
 # so the timeout turns the one failure mode the cap prevents into an ordinary
-# test failure. Everything here finishes in about a fifth of a second.
+# test failure. Everything here finishes in about a tenth of a second (measured:
+# 98-107 ms over four runs, GCC 14 Debug).
 if (TEST 24deflate-test)
   set_tests_properties(24deflate-test PROPERTIES TIMEOUT 120)
 endif ()

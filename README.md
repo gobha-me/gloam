@@ -67,9 +67,9 @@ rings, because no art and no authoring format exist yet. #1 stays open for them.
 It also put a number on something uncomfortable: §11's 1.2 MB cold-start budget
 is for the **base64 transmit payload**, and a plate expands to RGBA before it
 goes on the wire. The six light fields are 388,800 B in the pack and would have
-been roughly 5.5 MB transmitted — 4.6× over, from the six procedural plates
-alone. That was [#17](https://github.com/gobha-me/gloam/issues/17), and the
-transmit path below is what closed it.
+been roughly 5.5 MB transmitted — **4.6× the budget**, from the six procedural
+plates alone. That was [#17](https://github.com/gobha-me/gloam/issues/17), and the
+transmit path below is what closes it.
 
 The **replay harness** ([#3](https://github.com/gobha-me/gloam/issues/3)) has
 landed, and with it build-order step 7's acceptance criterion: *a recorded
@@ -160,7 +160,7 @@ saves 20 of a placement's 66 bytes and puts the row back inside budget with room
 `test/10budgets/` asserts the overrun **inverted**, the way #17's cold-start row
 is asserted, so it goes red the day someone fixes it.
 
-The **transmit path** is the other half of #6, and it closed
+The **transmit path** is the other half of #6, and it is what closes
 [#17](https://github.com/gobha-me/gloam/issues/17). §4.1 puts every plate on the
 wire once, at startup, and §11 budgets 1.2 MB of base64 for it. The naive route
 does not fit and never could: kitty is handed pixels, so a 480 × 360 plate goes
@@ -181,9 +181,12 @@ GLOAM's own DEFLATE. Measured on the real stream, not projected from constants:
 
 A factor of 320, and the row now carries a **headroom band** at eight to one —
 because six plates are 6 of M0's 71, and a row that only just fits today is a row
-that has already failed. The other two cold-start rows are measured too: 78 ms
-local against 800, and 216 ms modelled over a 1 Mbit/s link against 12 s, both
-labelled in the case banner as GLOAM's half only.
+that has already failed. The other two cold-start rows are measured too:
+**78–109 ms** local against 800 (eight runs, GCC 14 Debug on the dev box; median
+82), and **216–247 ms** modelled against 12 s — that second figure is the local
+encode *plus* 138 ms of wire time at 1 Mbit/s, not wire time alone. Both are
+labelled in the case banner as GLOAM's half only: the terminal's own decode is
+upstream's problem and unmeasurable from here.
 
 The compressor is GLOAM's rather than a linked zlib for the reason `test/25png/`
 pins a `sha256` over an encoded light field: that digest is worth something only
@@ -196,10 +199,16 @@ timeout the way `15voicering-test` does.
 Two things kept it from being self-confirming. The inflater that verifies the
 round trip lives in `test/include/`, was written from RFC 1951 rather than from
 the encoder, and is itself **anchored on three streams a real zlib produced**. And
-the chunking path — which no plate GLOAM ships today exercises, since every one
-fits in a single 3,072-byte chunk — is tested synthetically at the boundaries,
-because chunking the base64 *output* instead of the raw *input* emits `=` padding
-mid-stream, which kitty decodes to garbage rather than refusing.
+the chunking path is tested synthetically at the boundaries, because chunking the
+base64 *output* instead of the raw *input* emits `=` padding mid-stream, which
+kitty decodes to garbage rather than refusing.
+
+That second suite was written believing no shipped plate chunks. **It was wrong,
+and re-measuring the claim is what caught it**: lamp levels 1 and 2 encode to
+3,212 B and 3,490 B and go out as two chunks each, so the multi-chunk path runs
+on every cold start today. It is real coverage but *accidental* — it turns on how
+well two procedural plates happen to compress — so both the synthetic boundaries
+and the fact that a real plate still crosses one are now pinned.
 
 The pack stays `RawPlanes`: `pack::Codec::Png` is still refused
 ([#16](https://github.com/gobha-me/gloam/issues/16)), because a PNG inside the
