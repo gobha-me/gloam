@@ -16,11 +16,11 @@
 ///
 /// WHAT THIS UMBRELLA DELIBERATELY LEAVES OUT
 ///
-/// Twelve headers ship in `include/gloam/` and are NOT included below. Eleven of
-/// them are listed here; `sha256.hpp` is the twelfth and has its own paragraph
-/// at the end, because it is the one that arrives anyway. That is a decision,
-/// not an oversight, and it is written down here so the next person does not
-/// helpfully "fix" it:
+/// Sixteen headers ship in `include/gloam/` and are NOT included below. Fifteen
+/// of them are listed here; `sha256.hpp` is the sixteenth and has its own
+/// paragraph at the end, because it is the one that arrives anyway. That is a
+/// decision, not an oversight, and it is written down here so the next person
+/// does not helpfully "fix" it:
 ///
 ///   budgets.hpp    §11's numbers, as constants and assertions
 ///   layer.hpp      §4.5's compositing bands and the z-index policy over them
@@ -33,9 +33,14 @@
 ///   lightfield.hpp §4.4's six full-frame screen-door fields
 ///   pack.hpp       §12's `pack.manifest`, and the bytes it describes
 ///   assets.hpp     the pack's content manifest — what actually goes in it
+///   palette.hpp    §10's four colours as concrete RGBA, outside `pack_sha256`
+///   png.hpp        §10's plate as an `f=100` payload — the cold-start form
+///   deflate.hpp    a zlib stream, because §11's payload budget needs one
+///   base64.hpp     the encoding §4.1's one upload per plate pays for
 ///
-/// The first five are render-side; `audio.hpp` is §9; the last five are the
-/// offline asset pipeline (§10). All eleven are inside `gloam::lib` because they
+/// The first five are render-side; `audio.hpp` is §9; the last nine are the
+/// offline asset pipeline and the upload path it feeds (§10, §4.1). All fifteen
+/// are inside `gloam::lib` because they
 /// are pure — integers and bytes, no clock, no file descriptor, no global,
 /// nothing beyond the standard library — and because tests link only
 /// `${PROJECT_NAME}::lib`. PRODUCING bytes is not the same as needing a
@@ -51,11 +56,14 @@
 /// unit that merely ticks a world to compile a `std::atomic` ring it will never
 /// touch. Include it by name when you want it.
 ///
-/// The pipeline five earn their place the same way and one way more: none of
+/// The pipeline nine earn their place the same way and one way more: none of
 /// them OWNS a plate. Every entry point takes a caller-owned span and says how
-/// large to make it, so the "image ownership" objection `kitty.hpp` raises
-/// against a transmit path does not apply — the buffers live in
-/// `src/bin/bake.cpp`, which holds the pipeline's only file descriptor.
+/// large to make it, so the "image ownership" objection `kitty.hpp` raised
+/// against a transmit path never applied — the buffers live in
+/// `src/bin/bake.cpp`, which holds the pipeline's only file descriptor, and in
+/// `src/bin/main.cpp`, which owns the one `deflate::Scratch` a cold start needs.
+/// That objection is now retired rather than pending: the transmit path landed
+/// and the ownership it was worried about did not arrive with it.
 ///
 /// But none of them is the simulation, and this header is the simulation's
 /// public surface. Pulling an escape-sequence emitter or a dither matrix into

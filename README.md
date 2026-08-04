@@ -35,6 +35,7 @@ diagnostic rather than a game. What exists is the deterministic simulation core:
 | The frame classes, the sustained percentile, and the one write syscall | §11 |
 | Patrol routes, the movement pump, and the monster you can hear | §6.4, §9 |
 | The pathfinder, the pursuit, and the walk home | §6.1, §5.2 |
+| The transmit path: indexed PNG, DEFLATE, and the cold-start upload | §4.1, §10, §11 |
 
 The **compositor** is still blocked upstream — see [UPSTREAM.md](UPSTREAM.md).
 termforge stretches a placed image to fill its cell rect and states that scaling
@@ -64,9 +65,11 @@ What that slice does **not** include is the authored depth-0 and depth-1 wall
 rings, because no art and no authoring format exist yet. #1 stays open for them.
 
 It also put a number on something uncomfortable: §11's 1.2 MB cold-start budget
-is for the **base64 transmit payload**, and a 2-bit plate expands to RGBA before
-it goes on the wire. The six light fields are 388,800 B in the pack and roughly
-5.5 MB transmitted — see [#17](https://github.com/gobha-me/gloam/issues/17).
+is for the **base64 transmit payload**, and a plate expands to RGBA before it
+goes on the wire. The six light fields are 388,800 B in the pack and would have
+been roughly 5.5 MB transmitted — 4.6× over, from the six procedural plates
+alone. That was [#17](https://github.com/gobha-me/gloam/issues/17), and the
+transmit path below is what closed it.
 
 The **replay harness** ([#3](https://github.com/gobha-me/gloam/issues/3)) has
 landed, and with it build-order step 7's acceptance criterion: *a recorded
@@ -157,9 +160,51 @@ saves 20 of a placement's 66 bytes and puts the row back inside budget with room
 `test/10budgets/` asserts the overrun **inverted**, the way #17's cold-start row
 is asserted, so it goes red the day someone fixes it.
 
-Still `PENDING` and honest about it: every **cold-start** row. All three need the
-transmit path that `kitty.hpp` reserves and does not implement, and behind it
-`pack::Codec::Png`, kitty's `o=z`, or upstream's shared-memory transfer.
+The **transmit path** is the other half of #6, and it closed
+[#17](https://github.com/gobha-me/gloam/issues/17). §4.1 puts every plate on the
+wire once, at startup, and §11 budgets 1.2 MB of base64 for it. The naive route
+does not fit and never could: kitty is handed pixels, so a 480 × 360 plate goes
+out as 691,200 B of RGBA, and the six procedural light fields alone are 5.5 MB
+encoded — which is why that row spent four slices asserted **inverted**, true in
+the direction it was broken, so that fixing it would go red.
+
+What ships instead is `f=100` — §10's plate as a **4-bit indexed PNG**, five
+palette entries (four inks plus transparent), `tRNS` one byte long, compressed by
+GLOAM's own DEFLATE. Measured on the real stream, not projected from constants:
+
+| | Bytes | Against |
+| --- | --- | --- |
+| Six light fields, in the pack | 388,800 | — |
+| Encoded as PNG | 12,808 | — |
+| The whole APC stream, control data included | **17,284** | 1,200,000 |
+| The `f=32` route it replaces | 5,529,600 | 461% of budget |
+
+A factor of 320, and the row now carries a **headroom band** at eight to one —
+because six plates are 6 of M0's 71, and a row that only just fits today is a row
+that has already failed. The other two cold-start rows are measured too: 78 ms
+local against 800, and 216 ms modelled over a 1 Mbit/s link against 12 s, both
+labelled in the case banner as GLOAM's half only.
+
+The compressor is GLOAM's rather than a linked zlib for the reason `test/25png/`
+pins a `sha256` over an encoded light field: that digest is worth something only
+if the encoder is the one in this tree. It is fixed-Huffman and greedy, with a
+**hash chain capped by a named constant** — a light field's scanline is 86,760
+bytes of near-uniform screen door whose three-byte prefixes nearly all collide,
+and an uncapped chain there is quadratic, so `24deflate-test` carries a ctest
+timeout the way `15voicering-test` does.
+
+Two things kept it from being self-confirming. The inflater that verifies the
+round trip lives in `test/include/`, was written from RFC 1951 rather than from
+the encoder, and is itself **anchored on three streams a real zlib produced**. And
+the chunking path — which no plate GLOAM ships today exercises, since every one
+fits in a single 3,072-byte chunk — is tested synthetically at the boundaries,
+because chunking the base64 *output* instead of the raw *input* emits `=` padding
+mid-stream, which kitty decodes to garbage rather than refusing.
+
+The pack stays `RawPlanes`: `pack::Codec::Png` is still refused
+([#16](https://github.com/gobha-me/gloam/issues/16)), because a PNG inside the
+pack would put the compressor, the palette and the filter choice inside
+`pack_sha256` — a build gate that has nothing to do with any of them.
 
 **Monsters move.** §6.4's patrol routes are the one thing left on the critical
 path that never needed termforge, and #8's gate is a sentence about a monster
@@ -328,7 +373,7 @@ Three commitments shape almost every file:
 
 ```
 design/           the specification the code cites — a snapshot; see design/README.md
-include/gloam/    the deterministic core's public headers, plus ten off-umbrella
+include/gloam/    the deterministic core's public headers, plus sixteen off-umbrella
 src/lib/          its implementation — standard library only, no I/O, no clock
 src/bin/          the diagnostic binary, gloam_bake and gloam_replay; termforge
                   lands here too
@@ -338,23 +383,29 @@ cmake/            the template's build machinery, plus check_layer_z.cmake (§4.
                   check_replay_determinism.cmake (§12) and check_audio_mute.cmake (§9)
 ```
 
-Ten headers in `include/gloam/` are not simulation and are deliberately left out
-of the `gloam/gloam.hpp` umbrella: four render-side (`budgets.hpp`, `layer.hpp`,
-`emit.hpp`, `kitty.hpp`), `audio.hpp` for §9, and five for the offline pipeline
-(`dither.hpp`, `plate.hpp`, `lightfield.hpp`, `pack.hpp`, `assets.hpp`). They live inside the
+Sixteen headers in `include/gloam/` are not simulation and are deliberately left
+out of the `gloam/gloam.hpp` umbrella: five render-side (`budgets.hpp`,
+`layer.hpp`, `emit.hpp`, `meter.hpp`, `kitty.hpp`), `audio.hpp` for §9, and nine
+for the offline pipeline and the upload path it feeds (`dither.hpp`,
+`plate.hpp`, `lightfield.hpp`, `pack.hpp`, `assets.hpp`, `palette.hpp`,
+`png.hpp`, `deflate.hpp`, `base64.hpp`). They live inside the
 standard-library-only boundary anyway, because **producing** bytes is not the
 same as needing a terminal; the `write` that puts them on one is in `src/bin/`,
-and so is the only `open` in the pipeline. None of the pipeline five owns a
-plate — they take caller-owned spans and report the size they need, which is what
-kept image ownership out of the library when the pack format arrived.
-`gloam.hpp` says all of this at the top, so the exclusion does not read as an
-oversight.
+and so is the only `open` in the pipeline. None of the nine owns a plate — they
+take caller-owned spans and report the size they need, which is what kept image
+ownership out of the library when the pack format arrived and, four slices
+later, when the transmit path did too. `gloam.hpp` says all of this at the top,
+so the exclusion does not read as an oversight.
 
-`sha256.hpp` is a tenth, and a special case: still not included by `gloam.hpp`,
-but reaching every consumer anyway through `replay.hpp` and `world.hpp`, which
-both name `hash::Digest`. Its old reason — "pipeline-side, not simulation" —
-stopped being true when `world_hash` arrived, since a digest over simulation
-state is exactly what §13.2's golden replay is defined in terms of.
+(This paragraph used to say "ten", list four render-side headers, and omit
+`meter.hpp` entirely. The count had been wrong since the frame classes landed;
+the transmit path is what made it wrong enough to notice.)
+
+`sha256.hpp` is the sixteenth, and a special case: still not included by
+`gloam.hpp`, but reaching every consumer anyway through `replay.hpp` and
+`world.hpp`, which both name `hash::Digest`. Its old reason — "pipeline-side, not
+simulation" — stopped being true when `world_hash` arrived, since a digest over
+simulation state is exactly what §13.2's golden replay is defined in terms of.
 
 `gloam::lib` links nothing beyond the standard library, and that is a hard
 architectural boundary rather than a coincidence: a simulation that can reach a

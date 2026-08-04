@@ -281,6 +281,38 @@ Two more, which are design questions rather than factual errors:
    green test measuring the wrong quantity is what `budgets.hpp`'s opening
    paragraph exists to prevent.
 
+   **Decided and implemented in G-6b, and the row is met.** The escape taken was
+   `f=100`, and the measurement is over the real stream rather than projected
+   from constants: the six light fields encode to **12,808 B of PNG and 17,284 B
+   of APC stream, 1.4% of the 1.2 MB budget**, against 5,529,600 B for `f=32`.
+   The inverted assertion has been flipped into the real row and carries an
+   eight-to-one headroom band, because six plates are 6 of M0's 71.
+
+   Three things worth carrying upstream from how it came out:
+
+   - **`o=z` was not used.** It compresses an `f=24`/`f=32` payload, and
+     compressing an already-compressed PNG buys nothing. The two escapes were
+     never additive.
+   - **The PNG is encoded at transmit, not baked into the pack** — see item 19
+     and gloam#16. Termforge's verbatim `EncodedImage` path (#163) is the right
+     shape *and* the pack should stay a pixel source; a consumer wanting a
+     pre-encoded plate is not the same as a consumer wanting a pre-encoded
+     *artifact*.
+   - **GL-A3 / #111 survives as a LATENCY argument rather than a size one.** At
+     17 KB the payload no longer needs shared memory to fit; what shared memory
+     would still buy is the base64 tax and the escape-sequence round trip on a
+     cold start. That is a materially different ask and should be re-stated as
+     one before it is pushed.
+
+   **One caveat is open and cannot be closed from here**, tracked as
+   [#38](https://github.com/gobha-me/gloam/issues/38): nothing in CI can confirm
+   that a real terminal accepts a colour-type-3 (paletted) `f=100` payload.
+   If one refuses, the fallback costs **ratio, not mechanism** — the
+   same DEFLATE, the same chunker, the same escape, with only `png.cpp`'s IHDR
+   and scanline packer changing to 8-bit greyscale plus `tRNS`. On two-tone
+   screen-door data even three bytes per pixel compresses hard enough to stay
+   inside the budget.
+
 9. **§9.3 does not say how loud a sting is, or whether it is diegetic at all.**
    Mirrored as [#22](https://github.com/gobha-me/gloam/issues/22). §9.3 derives
    gain from `propagate_noise`, which needs an emission magnitude; §6.2's table
@@ -700,6 +732,45 @@ Two more, which are design questions rather than factual errors:
     The row now asserts a RATIO (`distinct > shared × 2`) so it survives the
     sanitizer legs and goes red on every box if someone reintroduces a field per
     monster.
+
+19. **§10 fixes the palette's COUNT and never its VALUES, and the transmit path
+    is the first thing in the tree that needs them.** Mirrored as
+    [#37](https://github.com/gobha-me/gloam/issues/37). §10 says "four colours
+    plus transparent, 1-bit dithered"; nothing anywhere says which four.
+    `plate.hpp` declined to name them on purpose — "the concrete RGBA the
+    uploader expands these into is a look decision that belongs with the transmit
+    path, and putting it here would make a palette tweak change `pack_sha256`" —
+    which was right, and left the values undefined until something had to put
+    pixels on a wire.
+
+    Settled in `include/gloam/palette.hpp` as a **mechanical four-step greyscale
+    ramp**, `ink * 255 / 3` — 0, 85, 170, 255 — *derived rather than chosen*. No
+    art exists yet (gloam#1's authored rings are still open), and a hand-picked
+    ramp landing now would be indistinguishable a year from now from a considered
+    one. A rule stated in one line is a thing the first real look decision can be
+    a deliberate diff against.
+
+    **Transparency is palette entry ZERO, not an ink**, and that half is a
+    decision rather than a default. A plate is five states and PNG has no 3-bit
+    depth, so the encoded form is 4 bits per pixel over a five-entry palette: the
+    wire format needs an entry the ART does not have. Putting it first keeps the
+    four inks in ink order and keeps `tRNS` — a *prefix* of the palette, per the
+    PNG specification, not a sparse map — one byte long.
+
+    The placement is the point. `pack_sha256` does not cover this file and must
+    not: a look tweak has to be able to land without re-baking a pack or
+    invalidating a replay. What it does move is the wire bytes, which is why
+    `test/25png/` pins a digest over an *encoded* light field rather than over
+    the pack. Two hashes, two questions — "are these the same pixels" and "are
+    these the same bytes on the wire".
+
+    It also retired a claim `plate.hpp` had been making since gloam#1: that
+    keeping opacity in its own plane made `pack::Codec::Png` "a re-container
+    rather than a re-pack". `tRNS` is per-entry, not per-pixel, so five states
+    cannot survive as four entries plus an alpha channel — the encoder merges the
+    two planes into one index. The comment has been corrected rather than the
+    code: the two-plane split is still right for the reason it gave, and the
+    MSB-first bit order really is PNG's, so the merge never reverses anything.
 
 #### Proposed: nine rows for `TEST-PLAN.md` §3
 

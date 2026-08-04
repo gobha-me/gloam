@@ -112,6 +112,18 @@ inline constexpr std::uint8_t kLateralMax = 3;
 /// the slot termforge #163's `f=100` path lands in — it parses, and `verify`
 /// refuses it, which is what makes this a versioned door rather than an
 /// unchecked one.
+///
+/// THE `f=100` PATH HAS SINCE LANDED (`png.hpp`) AND THIS STILL REFUSES `Png`.
+/// That is a decision, not an omission. The pack is a pixel source and its hash
+/// is a build gate — §10: "two pipeline runs must produce byte-identical packs".
+/// A PNG in the pack would put the compressor, the palette and the filter choice
+/// inside `pack_sha256`, so improving the encoder or moving one grey value would
+/// invalidate every baked pack for a reason that has nothing to do with the
+/// pixels. Encoding at transmit keeps the two hashes measuring different things:
+/// this one asks "are these the same pixels", `test/25png/`'s digest asks "are
+/// these the same bytes on the wire". The door stays shut until something needs
+/// a plate whose SOURCE is compressed — authored art from an external tool, say
+/// — rather than one GLOAM compresses on its way out. See gloam#16.
 enum class Codec : std::uint8_t { RawPlanes = 0, Png = 1 };
 inline constexpr std::uint8_t kCodecMax = 1;
 
