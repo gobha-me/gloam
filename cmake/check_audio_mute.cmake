@@ -100,10 +100,19 @@ endif ()
 # A total count above zero is a weaker guard than it looks: §19 step 9 asks for
 # "footfalls and one sting", and killing either one on its own leaves the other
 # still counting. Measured — disabling the footfall path entirely left this gate
-# green on the sting alone. The scripted session produces both, so both are
-# required by name.
-foreach (EMITTER footfalls stings)
-  if (NOT HEARD_STDERR MATCHES "${EMITTER}=([0-9]+)")
+# green on the sting alone. The scripted session produces all three, so all
+# three are required by name.
+#
+# `monster_footfalls` joined the list with §6.4 (gloam#30), and the scripted
+# session gained a patrolling monster in the same commit so that this stays a
+# requirement rather than becoming an unmeetable one.
+#
+# THE LEADING SPACE IN THE PATTERN IS LOAD-BEARING. Without it, `footfalls=`
+# also matches inside `monster_footfalls=`, so deleting the party's own footfall
+# emitter would leave this loop satisfied by the monster's — reintroducing the
+# exact hole the paragraph above records paying to discover.
+foreach (EMITTER footfalls stings monster_footfalls)
+  if (NOT HEARD_STDERR MATCHES " ${EMITTER}=([0-9]+)")
     message(FATAL_ERROR
       "check_audio_mute: the --audio run reported no `${EMITTER}` counter\n${HEARD_STDERR}")
   endif ()

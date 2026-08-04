@@ -430,6 +430,196 @@ Two more, which are design questions rather than factual errors:
     of the finding, because a budget whose satisfaction turns on the third
     significant figure of an assumed wire form is not yet a budget.
 
+14. **§6.4 specifies neither a route representation nor a re-join rule, and
+    `SCHEMAS.md`'s `patrol` record cannot express either.** Mirrored as
+    [#28](https://github.com/gobha-me/gloam/issues/28). Settled in
+    `include/gloam/world.hpp`. §6.4 is three sentences, and the only one that
+    decides anything decides the RNG stream. `SCHEMAS.md` §1 gives a record —
+    `patrol { monster_type:u8, route:[]CellIndex, dwell:[]u8 }` — with no
+    traversal rule, no validity rule and nothing about a monster standing off
+    its own route.
+
+    **Decided: a full cell-by-cell path, traversed by ping-pong.** Sparse
+    waypoints would need the pathfinder this slice is defined by not having
+    (item 18). Always ping-pong — forward to the end, then back — rather than
+    "a cycle iff `back()` is adjacent to `front()`", which would make behaviour
+    turn on an accident of authoring; a loop is authored by listing the cells
+    there and back. Encoded as `gloam::Patrol`, with `gloam::valid_route`
+    holding the five invariants the record cannot state.
+
+    **Routes live on `Monster`, and store `Coord` rather than `CellIndex`.** The
+    schema puts `monster_type` INSIDE the patrol record, so a patrol is a spawn
+    and not a shareable route — there is no route id to index, and an index
+    would be a determinism hole (out-of-bounds or a silent clamp) that an inline
+    vector cannot have. A `CellIndex` means nothing without the level width, so
+    the wire form keeps the index and `level.gloam`'s loader converts at load,
+    which is the one place the width is in scope.
+
+    **`advance` does not call `valid_route`, and that is the interesting half.**
+    A hot path that re-validates its data every tick pays for a check the load
+    gate owes. What makes it safe is that the pump steps only through
+    `Level::walk` AND requires the destination to be the waypoint the route
+    named — so malformed data yields a monster that stands still, never one that
+    drifts, teleports or reads out of bounds. `test/19patrol/` is fourteen
+    refusals asserting exactly that, because the guarantee is what replaces the
+    check.
+
+    **What it leaves open, named rather than discovered:** a monster not
+    standing on its own route never rejoins it — and `valid_route` cannot warn
+    about it, because it is told the route and not where the monster stands.
+    That walk is item 18's. Separately, "ticks owed on ARRIVING" means the dwell
+    of the cell a monster is SPAWNED on is never paid; a pause authored there is
+    dead until the ping-pong brings the monster back to it.
+
+15. **`SPEC.md` §5.2's "monsters consume N ticks per action" never names N, and
+    it is the only movement-rate statement in the document.** Mirrored as
+    [#29](https://github.com/gobha-me/gloam/issues/29).
+
+    **Decided: N = 2, as `Tuning::monster_move_ticks`.** At `kTickHz = 10` that
+    is 200 ms per cell — the fastest step the pump can express, and therefore
+    exactly the fastest legal party walk. A monster that outruns the party, or
+    that the party outruns, is a **balance** decision, and there is no game to
+    balance until #8's gate is answered; equal is the reading that assumes
+    least. It is a real `Tuning` field, unlike the audio constants, because
+    monster position is hashed simulation state — `kTuningFieldCount` 47 → 49,
+    `ruleset_hash` moves, and every recorded replay is invalidated, deliberately.
+
+    A value below 1 is clamped at the point of use rather than in the struct: a
+    `Tuning` arrives from a file, and a constructor that corrected it would make
+    `ruleset_hash` disagree with the bytes that produced it.
+
+    **Still not settled:** `creep_tick_cost`. Monsters now have a movement-rate
+    model and the party still does not, because how often a `Step` may legally
+    appear is the driver's rule and there is no driver until #7. The two become
+    one decision the day a frame loop exists.
+
+16. **§6.2's emitter table is party-side only and has no row for a monster's
+    footfall, which §9 names FIRST among the things the player must hear.**
+    Mirrored as [#30](https://github.com/gobha-me/gloam/issues/30). The direct
+    sibling of #22, which asks the same question about the sting.
+
+    **Decided: diegetic, emitted at 14, and NOT a `Tuning` field.**
+    `audio::kMonsterFootfallEmission` sits on `noise_step_leather` — the thing
+    in the corridor is about as loud as you are — and at `atten_open_cell` it
+    dies at seven open cells, just past §3's four-cell sight distance, so
+    hearing one you cannot see is the common case rather than the rare one. It
+    lives in `audio.hpp` beside `kStingEmission` for that header's stated
+    reason: nothing in the simulation hears a monster, so it cannot move
+    `world_hash`, so it must not be able to reject a replay. **The footfall adds
+    nothing to `kTuningFieldCount`;** only item 15's rate does.
+
+    **The alternatives lose in the same direction.** Reusing `step_noise` with
+    an `Armour` on `Monster`, or a per-`MonsterKind` emission, both add hashed
+    simulation state to serve a number nothing in the simulation reads — and
+    §6.2's armour table is a *party loadout* mechanic, which §7.1 keeps
+    per-character equipped slots precisely because of.
+
+    **Audible to the player, never to other monsters.** `audio.hpp` already
+    states that monsters do not listen to each other, and keeping it true is
+    what avoids a noise field rooted at each moving monster — the measured
+    13.6 ms-against-4 ms trap `world.cpp` records.
+
+    **One trap, and it is not hypothetical.** `mix_reciprocal`'s sizing rule is
+    stricter than "the same or louder" for this sound: `gain_from_loudness`
+    clamps to unity when `heard >= emission`, so reading the 90-seeded sting
+    field for a 14-emission source reports every footfall in the level at FULL
+    VOLUME out to ~38 cells. `advance` therefore builds a **second** lazy field
+    seeded at exactly 14. A test that asks whether a footfall was emitted passes
+    either way; `test/16audiosim/` asks what its gain was, and that is the only
+    thing that catches it. The escape — one field read at an exact offset, since
+    `propagate_noise` yields `max(0, E - mincost)` — is named and not taken.
+
+17. **§6.4's "idle variation" is undefined, and the obvious readings disagree on
+    whether an idle monster is bit-idle.** Mirrored as
+    [#31](https://github.com/gobha-me/gloam/issues/31). A monster drawing every
+    tick moves `rng_state[Patrol - 1]`, which is hashed, so `world_hash` would
+    change on ticks where nothing observable happened.
+
+    **Decided: a bounded extension of an AUTHORED dwell, drawn once on arrival.**
+    On reaching waypoint `i` a monster owes `dwell[i]` ticks, plus
+    `range(0, patrol_idle_jitter_ticks)` more **only where `dwell[i] > 0`**. A
+    plain corridor leg takes no draw at all, so a route with no authored pause is
+    a metronome and the author decides where it is not; and
+    `patrol_idle_jitter_ticks = 0` makes the whole subsystem RNG-free, which is
+    the lever every exact-sequence test in `test/19patrol/` pulls. A subsystem
+    whose randomness has an off switch is one you can write goldens for.
+
+    **The discipline that makes it replay-safe:** one `Rng` before the monster
+    loop, draws in fixed roster order, `save_stream` once after it and
+    unconditionally. Critically the draw is **not** behind `voices != nullptr`,
+    or §19 step 9's `--mute` identity breaks — asserted directly rather than
+    conventionally, as "after 1000 ticks only `Stream::Patrol` has moved".
+
+    **Confirmed, because it was the live question:** this does not make an idle
+    frame non-idle. `test/10budgets/`'s `classify_frame` reads party, facing,
+    lamp, awareness and positions, and never `rng_state` or `world_hash`. A tick
+    that draws but does not move still classifies `Idle` and still asserts zero
+    emitted bytes.
+
+    **What it leaves open:** patrol **phase** is not randomised at spawn, so two
+    monsters on the same all-zero-dwell route stay in lockstep forever. That is
+    a legitimate reading of "seed-deterministic" and almost certainly not what
+    "the world feels alive" wants; fixing it means a draw at world construction
+    rather than at arrival, which is a different decision about *when*
+    `Stream::Patrol` is first touched.
+
+18. **Three of §6.1's five tells require a monster to translate toward a target,
+    and §6 never says how a monster paths.** Mirrored as
+    [#32](https://github.com/gobha-me/gloam/issues/32), which is G-9b's charter
+    rather than a note. "Leaves the patrol route, walks to the last known
+    position", "direct pursuit", and "walks back to the patrol route and
+    resumes" all need a path. §5.2's "same AI, same patrols, **same
+    pathfinding**" is the only mention of the word in the document, and it
+    asserts that two play modes share a thing that does not exist.
+
+    **Decided for now: a monster at SEARCHING or above holds position,** and
+    `test/19patrol/` asserts it so that removing it in G-9b is a deliberate red
+    test. G-9a's boundary is one sentence — *it moves monsters along authored
+    routes and turns their heads; it never translates a monster toward the
+    party* — which maps exactly onto "needs no pathfinder".
+
+    **Cost is not why.** A single party-rooted BFS field per tick would serve
+    every HUNTING monster at once, the same shared-field trick `advance` already
+    uses twice. Four other things are: **arrival has no defined outcome** (no
+    combat, no collision rule, no cell-occupancy rule — a monster that pursues
+    you and then stands *on* you is a more visible dead end than one that holds);
+    the shared field serves only one of the three rows, since SEARCHING and the
+    route walk-back target per-monster positions, so shipping pursuit alone
+    would give patrol → halt → *freeze* → **charge** → *freeze*; a distance
+    field is a new public primitive whose failure matrix is a slice's work; and
+    it would have tripled the behavioural diff in the commit that also moved
+    `kWorldHashVersion`.
+
+    **Explicitly rejected as a shortcut:** greedy "step to the neighbour that
+    reduces Chebyshev range". It sticks in local minima on a walled grid and
+    reads as broken AI, which is §16's top risk row and precisely what #8's gate
+    exists to measure. A wrong answer here poisons the gate rather than
+    approximating it.
+
+    Two of the five tells ARE performed, because neither translates anything:
+    `PatrolRhythmBreaks` (halt one tick, head turns toward `mind.last_known`)
+    and `CastsAbout` (turning in place). `facing` is hashed state for that
+    reason — a tell a replay cannot reproduce is not a tell, it is an animation.
+
+#### Proposed: nine rows for `TEST-PLAN.md` §3
+
+§3's property table has six rows and **none of them are about movement**, because
+nothing moved when it was written. `test/19patrol/` implements the nine below;
+they are recorded here as a proposed amendment rather than written into
+`design/TEST-PLAN.md`, which is a snapshot (see `design/README.md`).
+
+| | Property | Why it matters |
+| --- | --- | --- |
+| P1 | A monster is always standing on a navigable cell, for any route, valid or not | the pump is total over data the loader let through, or `valid_route` has to run every tick |
+| P2 | A monster never crosses an impassable edge | the party and the monster are refused by ONE predicate, or "can a body pass" has two answers |
+| P3 | A monster never steps more often than `monster_move_ticks` allows | the rate is a contract; caught the pump charging `period - 1` and stepping every tick |
+| P4 | A monster's position is always a cell of its own route | the alternative is a monster that drifts, which reads as broken AI rather than as a data error |
+| P5 | The same seed patrols identically; a different one dwells differently | §6.4's "seed-deterministic", both halves — the second is what stops it being vacuous |
+| P6 | After 1000 patrolling ticks, ONLY `Stream::Patrol` has moved | §6.4's "never the shared one", asserted rather than conventional |
+| P7 | With no jitter and no dwell, an *n*-cell route repeats in `2(n-1) × monster_move_ticks` ticks | legibility as a theorem; notices if idle variation leaks onto a pauseless leg |
+| P8 | `PatrolRhythmBreaks` halts for EXACTLY one tick and faces `mind.last_known` | §6.1 says "halt for one tick"; a freeze is a different behaviour wearing the same name |
+| P9 | Awareness at SEARCHING or above pins the position | item 18's boundary, so removing it in G-9b is a deliberate red test |
+
 ### Decisions taken
 
 Amendments to `design/SPEC.md`, decided 2026-07-31. The snapshot is not edited;

@@ -536,6 +536,18 @@ TEST_CASE("the world hash notices every field of the world", "[replay][determini
   CHECK(changed([](World& w) { w.monsters[0].mind.last_known.y += 1; }));
   CHECK(changed([](World& w) { w.monsters[0].mind.has_last_known = true; }));
 
+  // §6.4's route and its cursor. Six of these seven are the cursor, and the
+  // cursor is the half most likely to be forgotten: a route that compares equal
+  // while the monster is at a different point along it is a world that replays
+  // to a different future from the same digest.
+  CHECK(changed([](World& w) { w.monsters[0].facing = Dir::West; }));
+  CHECK(changed([](World& w) { w.monsters[0].patrol.route.push_back(Coord{7, 1}); }));
+  CHECK(changed([](World& w) { w.monsters[0].patrol.dwell.push_back(3); }));
+  CHECK(changed([](World& w) { w.monsters[0].patrol.waypoint += 1; }));
+  CHECK(changed([](World& w) { w.monsters[0].patrol.reversed = true; }));
+  CHECK(changed([](World& w) { w.monsters[0].patrol.dwell_left += 1; }));
+  CHECK(changed([](World& w) { w.monsters[0].patrol.move_cooldown += 1; }));
+
   // Every simulation stream. If one of these ever stops mattering, it is the
   // static_assert in world.cpp that should be arguing about it, not silence.
   for (std::size_t i = 0; i + 1 < kStreamCount; ++i) {
@@ -568,6 +580,43 @@ TEST_CASE("cell contents are length-prefixed, not just concatenated", "[replay][
   CHECK(world_hash(split) != world_hash(together));
 }
 
+TEST_CASE("routes are length-prefixed per monster, not concatenated", "[replay][determinism]") {
+  // Cell contents' argument, one level up. Without a count PER MONSTER, a route
+  // cell handed to the other monster feeds the digest the same bytes in the
+  // same order — and the two worlds it fails to distinguish patrol completely
+  // differently.
+  auto split = corridor_world();
+  split.monsters[0].patrol.route = {Coord{7, 1}};
+  split.monsters[1].patrol.route = {Coord{4, 0}};
+
+  auto together = corridor_world();
+  together.monsters[0].patrol.route = {Coord{7, 1}, Coord{4, 0}};
+  together.monsters[1].patrol.route = {};
+
+  CHECK(world_hash(split) != world_hash(together));
+}
+
+TEST_CASE("a route and its dwell are prefixed SEPARATELY", "[replay][determinism]") {
+  // Sharper than the case above, because `route` and `dwell` are ADJACENT in
+  // the digest and are made of different-width elements. One `Coord` is eight
+  // bytes and one dwell entry is one, so eight dwell bytes are byte-identical
+  // to one route cell — below, both worlds would feed 07 00 00 00 01 00 00 00
+  // and nothing else if the two vectors shared a prefix or had none.
+  //
+  // One is a monster that patrols to (7,1). The other is a monster that does
+  // not patrol at all and is carrying eight bytes of malformed dwell. A digest
+  // that cannot separate those cannot do the job §12 gives it.
+  auto as_route = corridor_world();
+  as_route.monsters[0].patrol.route = {Coord{7, 1}};
+  as_route.monsters[0].patrol.dwell = {};
+
+  auto as_dwell = corridor_world();
+  as_dwell.monsters[0].patrol.route = {};
+  as_dwell.monsters[0].patrol.dwell = {7, 0, 0, 0, 1, 0, 0, 0};
+
+  CHECK(world_hash(as_route) != world_hash(as_dwell));
+}
+
 TEST_CASE("a world REACHED by replaying hashes the same as one built directly",
           "[replay][determinism]") {
   // Canonicality, and it has to be tested across the two paths that actually
@@ -586,7 +635,22 @@ TEST_CASE("a world REACHED by replaying hashes the same as one built directly",
   built.party = Coord{3, 1};
   built.tick = walked.tick;
   built.pending_noise = walked.pending_noise;
-  for (std::size_t i = 0; i < built.monsters.size(); ++i) built.monsters[i].mind = walked.monsters[i].mind;
+  // `facing` joined `mind` with §6.4: these monsters do not patrol, but the
+  // party walking past makes one of them SUSPICIOUS, and §6.1's tell for that
+  // transition is a head turn. Copying `mind` alone left this case red for a
+  // reason that was the pump working correctly.
+  //
+  // AND NOTHING ELSE IS COPIED, DELIBERATELY. Blanket-copying `patrol` and
+  // `rng_state` across would also make this case pass, and would defeat the
+  // exact thing it exists to catch — "anything a `play` leaves behind that a
+  // direct build does not". Leaving them uncopied is what asserts that a
+  // route-less world takes no patrol draw and writes no cursor. If §6.4 ever
+  // touches either on a path a direct build cannot reproduce, this goes red
+  // here rather than in `gloam_replay play`, which is the whole point.
+  for (std::size_t i = 0; i < built.monsters.size(); ++i) {
+    built.monsters[i].mind = walked.monsters[i].mind;
+    built.monsters[i].facing = walked.monsters[i].facing;
+  }
 
   CHECK(hex_of(world_hash(built)) == hex_of(world_hash(walked)));
 }
@@ -690,10 +754,23 @@ TEST_CASE("a golden world hash pins the simulation across compilers",
   // compilers". The value is whatever the implementation produces — the point
   // is that it never changes, not what it is. If this moves, either the
   // simulation changed or `kWorldHashVersion` should have.
+  //
+  // Moved with §6.4's patrols, for TWO reasons, and both are the good kind:
+  //
+  //   1. `kWorldHashVersion` 1 -> 2. The version byte leads the digest, so this
+  //      alone would have moved it.
+  //   2. A monster in this world turns its head. It does NOT patrol — the
+  //      monsters here are deliberately route-less, so the pump itself is a
+  //      no-op for them — but the party walking past makes one SUSPICIOUS, and
+  //      §6.1's tell for that transition is "head turns toward the source".
+  //      `facing` is hashed, because a tell a replay cannot reproduce is not a
+  //      tell.
+  //
+  // Being able to say which is which is the whole point of the version byte.
   const auto records = scripted_records();
   auto w = corridor_world();
   play(w, records, kDefaultTuning);
-  CHECK(hex_of(world_hash(w)) == "6a9b5e5ddad919c602d2278fa119498ce267cfb5d007ba61c79267a809ff7510");
+  CHECK(hex_of(world_hash(w)) == "5d594c7b996e6072592a3dc9abd212f88d9c594ed15ee76cf87b2b6f56b9f91c");
 }
 
 TEST_CASE("a golden file digest pins the container across compilers",
