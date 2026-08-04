@@ -16,17 +16,26 @@
 #include <unistd.h>  // STDOUT_FILENO — do not lean on libstdc++ leaking it
 
 #include <algorithm>
+#include <chrono>
+#include <cstddef>
 #include <cstdio>
+#include <memory>
+#include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "gloam/budgets.hpp"
+#include "gloam/deflate.hpp"
 #include "gloam/emit.hpp"
 #include "gloam/geometry.hpp"
 #include "gloam/gloam.hpp"
 #include "gloam/kitty.hpp"
 #include "gloam/layer.hpp"
+#include "gloam/lightfield.hpp"
 #include "gloam/meter.hpp"
+#include "gloam/plate.hpp"
+#include "gloam/png.hpp"
 #include "gloam/replay.hpp"
 #include "tty_writer.hpp"
 
@@ -59,6 +68,54 @@ void print_ruleset() {
   std::printf("                a replay recorded under a different hash is rejected at load\n");
 }
 
+/// What the cold-start upload actually costs, measured rather than quoted.
+struct ColdStart {
+  std::size_t stream_bytes{0};
+  std::size_t plates{0};
+  long elapsed_ms{0};
+};
+
+/// Bake, encode and transmit the whole resident plate set into a sink.
+///
+/// The bytes go nowhere — this is the upload path run for its size and its cost,
+/// not an upload. The real one belongs to the compositor's startup (gloam#7,
+/// upstream #97's `on_start`), and doing it here would put a plate on a terminal
+/// that has not asked for one.
+///
+/// A clock is read, which nothing in `gloam::lib` may do — which is exactly why
+/// this function is in `src/bin/` and the thing it measures is not.
+[[nodiscard]] auto measure_cold_start() -> ColdStart {
+  const auto w = lightfield::kWidthPx;
+  const auto h = lightfield::kHeightPx;
+
+  std::vector<std::byte> blob(plate::blob_bytes(w, h));
+  std::vector<std::byte> scanlines(png::scratch_bytes(w, h));
+  std::vector<std::byte> encoded(png::bound(w, h));
+  // A quarter of a megabyte of match tables, on the heap and owned here: the
+  // library never allocates one, and a local would be a quarter-megabyte stack
+  // frame.
+  const auto matcher = std::make_unique<deflate::Scratch>();
+  emit::ByteSink sink;
+
+  const auto started = std::chrono::steady_clock::now();
+
+  ColdStart out;
+  for (int level = kLampLevelMin; level <= kLampLevelMax; ++level) {
+    if (!lightfield::bake(level, blob)) return out;
+    const auto image = png::encode(plate::PlateView{blob, w, h}, scanlines, *matcher, encoded);
+    if (!image) return out;
+    const auto id = static_cast<std::uint32_t>(level - kLampLevelMin) + 1;
+    if (!kitty::emit_transmit(sink, std::span{encoded}.first(image.bytes), id)) return out;
+    ++out.plates;
+  }
+
+  out.elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                       std::chrono::steady_clock::now() - started)
+                       .count();
+  out.stream_bytes = sink.size();
+  return out;
+}
+
 /// Build-order step 4: "Counters on the emit path and the upload path, printed
 /// every run."
 ///
@@ -70,9 +127,9 @@ void print_ruleset() {
 ///
 /// It does NOT print a p95. There is no compositor and therefore no session, and
 /// a shipped binary that printed a synthetic percentile would be quoted back as
-/// a measurement inside a month. What it prints instead is the wire form —
-/// measured here, in this binary, by emitting a real placement — and the two
-/// rules that were undecided until now.
+/// a measurement inside a month. What it prints instead is the wire form and the
+/// upload — both measured here, in this binary, by emitting a real placement and
+/// running a real cold start — and the two rules that were undecided until now.
 auto print_instruments() -> bool {
   // The measurement: one placement through the real emitter, at §3.2's
   // reference cell. Not a quoted constant.
@@ -127,6 +184,20 @@ auto print_instruments() -> bool {
       "                lamp or awareness -> animation; else idle       (gloam#24)\n";
   report += "  sustained     p95 by nearest rank over sliding " + num(replay::kTickHz) +
             "-tick windows, <= " + num(budget::kMaxSustainedBytesPerSecond) + " B/s  (gloam#25)\n";
+
+  // The cold-start row, measured by actually doing it. This is the half of
+  // build-order step 4 that says "counters on the UPLOAD path", and until the
+  // transmit path landed there was nothing to count. Six full-frame light fields
+  // is the whole resident set that exists today; M0's inventory is 71 plates.
+  const auto upload = measure_cold_start();
+  report += "  cold start    " + num(upload.stream_bytes) + " B on the wire for " +
+            num(upload.plates) + " plates in " + num(upload.elapsed_ms) + " ms, against " +
+            num(budget::kMaxColdStartPayloadBytes) + " B and " +
+            num(budget::kMaxColdStartLocalMs) + " ms (measured here)\n";
+  report +=
+      "                f=100 indexed PNG, GLOAM's own DEFLATE. The f=32 route\n"
+      "                this replaces was 4.6x OVER the payload row  (gloam#17)\n";
+
   report +=
       "  measured      0 emit bytes this run. There is no compositor (gloam#7),\n"
       "                so no session was rendered and no p95 was computed. The\n"

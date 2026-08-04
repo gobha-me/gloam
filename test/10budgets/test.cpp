@@ -17,12 +17,15 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <span>
 #include <vector>
 
 #include "gloam/assets.hpp"
 #include "gloam/audio.hpp"
+#include "gloam/base64.hpp"
 #include "gloam/budgets.hpp"
+#include "gloam/deflate.hpp"
 #include "gloam/emit.hpp"
 #include "gloam/geometry.hpp"
 #include "gloam/kitty.hpp"
@@ -33,9 +36,14 @@
 #include "gloam/pack.hpp"
 #include "gloam/perception.hpp"
 #include "gloam/plate.hpp"
+#include "gloam/png.hpp"
 #include "gloam/replay.hpp"
 #include "gloam/tuning.hpp"
 #include "gloam/world.hpp"
+
+// The one file in GLOAM that calls write(2). Reachable here because this test
+// directory owns its own wiring — see CMakeLists.txt.
+#include "tty_writer.hpp"
 
 using namespace gloam;
 
@@ -230,48 +238,165 @@ TEST_CASE("§11's residency cap, measured against a real manifest", "[budget]") 
   CHECK(image.size() <= budget::kMaxColdStartPayloadBytes);
 }
 
-TEST_CASE("§11's cold-start payload row is CURRENTLY BLOWN, and this says so", "[budget]") {
+TEST_CASE("§11's cold-start payload row, measured on the real stream", "[budget]") {
   // §11 and BUDGETS.md budget 1.2 MB of BASE64 — the TRANSMIT payload, not the
   // pack. BUDGETS.md names a "manifest test" as the enforcer, and a manifest
   // test can only measure the pack, so the row as written cannot be checked by
-  // the thing it names. Those are wildly different numbers: kitty is handed
-  // PIXELS, so a RawPlanes plate expands from 2 bits per pixel to 32, and then
-  // base64 adds another third.
+  // the thing it names.
   //
-  // THIS ASSERTION IS DELIBERATELY INVERTED. The projected wire cost is
-  // computable from constants already in scope, so rather than record the
-  // overrun in four comment blocks and assert nothing — which is how a budget
-  // becomes prose — it is asserted in the direction that is true today. When
-  // the transmit path lands with Codec::Png, `o=z` or shared memory, this test
-  // goes RED and whoever fixed it has to come here and flip it into the real
-  // row. A budget nobody can accidentally leave broken.
+  // THIS ROW WAS ASSERTED INVERTED until the transmit path landed (gloam#17,
+  // UPSTREAM.md correction 7): kitty was going to be handed PIXELS, a RawPlanes
+  // plate expands from 3 bits per pixel to 32, base64 adds another third, and
+  // the six light fields alone came to roughly 5.5 MB against a 1.2 MB budget.
+  // Rather than record that in four comment blocks and assert nothing, the row
+  // asserted the overrun, so that fixing it would go RED and force whoever fixed
+  // it to come here and write the real row. This is that row.
   //
-  // See UPSTREAM.md's correction 7 and gloam#17.
-  // Derived from the PIXEL COUNT, not from a bits-per-pixel ratio against the
-  // blob. A plate's blob is 3 bits per pixel, not 2 — the 2-bit index plane
-  // plus the 1-bit stencil — and quoting the palette depth alone overstates the
-  // expansion by half as much again.
-  constexpr std::size_t kBytesPerWirePixel = 4;  // kitty f=32 RGBA
+  // What changed is the payload format, not the budget: `png.hpp` encodes the
+  // plate as a 4-bit indexed PNG and `deflate.hpp` compresses it, so `f=100`
+  // carries roughly a fiftieth of what `f=32` would have. The measurement below
+  // is not a projection from constants — it bakes the six real fields, encodes
+  // them, and transmits them through the real emitter into a real sink.
+  std::vector<std::byte> blob(plate::blob_bytes(lightfield::kWidthPx, lightfield::kHeightPx));
+  std::vector<std::byte> scratch(png::scratch_bytes(lightfield::kWidthPx, lightfield::kHeightPx));
+  std::vector<std::byte> encoded(png::bound(lightfield::kWidthPx, lightfield::kHeightPx));
+
+  deflate::Scratch matcher;
+
+  emit::ByteSink sink;
+  std::size_t png_bytes = 0;
+
+  for (int level = kLampLevelMin; level <= kLampLevelMax; ++level) {
+    REQUIRE(lightfield::bake(level, blob));
+    const auto image = png::encode(plate::PlateView{blob, lightfield::kWidthPx,
+                                                    lightfield::kHeightPx},
+                                   scratch, matcher, encoded);
+    REQUIRE(image.error == png::PngError::None);
+    png_bytes += image.bytes;
+
+    const auto id = static_cast<std::uint32_t>(level - kLampLevelMin) + 1;
+    REQUIRE(kitty::emit_transmit(sink, std::span{encoded}.first(image.bytes), id).error ==
+            kitty::EmitError::None);
+  }
+
+  // The whole stream, control data included — which is MORE than the row asks
+  // for. BUDGETS.md wants the counter to measure what actually left the process,
+  // and what leaves is escape sequences, not naked base64. Measuring the
+  // stricter quantity is the only way the row cannot pass on a technicality.
+  const auto stream_bytes = sink.size();
+  const auto base64_bytes = base64::encoded_size(png_bytes);
 
   const auto pixels = static_cast<std::size_t>(lightfield::kWidthPx) *
                       static_cast<std::size_t>(lightfield::kHeightPx) *
                       static_cast<std::size_t>(assets::kPlateCount);
-  const auto pack_bytes = assets::image_bytes();
-  const auto wire_bytes = pixels * kBytesPerWirePixel;
-  const auto base64_bytes = wire_bytes * 4 / 3;
 
   // The blob really is 3 bits per pixel, and that is what makes the pack small.
   CHECK(assets::pixel_bytes() * 8 == pixels * 3);
 
-  INFO("pack " << pack_bytes << " B, f=32 payload " << wire_bytes << " B, base64 "
-               << base64_bytes << " B, budget " << budget::kMaxColdStartPayloadBytes << " B");
+  INFO("pack " << assets::image_bytes() << " B, PNG " << png_bytes << " B, base64 "
+               << base64_bytes << " B, whole stream " << stream_bytes << " B, budget "
+               << budget::kMaxColdStartPayloadBytes << " B");
+  WARN("cold-start payload: " << stream_bytes << " B on the wire ("
+                              << stream_bytes * 100 / budget::kMaxColdStartPayloadBytes
+                              << "% of §11's budget), from " << png_bytes << " B of PNG");
 
-  CHECK(pack_bytes <= budget::kMaxColdStartPayloadBytes);
-  CHECK(base64_bytes > budget::kMaxColdStartPayloadBytes);
+  CHECK(assets::image_bytes() <= budget::kMaxColdStartPayloadBytes);
+  CHECK(base64_bytes <= budget::kMaxColdStartPayloadBytes);
+  CHECK(stream_bytes <= budget::kMaxColdStartPayloadBytes);
 
-  // Roughly 4.6x over, from the light fields alone, before a single wall plate
-  // exists. Pinned so the ratio cannot drift unremarked in either direction.
-  CHECK(base64_bytes / budget::kMaxColdStartPayloadBytes >= 4);
+  // A HEADROOM BAND, not decoration. §11's cap is for the whole resident set and
+  // M0's inventory is 71 plates (`budget::resident_images_m0()`), of which these
+  // six are the largest — they are the only FULL-FRAME plates. A row that passed
+  // at 90% of budget with six of seventy-one plates would be a row that has
+  // already failed and does not know it yet. Eight-to-one is what the encoder
+  // delivers today with an order of magnitude to spare; if a change halves that,
+  // this goes red while there is still time to do something about it.
+  CHECK(stream_bytes * 8 <= budget::kMaxColdStartPayloadBytes);
+
+  // And what it would have cost the naive way, kept as an assertion rather than
+  // as a remark: this is the arithmetic gloam#17 recorded, and it is the reason
+  // `f=100` is not an optimisation but the thing that made the row reachable.
+  constexpr std::size_t kBytesPerWirePixel = 4;  // kitty f=32 RGBA
+  const auto naive_base64 = pixels * kBytesPerWirePixel * 4 / 3;
+  CHECK(naive_base64 > budget::kMaxColdStartPayloadBytes);
+  CHECK(naive_base64 / stream_bytes >= 8);
+}
+
+TEST_CASE("§11's two cold-start timing rows, one measured and one modelled",
+          "[budget]") {
+  // READ THIS BEFORE QUOTING EITHER NUMBER.
+  //
+  // BUDGETS.md asks for "cold start, local terminal <= 800 ms" and "cold start,
+  // 1 Mbit/s link <= 12 s", enforced by a "startup instrument" and a
+  // "synthetic-throttle test". Neither can touch a real terminal in CI, so what
+  // is measured here is everything on GLOAM's side of the tty and nothing on the
+  // far side of it:
+  //
+  //   MEASURED  bake, encode, base64, chunk, and a real write(2) of the whole
+  //             stream through the same `tty::write_all` main.cpp uses. The
+  //             destination is a temporary file rather than a pipe, on purpose:
+  //             a pipe holds 64 KiB and a payload that outgrew it would not fail
+  //             this test, it would HANG it, and a hung runner reports nothing.
+  //   NOT       the terminal's own decode and upload time, which is upstream
+  //             #109's problem and unmeasurable from here.
+  //
+  // The throttled row is arithmetic over the measured byte count — 1 Mbit/s of
+  // wire time plus the measured local cost. A test that actually slept for the
+  // wire time would spend twelve seconds of CI proving that division works.
+  std::vector<std::byte> blob(plate::blob_bytes(lightfield::kWidthPx, lightfield::kHeightPx));
+  std::vector<std::byte> scratch(png::scratch_bytes(lightfield::kWidthPx, lightfield::kHeightPx));
+  std::vector<std::byte> encoded(png::bound(lightfield::kWidthPx, lightfield::kHeightPx));
+  deflate::Scratch matcher;
+  emit::ByteSink sink;
+
+  std::FILE* fp = std::tmpfile();
+  REQUIRE(fp != nullptr);
+
+  const auto started = std::chrono::steady_clock::now();
+
+  for (int level = kLampLevelMin; level <= kLampLevelMax; ++level) {
+    REQUIRE(lightfield::bake(level, blob));
+    const auto image =
+        png::encode(plate::PlateView{blob, lightfield::kWidthPx, lightfield::kHeightPx}, scratch,
+                    matcher, encoded);
+    REQUIRE(image.error == png::PngError::None);
+    REQUIRE(kitty::emit_transmit(sink, std::span{encoded}.first(image.bytes),
+                                 static_cast<std::uint32_t>(level - kLampLevelMin) + 1)
+                .error == kitty::EmitError::None);
+  }
+
+  const auto written = tty::write_all(fileno(fp), sink.view());
+  const auto elapsed = std::chrono::steady_clock::now() - started;
+  std::fclose(fp);
+
+  REQUIRE(written.error == tty::WriteError::None);
+  REQUIRE(written.bytes_written == sink.size());
+
+  const auto local_ms =
+      static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count());
+
+  // 1 Mbit/s is 125,000 B/s, so a byte costs 8 microseconds of wire time. Integer
+  // arithmetic throughout, as everywhere else in this file.
+  const auto throttled_ms = local_ms + static_cast<int>(sink.size() * 8 / 1000);
+
+  INFO("cold start: " << sink.size() << " B in " << local_ms << " ms locally, " << throttled_ms
+                      << " ms over a 1 Mbit/s link");
+  WARN("§11 cold start: " << local_ms << " ms local (budget " << budget::kMaxColdStartLocalMs
+                          << "), " << throttled_ms << " ms throttled (budget "
+                          << budget::kMaxColdStartThrottledMs << ") — the GLOAM half only");
+
+  // The throttled row is machine-independent apart from the encode, so it is
+  // asserted everywhere, sanitizers included.
+  CHECK(throttled_ms <= budget::kMaxColdStartThrottledMs);
+
+#ifndef GLOAM_TEST_SANITIZED
+  CHECK(local_ms <= budget::kMaxColdStartLocalMs);
+#endif
+
+  // A headroom band on the modelled row, for the reason the payload row has one:
+  // these six plates are 6 of M0's 71, and a row that only just fits today is a
+  // row that has already failed.
+  CHECK(throttled_ms * 4 <= budget::kMaxColdStartThrottledMs);
 }
 
 TEST_CASE("§9.2's dropped-voice-command budget is zero", "[budget]") {

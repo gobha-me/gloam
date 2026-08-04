@@ -42,7 +42,9 @@
 /// not today's `draw_image`. When those land this module should SHRINK rather
 /// than change shape — see UPSTREAM.md.
 
+#include <cstddef>
 #include <cstdint>
+#include <span>
 
 #include "gloam/emit.hpp"
 #include "gloam/layer.hpp"
@@ -111,6 +113,7 @@ enum class EmitError : std::uint8_t {
   SubCellOffsetOutOfRange = 7, ///< an offset of a whole cell is a cell move
   EmptyCrop = 8,               ///< kitty reads w=0 as "to the right edge"
   NegativeCrop = 9,
+  EmptyPayload = 10,           ///< a transmit with nothing to transmit
 };
 
 struct EmitResult {
@@ -167,35 +170,80 @@ struct EmitResult {
 /// function here that emits it, and `test/07emit/` asserts as much.
 [[nodiscard]] auto emit_delete_image(emit::ByteSink& sink, std::uint32_t image_id) -> EmitResult;
 
-// ── §4.1 Transmit — deliberately not here yet ───────────────────────────────
+// ── §4.1 Transmit — the cold-start upload ───────────────────────────────────
 //
-// The startup upload (`a=t`, base64, chunked at 4096 bytes) belongs in this
-// module and will be added to `src/lib/kitty.cpp`. It is not here yet, and the
-// three reasons this note used to give have now had two of them answered by
-// gloam#1's first slice. Recorded, because how they came out constrains what
-// the transmit path is allowed to look like — and recorded HERE so that the
-// next person adds transmit to this module rather than inventing a second
-// emitter in `src/bin/`, which now holds two binaries and is the obvious wrong
-// place to put one. `cmake/check_kitty_boundary.cmake` enforces the letter of
-// that; the reasons below are the spirit, and only one of them is mechanical:
+// This note reserved the seam for four slices and stated three conditions the
+// transmit path had to satisfy before it could be written. All three are now
+// answered, and they are kept here because they are what the implementation
+// below is shaped by:
 //
-//   1. ANSWERED. The pixel source exists: `pack.hpp` is the payload format and
-//      `plate.hpp` is what a plate's bytes ARE — two bit-packed planes, index
-//      and stencil, in a caller-owned blob. There is a format to encode against
-//      now, so this can be a shrink rather than a rewrite.
+//   1. ANSWERED by gloam#1. The pixel source exists: `pack.hpp` is the payload
+//      format and `plate.hpp` is what a plate's bytes ARE — two bit-packed
+//      planes, index and stencil, in a caller-owned blob.
 //   2. ANSWERED, and the answer is that ownership never arrived. Every pipeline
 //      entry point takes a caller-owned span and reports the size it needs; the
 //      buffers live in `src/bin/bake.cpp`, which holds the pipeline's only file
-//      descriptor. Transmit must be written the same way — `(a plate's bytes, an
-//      image id) -> bytes appended to a ByteSink` — and must NOT grow a cache, a
-//      registry or an owning handle. The moment it does, the boundary argument
-//      this note was reserving has been lost rather than settled.
-//   3. STILL OPEN, and now with a number. §11 budgets 1.2 MB of BASE64, and a
-//      480x360 plate expanded to `f=32` RGBA is 691,200 B before base64 adds a
-//      third — the six light fields alone are roughly 5.5 MB on the wire against
-//      388,800 B in the pack. So the first transmit implementation cannot be the
-//      naive one: it needs `pack::Codec::Png` (upstream #163's `f=100` path),
-//      `o=z`, or GL-A3's shared-memory transfer. See UPSTREAM.md, and the note
-//      in `test/10budgets/` that keeps this from reading as met.
+//      descriptor. `emit_transmit` is written the same way — `(a plate's bytes,
+//      an image id) -> bytes appended to a ByteSink`. It holds no cache, no
+//      registry and no owning handle, and it does not know what a plate is: it
+//      takes bytes. Residency is a property of the terminal, not of this module.
+//   3. ANSWERED by `png.hpp`. §11 budgets 1.2 MB of BASE64, and the naive route
+//      — a 480x360 plate expanded to `f=32` RGBA, 691,200 B before base64 adds a
+//      third — put the six light fields alone at roughly 5.5 MB on the wire
+//      against 388,800 B in the pack. That was gloam#17, asserted inverted in
+//      `test/10budgets/` so it could not read as met. What ships instead is
+//      `f=100`: §10's plate as an indexed PNG, DEFLATE-compressed by
+//      `deflate.hpp`. `o=z` was not used — it compresses an `f=24`/`f=32`
+//      payload, and compressing an already-compressed PNG buys nothing.
+//
+// What is NOT here, and is deliberately somebody else's problem: which image id
+// belongs to which plate, when to upload, and what to do if the terminal drops
+// the image. That is residency (gloam#7, upstream #109), and a module that
+// answered it would need the registry condition 2 forbids.
+
+/// Bytes of raw payload per chunk.
+///
+/// Kitty's escape-code protocol caps a chunk at 4096 bytes of BASE64, and 3,072
+/// raw bytes encode to exactly 4,096 characters. Chunking the raw input at a
+/// multiple of three rather than chunking the encoded output is the whole reason
+/// this constant is stated in raw bytes: a chunk boundary that lands mid-group
+/// emits `=` padding into the middle of the stream, and kitty decodes the
+/// resulting payload to garbage rather than refusing it — silently, because
+/// every command GLOAM emits carries `q=2`.
+inline constexpr std::size_t kTransmitChunkPayloadBytes = 3072;
+
+/// The encoded size of one full chunk. `test/23base64/` pins the relationship.
+inline constexpr std::size_t kTransmitChunkBase64Bytes = 4096;
+
+/// Append a whole image transmission to `sink`.
+///
+/// Chunked when it has to be. The emitted forms, and there are only four, where
+/// ST is the string terminator (a backslash), as in `emit_placement` above:
+///
+///     one chunk     ESC _G  a=t,i=42,f=100,t=d,q=2      ; <base64>  ESC ST
+///     first of many ESC _G  a=t,i=42,f=100,t=d,m=1,q=2  ; <base64>  ESC ST
+///     middle        ESC _G  m=1,q=2                     ; <base64>  ESC ST
+///     last          ESC _G  m=0,q=2                     ; <base64>  ESC ST
+///
+/// Only the first chunk carries the control data; kitty associates the rest with
+/// the transfer in progress, which is why nothing after the first repeats `i=`.
+/// The golden literals in `test/26transmit/` are the authoritative forms.
+///
+/// `f=100` says the payload is PNG, and for PNG kitty takes the geometry from the
+/// datastream — so no `s=`/`v=` is sent. That is not a shortcut around upstream's
+/// "declare the extent, do not infer it" caveat: `png::encode` declares it, in
+/// IHDR, from the plate it was given. This function never sees a geometry and so
+/// cannot get one wrong.
+///
+/// `t=d` is direct transmission — the payload is in the escape sequence. The file
+/// and shared-memory media (upstream #111 / GL-A3) would change this key and
+/// nothing else about the shape.
+///
+/// Unlike `emit_placement` this CAN write bytes and then stop, but only in the
+/// sense that a multi-chunk transfer is many byte strings: every chunk it writes
+/// is complete and well-formed. The one refusal is checked before anything is
+/// written.
+[[nodiscard]] auto emit_transmit(emit::ByteSink& sink, std::span<const std::byte> payload,
+                                 std::uint32_t image_id) -> EmitResult;
 
 }  // namespace gloam::kitty
