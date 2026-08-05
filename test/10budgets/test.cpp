@@ -41,9 +41,13 @@
 #include "gloam/tuning.hpp"
 #include "gloam/world.hpp"
 
-// The one file in GLOAM that calls write(2). Reachable here because this test
-// directory owns its own wiring — see CMakeLists.txt.
+// The one file in GLOAM that calls write(2), and the two that carry §9's float
+// half. All three are reachable here because this test directory owns its own
+// wiring — see CMakeLists.txt. None of them is in gloam::lib, and none of them
+// includes RtAudio.
+#include "sfx.hpp"
 #include "tty_writer.hpp"
+#include "voice_mixer.hpp"
 
 using namespace gloam;
 
@@ -155,13 +159,27 @@ TEST_CASE("§11 timing budgets are declared", "[budget]") {
   // all three are measured below — the payload row on the real stream, the two
   // timing rows on a real encode and a real write(2).
   // PENDING M0: compose+diff+emit needs the compositor (§19 step 6).
-  // PENDING M2: the END-TO-END audio row needs a DEVICE. §19 step 9 landed the
-  //             ring, not the RtAudio stream, and "tick -> first sample" cannot
-  //             be measured without something producing samples. The part that
-  //             is decidable without a device — whether §9.2's chosen buffer can
-  //             fit inside the budget at all — is asserted in the case below
-  //             rather than left as prose. Narrowing this marker instead of
-  //             deleting it is the point: the row is not met yet.
+  // PENDING M2: the END-TO-END audio row STILL needs a DEVICE, and this marker
+  //             is narrowed rather than deleted because the row is still not
+  //             met.
+  //
+  //             WHAT LANDED SINCE THIS MARKER WAS LAST WRITTEN: gloam#4's second
+  //             half — the RtAudio stream, the resident arena and the mixer.
+  //             `Command::stamp` is now written by `DeviceSink::play` and read by
+  //             `mix::Mixer::render`, so the instrument exists end to end.
+  //
+  //             WHAT IS NOW ASSERTED WITHOUT A DEVICE, and was not before:
+  //               * §9.2's buffer choice fits the budget (the case below);
+  //               * the stamp -> mixed arithmetic is EXACT over a synthetic
+  //                 clock, and the three terms GLOAM owns fit inside 20 ms (the
+  //                 case after that, and test/28voicemix/ for the arithmetic
+  //                 itself).
+  //
+  //             WHAT REMAINS UNMEASURABLE HERE: the DEVICE's own contribution,
+  //             `RtAudio::getStreamLatency()`. Neither this project's dev box
+  //             nor a GitHub runner has /dev/snd, so the sink never leaves
+  //             DeviceState::NoDevice and there is no first sample to measure.
+  //             That is hardware, and it is the whole of what is left.
 }
 
 TEST_CASE("§9.2's audio buffer choice fits §11's latency budget", "[budget]") {
@@ -191,6 +209,68 @@ TEST_CASE("§9.2's audio buffer choice fits §11's latency budget", "[budget]") 
   // decision taken here, against this row, rather than a tweak in src/bin/.
   CHECK(kWorstCasePeriods * (kBufferFrames * 2) * 1000 / kSampleRateHz >
         budget::kMaxAudioLatencyMs);
+
+  // The constants above are §9.2's, written out. These are the ones src/bin/
+  // actually uses, and they must be the same numbers or this whole case is
+  // about a stream nobody opens.
+  STATIC_REQUIRE(sfx::kSampleRateHz == kSampleRateHz);
+  STATIC_REQUIRE(sfx::kBufferFrames == kBufferFrames);
+}
+
+TEST_CASE("§11's tick-to-first-sample, for the two terms GLOAM owns", "[budget][audio]") {
+  // NOT the end-to-end row — see the PENDING M2 marker above. The device's own
+  // latency is the third term and it needs hardware. What is measurable here is
+  // everything on GLOAM's side of the driver, through the REAL mixer.
+  //
+  // This case is possible only because `mix::Mixer::render` takes the current
+  // time as a PARAMETER rather than reading a clock. Over a synthetic clock the
+  // instrument's answer is an exact equality; a mixer that called
+  // steady_clock::now() itself could only ever be checked with a tolerance, and
+  // a tolerance on a 20 ms budget is most of the budget.
+  std::vector<float> arena(sfx::kArenaFrames);
+  std::array<sfx::Clip, audio::kSoundIdCount> clips{};
+  REQUIRE(sfx::synthesise(0x9105A3ULL, arena, std::span<sfx::Clip, audio::kSoundIdCount>{clips}));
+
+  mix::Mixer mixer{std::span<const float>{arena},
+                   std::span<const sfx::Clip, audio::kSoundIdCount>{clips}};
+  audio::Ring<> ring;
+
+  constexpr int kPeriodUs = sfx::kBufferFrames * 1'000'000 / sfx::kSampleRateHz;
+
+  // A command that just missed the current period waits one full period before
+  // the callback that will start it runs. That is the worst case for the term
+  // this instrument measures.
+  constexpr std::uint64_t kStamp = 1'000'000;
+  constexpr std::uint64_t kNow = kStamp + (std::uint64_t{kPeriodUs} * 1000ULL);
+
+  audio::Command command{};
+  command.sound = audio::SoundId::PartyFootfall;
+  command.gain = audio::kGainUnity;
+  command.stamp = kStamp;
+  REQUIRE(ring.try_push(command));
+
+  std::vector<float> out(std::size_t{sfx::kBufferFrames} * 2U, 0.0F);
+  mixer.render(ring, out, sfx::kBufferFrames, kNow);
+
+  REQUIRE(mixer.started() == 1);
+  // Exact, not approximate.
+  CHECK(mixer.worst_latency_ns() == kNow - kStamp);
+
+  // Queueing delay plus the two periods it takes for those samples to reach the
+  // driver's ear: three periods total, 16 ms, which is the same arithmetic the
+  // case above does from constants — but now taken from the instrument that will
+  // carry the real figure the day this runs on a machine with a sound card.
+  const std::uint64_t owned_us = (mixer.worst_latency_ns() / 1000ULL) + (2ULL * kPeriodUs);
+  INFO("GLOAM's own terms are " << owned_us << " us against a budget of "
+                                << budget::kMaxAudioLatencyMs << " ms");
+  CHECK(owned_us / 1000ULL <= static_cast<std::uint64_t>(budget::kMaxAudioLatencyMs));
+
+  // What is left for the driver, and it is not much. Stated as an assertion so
+  // that a future buffer-size change has to come past this line.
+  const std::uint64_t driver_budget_us =
+      (static_cast<std::uint64_t>(budget::kMaxAudioLatencyMs) * 1000ULL) - owned_us;
+  INFO("leaving " << driver_budget_us << " us for the device itself");
+  CHECK(driver_budget_us >= 3'000);
 }
 
 TEST_CASE("§11's residency cap, measured against a real manifest", "[budget]") {

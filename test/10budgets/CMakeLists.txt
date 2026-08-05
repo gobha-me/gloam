@@ -16,9 +16,19 @@
 #   * nothing else is supplied — main.cpp, both include dirs, Catch2 and the
 #     library are this file's business.
 
+#
+# It picks up src/bin/voice_mixer.cpp and src/bin/sfx.cpp for the same reason one
+# step further on: §11's tick-to-first-sample row is measured through the real
+# mixer, and the mixer is float and therefore cannot live in gloam::lib either.
+# Neither of those files includes RtAudio — which is what makes the row assertable
+# on a machine with no sound card, and is enforced by
+# `rtaudio-boundary-single-module`.
+
 add_executable(10budgets-test
   ${CMAKE_CURRENT_LIST_DIR}/../main.cpp
   ${PROJECT_SOURCE_DIR}/src/bin/tty_writer.cpp
+  ${PROJECT_SOURCE_DIR}/src/bin/voice_mixer.cpp
+  ${PROJECT_SOURCE_DIR}/src/bin/sfx.cpp
   ${SRCS}
 )
 

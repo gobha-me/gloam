@@ -46,6 +46,23 @@ add_test(
           ${PROJECT_SOURCE_DIR}/cmake/check_kitty_boundary.cmake
 )
 
+# SPEC §9.1, §9.3 — the same shape again, for the other third-party boundary:
+# "RtAudio stays behind one translation unit."
+#
+# It is a source check rather than a link check because that is where the rule
+# can be broken silently. Adding <RtAudio.h> to a second file compiles, links and
+# passes every other test in this suite — while quietly taking src/bin/sfx.cpp
+# and src/bin/voice_mixer.cpp out of test/27sfxarena/ and test/28voicemix/, which
+# is the whole of §9's float half leaving the sanitizer matrix.
+#
+# Unguarded, like its siblings: it reads the tree, not a target, so it runs even
+# in a -D<project>_BUILD_BIN=OFF configuration where RtAudio was never fetched.
+add_test(
+  NAME rtaudio-boundary-single-module
+  COMMAND ${CMAKE_COMMAND} -DPROJECT_ROOT=${PROJECT_SOURCE_DIR} -P
+          ${PROJECT_SOURCE_DIR}/cmake/check_rtaudio_boundary.cmake
+)
+
 # SPEC §19 step 5 — "Accept: two pipeline runs produce byte-identical packs."
 #
 # test/12pack/ asserts the same property in process; this runs the real binary
@@ -125,6 +142,31 @@ if (TARGET ${PROJECT_NAME}_replay)
             -P ${PROJECT_SOURCE_DIR}/cmake/check_audio_mute.cmake
   )
   set_tests_properties(audio-mute-identical PROPERTIES TIMEOUT 120)
+endif ()
+
+# SPEC §9.2 — "Device loss is a degradation, not a crash: sink goes silent, game
+# continues, message line reports it."
+#
+# The sibling of the gate above, and the only case in the suite that runs a
+# binary linked against RtAudio. It needs no device — it needs the ABSENCE of
+# one, which is what every machine this project builds on provides. See the
+# header of check_audio_device.cmake for what it does and does not cover.
+#
+# Guarded on the game binary rather than on the replay binary: this is the one
+# that opens a stream, and a -D<project>_BUILD_BIN=OFF configuration has neither.
+if (TARGET ${PROJECT_NAME})
+  add_test(
+    NAME audio-no-device-degrades
+    COMMAND ${CMAKE_COMMAND}
+            -DGLOAM=$<TARGET_FILE:${PROJECT_NAME}>
+            -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}
+            -P ${PROJECT_SOURCE_DIR}/cmake/check_audio_device.cmake
+  )
+  # RtAudio enumerating a backend on a host with no sound card is the hang risk —
+  # not a slow one, a blocking one, if a PulseAudio server is unreachable rather
+  # than refusing. Measured on this dev box: 89-108 ms per run over five runs
+  # against 84-91 ms muted, so the three runs here cost well under a second.
+  set_tests_properties(audio-no-device-degrades PROPERTIES TIMEOUT 120)
 endif ()
 
 file(GLOB TEST_DIRS ${CMAKE_CURRENT_LIST_DIR}/*)
@@ -248,6 +290,17 @@ endif ()
 # 98-107 ms over four runs, GCC 14 Debug).
 if (TEST 24deflate-test)
   set_tests_properties(24deflate-test PROPERTIES TIMEOUT 120)
+endif ()
+
+# And once more, for 15voicering's failure mode one layer up. `mix::Mixer::render`
+# drains the ring inside the real-time callback, and the drain is BOUNDED by the
+# ring's capacity for exactly this reason: an unbounded `while (try_pop(...))`
+# against a producer thread that never stops is a callback that never returns.
+# The case "the drain is bounded, so a busy producer cannot hold the callback
+# open" runs precisely that race, so a regression there does not fail this suite,
+# it hangs it. Measured: 21-26 ms over four runs, GCC 14 Debug.
+if (TEST 28voicemix-test)
+  set_tests_properties(28voicemix-test PROPERTIES TIMEOUT 120)
 endif ()
 
 # SET FIXTURE DEPENDENCIES
