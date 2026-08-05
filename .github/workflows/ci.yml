@@ -63,6 +63,24 @@ jobs:
           sudo ln -sf "/usr/bin/clang++-$CLANG_VERSION" /usr/local/bin/clang++
           clang++ --version
 
+      # SPEC §9.2's output stream. cmake/deps/rtaudio.cmake builds RtAudio's ALSA
+      # backend and nothing else, so it needs the headers; ubuntu-24.04 ships
+      # libasound2t64 (the runtime) but not the -dev package.
+      #
+      # HEADERS ONLY, AND THE RUNNER STILL HAS NO /dev/snd — which is the point
+      # rather than a limitation. The whole audio slice is written to degrade
+      # instead of crash on exactly this machine, and `audio-no-device-degrades`
+      # is the ctest case that proves it here, on every leg. Building RtAudio on
+      # all eight is deliberate too: it is the only third-party code in the tree,
+      # and this is the one chance to put both compilers and four sanitizers over
+      # it. The real-time path is never entered — open() bails at an empty
+      # getDeviceIds() before a stream thread exists — so the sanitizers audit
+      # GLOAM's code rather than ALSA's.
+      - name: Install ALSA headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libasound2-dev
+
       - name: Configure
         env:
           CXX: ${{ matrix.cxx }}   # default/sanitizer toolchains respect $CXX; clang.cmake selects clang itself
