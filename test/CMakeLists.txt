@@ -171,6 +171,26 @@ if (TARGET ${PROJECT_NAME})
   # still three orders of magnitude inside this timeout — the timeout is for a
   # BLOCKED enumeration, not a slow one.
   set_tests_properties(audio-no-device-degrades PROPERTIES TIMEOUT 120)
+
+  # THE ONLY TEST IN THE SUITE THAT RUNS A BINARY LINKED AGAINST RtAudio, and
+  # therefore the only one that drags an uninstrumented third-party thread into
+  # a sanitizer's view.
+  #
+  # RtAudio's constructor enumerates devices; alsa-lib's `default` PCM is routed
+  # through a PulseAudio plugin; libpulse spawns a `threaded-ml` thread; and TSan
+  # reports a race between `pa_mutex_lock` and `pa_xmalloc` in which no GLOAM
+  # frame, object or thread appears. Measured 5 of 6 runs on the dev box, so it
+  # is intermittent as well as third-party — the Clang thread leg passed the
+  # whole suite once by luck.
+  #
+  # Scoped to this ONE test rather than set globally or put in the toolchain,
+  # which is the whole point: test/15voicering/ and test/28voicemix/ exist to be
+  # audited by TSan over GLOAM's own ring and mixer, and they run on this same
+  # leg with no suppressions whatever. cmake/tsan-audio.supp says what it covers
+  # and what it must never cover.
+  set_tests_properties(audio-no-device-degrades PROPERTIES
+    ENVIRONMENT "TSAN_OPTIONS=suppressions=${PROJECT_SOURCE_DIR}/cmake/tsan-audio.supp"
+  )
 endif ()
 
 file(GLOB TEST_DIRS ${CMAKE_CURRENT_LIST_DIR}/*)

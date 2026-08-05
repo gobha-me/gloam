@@ -1,0 +1,70 @@
+# ThreadSanitizer suppressions for `audio-no-device-degrades`, and ONLY that test.
+#
+# ⚠ THIS FILE MUST NEVER SUPPRESS ANYTHING GLOAM WROTE. It is wired into exactly
+# one ctest case via that case's ENVIRONMENT property in test/CMakeLists.txt —
+# never into TSAN_OPTIONS globally, never into a toolchain file. Every other
+# suite on the thread leg, including test/15voicering/ and test/28voicemix/ whose
+# whole purpose is to be audited by TSan, runs with no suppressions at all.
+#
+# ── What is suppressed, and why it is not ours ──────────────────────────────
+#
+# `gloam --audio` calls `DeviceSink::open()`, which constructs an `RtAudio`.
+# RtAudio's constructor enumerates devices, and on this platform that reaches
+# alsa-lib — whose `default` PCM is routed through a PulseAudio plugin. libpulse
+# then spawns its own `threaded-ml` thread, and TSan reports a race between that
+# thread and the main one:
+#
+#   WARNING: ThreadSanitizer: data race
+#     Atomic read of size 1 by thread T1:
+#       #0 pthread_mutex_lock
+#       #1 pa_mutex_lock (libpulsecommon-16.1.so)
+#     Previous write of size 8 by main thread:
+#       #0 malloc
+#       #1 pa_xmalloc (libpulsecommon-16.1.so)
+#       #2 RtApi::getDeviceNames()
+#   SUMMARY: ThreadSanitizer: data race in pa_mutex_lock
+#
+# Every frame is inside libpulsecommon or RtAudio's call into it. No GLOAM
+# object, no GLOAM thread and no GLOAM memory appears on either side. The
+# libraries are uninstrumented, which is why TSan cannot see the synchronisation
+# they actually use — this is the classic uninstrumented-third-party report
+# rather than evidence of a bug in anything.
+#
+# It is also intermittent: measured 5 of 6 runs on this dev box, and the Clang
+# thread leg passed the whole suite once by luck. An intermittent red on one leg
+# is worse than a documented suppression, and worse than either is turning the
+# device probe off to please a tool.
+#
+# ── What this does NOT excuse ──────────────────────────────────────────────
+#
+# GLOAM's own audio threading is audited elsewhere and must stay that way:
+# test/15voicering/ runs two real threads over the SPSC ring, and
+# test/28voicemix/ runs a producer against `Mixer::render`. Both are pure
+# gloam::lib / src/bin code with no RtAudio linked, both run on the thread leg,
+# and neither loads this file. If a race is ever introduced in the ring or the
+# mixer, those are what catch it.
+#
+# ── One trap, if you edit the patterns below ───────────────────────────────
+#
+# A `called_from_lib` pattern that matches MORE THAN ONE loaded library is
+# FATAL, not a warning. This file first read `called_from_lib:libpulse`, which
+# is a prefix of both libraries here, and TSan refused to start:
+#
+#   ThreadSanitizer: called_from_lib suppression 'libpulse' is matched against
+#   2 libraries: '/lib/x86_64-linux-gnu/libpulse.so.0' and
+#   '/usr/lib/x86_64-linux-gnu/pulseaudio/libpulsecommon-16.1.so'
+#
+# The process then exits 66 with no race report at all — which looks exactly
+# like the race it was meant to suppress, and cost a second round of diagnosis.
+# Patterns must be specific enough to name one library.
+#
+# A pattern matching ZERO libraries is fine and silent, which is what makes this
+# safe on a CI runner that may have no PulseAudio installed: no pulse, no pulse
+# thread, no race, and an inert line here. Verified both ways.
+#
+# Remove this file the day RtAudio's enumeration stops reaching libpulse, or the
+# day the distro ships an instrumented libpulsecommon. Do not extend it.
+
+called_from_lib:libpulsecommon
+race:pa_mutex_lock
+race:pa_xmalloc

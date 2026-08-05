@@ -227,6 +227,21 @@ TEST_CASE("the drain is bounded, so a busy producer cannot hold the callback ope
     }
   }};
 
+  // WAIT FOR THE PRODUCER TO ACTUALLY BE PRODUCING before starting the renders.
+  //
+  // Without this the case is a race it can lose: on the Clang ASan leg the main
+  // thread finished all 100 renders before the producer was ever scheduled, and
+  // `pushed` was still 0 — so the assertion below failed while the code under
+  // test was perfectly fine. Worse than the red is what it means: a run where
+  // the producer never ran is a run where the contention this case exists to
+  // create never happened, and the case would have passed vacuously if the
+  // assertion had been written any weaker.
+  //
+  // The spin is bounded by the ctest TIMEOUT on this target, which is the same
+  // backstop the hang below relies on.
+  while (pushed.load(std::memory_order_relaxed) == 0) {
+  }
+
   // If `render` looped `while (try_pop(...))` this would never return, and the
   // ctest TIMEOUT on this target is what turns that into a red rather than a
   // wedged CI runner. The bound is the ring's capacity — see voice_mixer.cpp.
