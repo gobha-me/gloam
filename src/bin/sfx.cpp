@@ -146,13 +146,21 @@ auto render_thud(Rng& noise, std::span<float> out, std::int32_t cutoff_q16,
 }
 
 /// §6.1 guarantees line of sight when this plays, and `audio.hpp` puts its
-/// emission at melee-hit loudness (90). It is the loudest and longest thing in
-/// the arena, and the only tonal one.
+/// emission at melee-hit loudness (90).
+///
+/// It is the longest thing in the arena by a factor of six, and the only tonal
+/// one. It is NOT the loudest: measured peaks are party 0.704, monster 0.581,
+/// sting 0.483, so it is the quietest of the three by peak and by RMS. That is
+/// deliberate rather than an oversight — it is 600 ms of sustained tone against
+/// two 100 ms transients, and matching their peak would make it dominate every
+/// buffer it appears in. Its EMISSION (90 against a footfall's 14) is what makes
+/// it carry; that is §6.2's number, applied before this waveform is ever read.
 auto render_sting(Rng& noise, std::span<float> out) -> void {
   const auto total = static_cast<std::uint32_t>(out.size());
 
-  // Two partials a little over a fifth apart, both falling ~15% across the
-  // clip. Falling rather than steady because a steady pair reads as an alarm
+  // Two partials a shade under a fifth apart — 587/392 = 1.4974, against a just
+  // fifth's 1.5 — both falling ~15% across the clip. Falling rather than steady
+  // because a steady pair reads as an alarm
   // and §6.1's sting is a thing NOTICING you, which is a shorter, dropping
   // gesture.
   constexpr std::uint64_t kLowStartMilliHz = 392'000;   // ~G4
@@ -187,8 +195,9 @@ auto render_sting(Rng& noise, std::span<float> out) -> void {
     }
 
     const std::int64_t env = envelope_q16(i, total, 2);
-    // Two thirds of full scale: this is the loudest clip in the arena and it is
-    // mixed with up to fifteen others. Leaving headroom here costs less than
+    // A third of full scale (21,800 in Q16), which lands the finished clip at a
+    // measured peak of 0.483. It is mixed with up to fifteen others and it is
+    // the longest thing in the arena, so leaving headroom here costs less than
     // the limiter costs in test/28voicemix/.
     const std::int64_t voiced = ((tone * 21'800) >> 16U) + (air >> 1U);
     out[i] = to_float(static_cast<std::int32_t>((voiced * env) >> 16U));

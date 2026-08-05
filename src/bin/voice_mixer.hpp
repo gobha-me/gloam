@@ -128,8 +128,14 @@ class Mixer {
   /// `test/28voicemix/` that pins them apart.
   [[nodiscard]] auto refused() const noexcept -> std::uint64_t;
   [[nodiscard]] auto peak_voices() const noexcept -> std::uint32_t;
-  /// Output samples that hit the limiter. Sixteen unity-gain centred voices sum
-  /// to 16.0, so this is what stands between the mix and the DAC.
+  /// Output samples that hit the limiter, and what stands between the mix and
+  /// the DAC.
+  ///
+  /// The arithmetic, since the obvious version of it is wrong: `pan_to_lr`
+  /// returns `{0.5, 0.5}` at centre and the limiter is PER CHANNEL, so sixteen
+  /// unity-gain centred voices sum to **8.0** per channel, not 16.0. Against the
+  /// loudest clip in the arena (0.704) the worst real per-channel sum is 5.63 —
+  /// still more than five times over, which is the point.
   [[nodiscard]] auto clipped() const noexcept -> std::uint64_t;
   /// The largest `now_ns - Command::stamp` seen at the moment a voice started.
   /// GLOAM's half of §11's tick-to-first-sample row; the device's own latency is

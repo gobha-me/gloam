@@ -164,8 +164,12 @@ if (TARGET ${PROJECT_NAME})
   )
   # RtAudio enumerating a backend on a host with no sound card is the hang risk —
   # not a slow one, a blocking one, if a PulseAudio server is unreachable rather
-  # than refusing. Measured on this dev box: 89-108 ms per run over five runs
-  # against 84-91 ms muted, so the three runs here cost well under a second.
+  # than refusing. Measured on this dev box, ten warm runs each: 88-104 ms with
+  # --audio against 84-90 ms muted, so enumerating a device that is not there
+  # costs single-digit milliseconds and the three runs here cost well under a
+  # second. Under heavy load the same binary has been seen at 303 ms, which is
+  # still three orders of magnitude inside this timeout — the timeout is for a
+  # BLOCKED enumeration, not a slow one.
   set_tests_properties(audio-no-device-degrades PROPERTIES TIMEOUT 120)
 endif ()
 
@@ -298,7 +302,9 @@ endif ()
 # against a producer thread that never stops is a callback that never returns.
 # The case "the drain is bounded, so a busy producer cannot hold the callback
 # open" runs precisely that race, so a regression there does not fail this suite,
-# it hangs it. Measured: 21-26 ms over four runs, GCC 14 Debug.
+# it hangs it. Measured: 16-30 ms over thirty-five runs, GCC 14 Debug — quoted as
+# the full observed spread rather than the four samples it was first written
+# from, which happened to miss half of it.
 if (TEST 28voicemix-test)
   set_tests_properties(28voicemix-test PROPERTIES TIMEOUT 120)
 endif ()

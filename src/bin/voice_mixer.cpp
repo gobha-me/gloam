@@ -150,10 +150,12 @@ auto Mixer::render(audio::Ring<>& ring, std::span<float> out, std::uint32_t fram
 
   // ── Limit ────────────────────────────────────────────────────────────────
   //
-  // Sixteen unity-gain centred voices sum to 16.0. Two comparisons rather than
-  // std::clamp on floats, and counted rather than silent: a mix that clips is
-  // information about the tuning, and an instrument that hides it is how a
-  // distorted mix ships.
+  // Sixteen unity-gain centred voices sum to 8.0 PER CHANNEL — `pan_to_lr`
+  // gives each 0.5 a side, and this loop is per sample, so the per-channel
+  // figure is the one that matters. Two comparisons rather than std::clamp on
+  // floats, and counted rather than silent: a mix that clips is information
+  // about the tuning, and an instrument that hides it is how a distorted mix
+  // ships.
   std::uint64_t clipped = 0;
   for (std::size_t i = 0; i < samples; ++i) {
     if (out[i] > 1.0F) {

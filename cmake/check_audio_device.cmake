@@ -165,14 +165,33 @@ endif ()
 # proves it over a recorded replay; this proves the weaker but broader claim that
 # turning audio on does not move any other instrument.
 #
-# The cold-start row is excluded because it is a TIMING measurement and varies
-# between any two runs — measured at 78-109 ms across eight runs when it landed.
-# Excluding it here is the alternative to making this gate flaky; the row has its
-# own assertions in test/10budgets/.
+# TWO rows are excluded, and the second one is not obvious.
+#
+# The `cold start` row is a TIMING measurement and varies between any two runs —
+# 78-109 ms across eight runs when it landed. That much is expected.
+#
+# The `write path` row has to go too, and finding out why cost a red matrix leg.
+# It reports the BYTE COUNT of the instrument block, and the instrument block
+# CONTAINS the cold-start row — so when that timing crosses from two digits to
+# three, the block grows by one byte and the two totals stop matching.
+#
+# The first version of this comment said GCC 14 "measures 80-91 ms here and never
+# straddles it" while GCC 13 is slow enough to land on both sides. That was a
+# tidy story built on ten quiet-box samples and it is wrong: over twenty runs on
+# a loaded dev box GCC 14 measures 86-303 ms, with eight of twenty above 100.
+# NOTHING here reliably stays on one side of that boundary. The gate happened to
+# fail on GCC 13 first because that leg ran first, not because of the compiler.
+#
+# Which makes the exclusion more necessary rather than less: a gate that fails
+# for a reason unrelated to what it tests is worse than no gate, and a
+# wall-clock digit count is exactly such a reason. Both rows keep their own
+# assertions in test/10budgets/.
 string(REGEX REPLACE "\naudio \\(SPEC 9.*" "" AUDIO_HEAD "${AUDIO_OUT}")
 string(REGEX REPLACE "\naudio \\(SPEC 9.*" "" MUTE_HEAD "${MUTE_OUT}")
-string(REGEX REPLACE "  cold start[^\n]*\n" "" AUDIO_HEAD "${AUDIO_HEAD}")
-string(REGEX REPLACE "  cold start[^\n]*\n" "" MUTE_HEAD "${MUTE_HEAD}")
+foreach (VARIABLE AUDIO_HEAD MUTE_HEAD)
+  string(REGEX REPLACE "  cold start[^\n]*\n" "" ${VARIABLE} "${${VARIABLE}}")
+  string(REGEX REPLACE "  write path[^\n]*\n" "" ${VARIABLE} "${${VARIABLE}}")
+endforeach ()
 
 if (NOT AUDIO_HEAD STREQUAL MUTE_HEAD)
   message(FATAL_ERROR

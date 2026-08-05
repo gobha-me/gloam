@@ -43,6 +43,40 @@ using namespace gloam;
 //
 // This is also the second reason src/bin/audio_device.cpp is not in this target:
 // these operators are global, so anything else linked here would be counted too.
+//
+// ── AND IT CANNOT EXIST UNDER ThreadSanitizer ──────────────────────────────
+//
+// TSan's runtime replaces the global operators itself, and Clang's copy defines
+// them STRONGLY: linking this file against libclang_rt.tsan_cxx gives
+// "multiple definition of `operator new(unsigned long)'" and the target does not
+// build at all. GCC's TSan tolerated it (its definitions are weak) and Clang's
+// ASan tolerated it, so this showed up on exactly ONE leg of eight — which is
+// the argument for running the whole matrix rather than a representative corner
+// of it.
+//
+// The guard below covers BOTH TSan implementations rather than only the one that
+// breaks. Narrowing it to `__clang__` would keep the case alive on the GCC TSan
+// leg, and was rejected: the claim is not compiler-specific, six other legs
+// prove it, and a workaround keyed on which vendor's runtime happens to use weak
+// symbols is exactly the kind of thing that rots without anyone noticing.
+//
+// The case below therefore SKIPs under TSan rather than compiling to nothing.
+// A vanished test that still reports green is the failure mode this project
+// spends most of its effort on; a skip says so in the ctest output. The claim
+// itself is not compiler-specific, so proving it on the other seven legs is
+// proof enough.
+#if defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define GLOAM_TSAN_ACTIVE 1
+#endif
+#endif
+#if defined(__SANITIZE_THREAD__)
+#define GLOAM_TSAN_ACTIVE 1
+#endif
+#ifndef GLOAM_TSAN_ACTIVE
+#define GLOAM_TSAN_ACTIVE 0
+#endif
+
 namespace {
 std::atomic<bool> g_counting{false};
 std::atomic<std::uint64_t> g_allocations{0};
@@ -62,6 +96,7 @@ struct CountAllocations {
 };
 }  // namespace
 
+#if !GLOAM_TSAN_ACTIVE
 auto operator new(std::size_t size) -> void* {
   if (g_counting.load(std::memory_order_relaxed)) {
     g_allocations.store(g_allocations.load(std::memory_order_relaxed) + 1,
@@ -74,6 +109,7 @@ auto operator new(std::size_t size) -> void* {
 
 auto operator delete(void* memory) noexcept -> void { std::free(memory); }
 auto operator delete(void* memory, std::size_t) noexcept -> void { std::free(memory); }
+#endif
 
 namespace {
 
@@ -123,6 +159,12 @@ struct Rig {
 }  // namespace
 
 TEST_CASE("render allocates nothing", "[mix]") {
+#if GLOAM_TSAN_ACTIVE
+  // Not silently compiled away — see the banner above the counter. TSan owns the
+  // global operators on this leg, so the instrument cannot exist here; the other
+  // seven legs run it.
+  SKIP("ThreadSanitizer defines the global operator new, so the counter cannot be installed");
+#else
   Rig rig;
   auto mixer = rig.make_mixer();
 
@@ -150,6 +192,7 @@ TEST_CASE("render allocates nothing", "[mix]") {
     delete probe;
   }
   CHECK(control == 1);
+#endif
 }
 
 TEST_CASE("a full ring drains in one render", "[mix]") {
@@ -468,10 +511,17 @@ TEST_CASE("a producer thread and the render loop agree on every command", "[mix]
   // (every slot busy with something at least as loud).
   //
   // This assertion is why `Mixer::refused` exists. It was first written as
-  // `started == accepted`, and it failed 16 == 317: every command here carries
-  // the same gain, so after the first sixteen filled the slots the rest were
-  // dropped on the floor and counted nowhere. That is the footstep-nobody-hears
-  // failure this suite is supposed to be looking for, and the mixer had it.
+  // `started == accepted`, and it failed with the left side pinned at 16 — the
+  // voice-slot count — against a right side in the low hundreds: every command
+  // here carries the same gain, so after the first sixteen filled the slots the
+  // rest were dropped on the floor and counted nowhere. That is the
+  // footstep-nobody-hears failure this suite is supposed to be looking for, and
+  // the mixer had it.
+  //
+  // Only the 16 is deterministic. How many commands the producer gets through
+  // before the consumer drains is a race — measured 192 to 394 accepted across
+  // sixteen runs — which is why the assertions below are accounting identities
+  // rather than counts.
   CHECK(accepted.load() + rig.ring.dropped() == kTotal);
   CHECK(mixer.started() + mixer.refused() == accepted.load());
   // Sixteen slots, all filled by equally loud voices: nothing can displace

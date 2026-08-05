@@ -284,9 +284,11 @@ TEST_CASE("the two footfalls differ by timbre, not merely by length", "[sfx]") {
   //
   // The assertion is the RATIO rather than either number, because a ratio
   // survives a retune that keeps the distinction and fails one that does not.
-  // It is also scale-invariant, which was checked rather than assumed: adding
-  // the headroom scaling that stopped the monster's footfall clipping moved
-  // every peak and left all three tilts unchanged.
+  // It is also scale-invariant, which was checked rather than assumed: scaling
+  // a clip by 0.5, 2, 0.1 and 0.001 leaves its tilt at 435, and the headroom
+  // scaling that stopped the monster's footfall clipping moved the two footfall
+  // peaks (0.887 -> 0.704 and 1.000 -> 0.581) while leaving all three tilts
+  // unchanged. The sting takes no headroom parameter and its peak did not move.
   CHECK(party_tilt > 2 * monster_tilt);
 
   // Neither may be silent, or the ratio above is a comparison of two zeroes.

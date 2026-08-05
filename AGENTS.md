@@ -150,9 +150,14 @@ you if you forget.
   `undefined.cmake`. To add a configuration, add a file that `include()`s
   `default.cmake` and layers its flags — don't edit `default.cmake` to force a
   specific setup.
-- **Library pattern** in `src/lib/`: a compiled `STATIC` lib by default
-  (toggle `${PROJECT_NAME}_BUILD_LIB`), public API in `include/lib.hpp`, with the
-  header-only (`INTERFACE`) variant shown commented. Flipping to `INTERFACE`
+- **Library pattern** in `src/lib/`: a compiled `STATIC` lib, unconditionally.
+  **GLOAM dropped `${PROJECT_NAME}_BUILD_LIB` and the header-only (`INTERFACE`)
+  variant**, and `src/lib/CMakeLists.txt` says why: `src/bin/` is a thin consumer
+  of the simulation core, so a build with the library switched off produces a
+  link error rather than an application, and a knob that cannot work is worse
+  than no knob. The CI job that covered that path went with it. The paragraph
+  below describes the upstream template, which keeps both. Flipping to
+  `INTERFACE`
   means every function in that header has to become an `inline` definition, or
   nothing that calls it links. Keep both patterns present and buildable — the
   template teaches by having both. That is a rule for *this* repo; a project
@@ -179,7 +184,9 @@ you if you forget.
 - **Tests are auto-discovered**: `test/CMakeLists.txt` loops over `test/*/`.
   A new test is just `test/<name>/test.cpp` (no CMakeLists needed); it gets
   `main()` from `test/main.cpp`, plus Catch2 and `${PROJECT_NAME}::lib` behind an
-  `if (TARGET ...)` guard, so `-D<PROJECT>_BUILD_LIB=OFF` still configures. Add a
+  `if (TARGET ...)` guard. That guard is inherited defensive machinery here — the
+  option it protected against is gone, so the false branch is unreachable in this
+  repo and is kept only so the spelling matches the template's. Add a
   `CMakeLists.txt` in the dir only if the test needs custom build control — that
   dir then owns its own wiring, the library link included. Directory names sort
   the glob, which sets registration order, not execution order; use fixtures or

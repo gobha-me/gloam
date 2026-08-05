@@ -784,14 +784,16 @@ Two more, which are design questions rather than factual errors:
     code: the two-plane split is still right for the reason it gave, and the
     MSB-first bit order really is PNG's, so the merge never reverses anything.
 
-20. **§9 names three sounds and describes none of them.** Mirrored as
+20. **§9 names sounds and describes none of them.** Mirrored as
     [#40](https://github.com/gobha-me/gloam/issues/40). §9.3 fixes the
     *interface* — `Sink::play(SoundId, Gain, Pan)` — and §6.2 fixes how loud
-    each is. Nothing anywhere says what one is. §10's asset table comes closest
-    and describes a *pipeline*: "Ambience, footfalls, stings | generated SFX |
-    Normalise, trim, tag with an attenuation class, decode to raw PCM into the
-    pack". That is a process, not content, and the device could not be built
-    without content.
+    each is. Nothing anywhere says what one *is*. §9's own intro names "Monster
+    footfalls, door noise and distance attenuation" and §10's asset table names
+    "Ambience, footfalls, stings"; neither enumerates the three `SoundId`s the
+    code implements, and neither mentions a party footfall. §10 comes closest to
+    content and describes a *pipeline*: "Normalise, trim, tag with an attenuation
+    class, decode to raw PCM into the pack". That is a process, not content, and
+    the device could not be built without content.
 
     Decided in `src/bin/sfx.cpp`, and all four halves are decisions rather than
     readings:

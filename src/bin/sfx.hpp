@@ -46,12 +46,15 @@
 ///
 /// WHAT §9 DOES NOT SAY, AND THIS FILE THEREFORE DECIDES
 ///
-/// §9 names three sounds and describes none of them. §10's asset table gives a
-/// pipeline — "Normalise, trim, tag with an attenuation class, decode to raw PCM
-/// into the pack" — and no content. So the durations below, the choice of noise
-/// for footfalls and tone for the sting, and the fact that the monster's
-/// footfall differs from yours by TIMBRE are decisions taken here rather than
-/// read. See UPSTREAM.md's "Corrections to the design document" and gloam#40.
+/// §9 names sounds — "Monster footfalls, door noise and distance attenuation" —
+/// and DESCRIBES none of them. It never enumerates the three `SoundId`s this
+/// file fills, and it never mentions a party footfall at all. §10's asset table
+/// gives a pipeline — "Normalise, trim, tag with an attenuation class, decode to
+/// raw PCM into the pack" — and no content. So the durations below, the choice
+/// of noise for footfalls and tone for the sting, and the fact that the
+/// monster's footfall differs from yours by TIMBRE are decisions taken here
+/// rather than read. See UPSTREAM.md's "Corrections to the design document" and
+/// gloam#40.
 ///
 /// The timbre point is the load-bearing one. `audio.hpp` gives a monster's
 /// footfall `kMonsterFootfallEmission = 14`, the same leather-step loudness as

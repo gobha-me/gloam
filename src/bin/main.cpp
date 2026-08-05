@@ -147,15 +147,21 @@ auto print_instruments() -> bool {
   // overrun turns on.
   //
   // What it prints, re-measured rather than asserted: 70 B, and a headroom of
-  // 29. §4.2's own slot inventory averages 66.5 B and 30, so this probe is
-  // about 5% PESSIMISTIC — three-digit ids and two-digit cell coordinates are
-  // the widest fields a real placement carries, not the mean ones. Erring that
-  // way is the right direction for a budget that is already over, and it is not
-  // the same thing as landing on the mean.
+  // 29. The minimal case really is 64 B and a headroom of 32.
   //
-  // (This comment used to claim the probe printed the mean. It never did; the
-  // numbers it quoted described neither the code above nor the minimal case it
-  // was contrasting against.)
+  // Averaged over §4.2's 71 resident images through the real emitter, a
+  // placement is 67.4-67.8 B depending on how the cell columns are sampled — a
+  // headroom of 30 on every basis tried. So this probe is about 3% PESSIMISTIC:
+  // three-digit ids and two-digit cell coordinates are the widest fields a real
+  // placement carries, not the mean ones. Erring that way is the right direction
+  // for a budget that is already over, and it is not the same thing as landing
+  // on the mean.
+  //
+  // (This comment has been wrong twice. It first claimed the probe printed the
+  // mean, quoting numbers that described neither this code nor the minimal case.
+  // The correction then quoted "66.5 B" as §4.2's average, which appears nowhere
+  // in the spec — §4.2 is a table of image COUNTS with no byte figures at all —
+  // and is the midpoint of the observed 63-70 B range rather than its mean.)
   emit::ByteSink probe;
   const kitty::Placement sample{
       .image_id = 103,
@@ -475,12 +481,25 @@ void trace_patrol(audio::Sink* voices, bool paced) {
     // §5.1's pump, at wall-clock rate, and ONLY when a device is actually
     // draining the ring.
     //
-    // Unpaced, all 95 ticks land inside one 5.33 ms callback period: the
-    // 64-slot ring overflows and §11's zero-drop row goes red on a machine that
-    // is working perfectly. Gated on a RUNNING sink rather than on `voices`
-    // alone so that the no-device path — every machine this project builds on —
-    // keeps the wall time it always had, and so `audio-no-device-degrades` stays
-    // a fast test rather than a ten-second one.
+    // Unpaced, all 95 ticks land inside one 5.33 ms callback period, and the
+    // trace stops being a corridor you can hear. MEASURED rather than argued,
+    // because the first version of this comment claimed the 64-slot ring would
+    // overflow and that was simply false: the 95 ticks emit NINETEEN voice
+    // commands in total, which fits the ring three times over. Nothing is
+    // dropped.
+    //
+    // What actually happens to those nineteen arriving at once — measured by
+    // pushing the trace's OWN commands through the real mixer, not nineteen
+    // synthetic ones — is `started 18, stolen 2, refused 1, 370 samples
+    // clipped`, peaking at exactly 1.0. Sixteen voice slots, so three of the
+    // nineteen are displaced or never sound, and the rest pile into one buffer
+    // hard enough to sit on the limiter. §11's drop budget is untouched; what is
+    // lost is the thing the trace exists to demonstrate.
+    //
+    // Gated on a RUNNING sink rather than on `voices` alone so the no-device
+    // path — every machine this project builds on — keeps the wall time it
+    // always had, and so `audio-no-device-degrades` stays a fast test rather
+    // than a ten-second one.
     if (paced) std::this_thread::sleep_for(std::chrono::milliseconds{1000 / replay::kTickHz});
 
     const auto& mon = world.monsters[0];

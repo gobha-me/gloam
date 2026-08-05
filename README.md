@@ -397,10 +397,14 @@ cannot tell them apart. Measured spectral tilt is party 435, monster 120, sting
 passes and one that loses it does not.
 
 Two things the tests found that reading did not. `Mixer::refused` exists because
-the threaded case was first written as `started == accepted` and failed
-**16 == 317**: every command in it carries the same gain, so once sixteen slots
-were full the rest were discarded and counted *nowhere* — not by `Ring::dropped`
-(the command arrived), not by `stolen` (nothing was displaced). And
+the threaded case was first written as `started == accepted` and failed with the
+left side pinned at **16** — the voice-slot count — against a right side in the
+low hundreds. (The right side is a race outcome and varies run to run, 192–394
+across sixteen runs; only the 16 is deterministic, and it is the half that
+matters.) Every command in that case carries the same gain, so once sixteen
+slots were full the rest were discarded and counted *nowhere* — not by
+`Ring::dropped` (the command arrived), not by `stolen` (nothing was displaced).
+And
 `MonsterFootfall` peaked at exactly **1.0000**, flat-topped at the source by the
 clamp in `to_float` — inside the range the "every sample is finite" case checks,
 and audibly distorted. The mixer's limiter is for the *sum* of voices and cannot
@@ -673,9 +677,10 @@ ALSA backend needs them to compile and the runner has no `/dev/snd` to use them
 with. That is the intended shape rather than a shortfall — §9's whole device path
 is written to degrade instead of crash on exactly such a machine, and
 `audio-no-device-degrades` is the ctest case that proves it on every leg. The
-`consumer`, `public dependency` and `version-parse-selftest` jobs need nothing:
-all three configure with the executable off, which prunes RtAudio from the
-dependency list before it is ever fetched.
+`consumer` and `public dependency` jobs need nothing either: both configure with
+the executable off, which prunes RtAudio from the dependency list before it is
+ever fetched. `version-parse-selftest` needs nothing because it configures
+nothing at all — it is a `cmake -P` script with no compiler and no project.
 
 A change that only builds on one compiler turns that compiler's jobs red, so a
 one-sided break is visible on the PR.
