@@ -36,6 +36,7 @@ diagnostic rather than a game. What exists is the deterministic simulation core:
 | Patrol routes, the movement pump, and the monster you can hear | §6.4, §9 |
 | The pathfinder, the pursuit, and the walk home | §6.1, §5.2 |
 | The transmit path: indexed PNG, DEFLATE, and the cold-start upload | §4.1, §10, §11 |
+| The audio device: the RtAudio stream, the resident arena, and the mixer | §9.1, §9.2, §9.3 |
 
 The **compositor** is still blocked upstream — see [UPSTREAM.md](UPSTREAM.md).
 termforge stretches a placed image to fill its cell rect and states that scaling
@@ -345,11 +346,85 @@ assertion in either direction, so it is measured and printed rather than
 asserted, and [#36](https://github.com/gobha-me/gloam/issues/36) carries the
 escape route.
 
-Still unstarted: the **RtAudio device** — the stream, the resident PCM and the
-mixer. It is deliberately a separate change, because neither a GitHub runner nor
-this project's dev box has an audio device, so it can be compiled but not
-observed. §11's tick-to-first-sample row stays `PENDING` until it lands, and says
-so rather than reporting a number it cannot measure.
+**And now it makes a sound.** The other half of
+[#4](https://github.com/gobha-me/gloam/issues/4) — the RtAudio stream, the
+resident PCM arena and the mixer — is build-order step 9's remainder, and the
+only unblocked step left on the critical path.
+
+The constraint it is shaped around has not changed: **neither a GitHub runner nor
+this project's dev box has an audio device.** What changed is the answer to it.
+Everything observable without hardware is put where the sanitizer matrix can see
+it, and what is left is as small as it can be made:
+
+| | RtAudio | Under the eight legs |
+| --- | --- | --- |
+| `src/bin/sfx.cpp` — the arena | no | yes, via `test/27sfxarena/` |
+| `src/bin/voice_mixer.cpp` — the callback's body | no | yes, via `test/28voicemix/` |
+| `src/bin/audio_device.cpp` — the stream | **the only file in the tree** | compiled only |
+
+`mix::Mixer::render` takes the ring, the buffer, the frame count and **the
+current time** as parameters and owns no thread, so a test calls it on the main
+thread with the clock of its choosing. That is why the latency instrument is
+asserted with `==` rather than a tolerance, and why 34 new cases cover §9's float
+half on a machine with no sound card. `rtaudio-boundary-single-module` is a
+source-level grep, in the shape of `kitty-boundary-single-module`, that keeps the
+split from eroding — because adding the include to a second file compiles, links,
+passes, and quietly takes both of those suites out of the matrix.
+
+The missing device turns out to be a **fixture rather than an obstacle**. §9.2's
+*"device loss is a degradation, not a crash: sink goes silent, game continues,
+message line reports it"* is the one row of that section a machine with no sound
+card can verify for real, so `audio-no-device-degrades` runs the real binary
+against real RtAudio and asserts it exits 0, names which degradation happened,
+drops nothing, and synthesises a bit-identical arena twice. A mock would have
+proved none of that.
+
+That last row is not decoration. `DeviceSink::play` returns early unless the
+stream is `Running`, and the reason is written in `audio.hpp` about `NullSink`:
+*"a null sink owning a ring nobody drains would report drops on any machine
+without a sound card, and §11's drop budget would then be measuring the absence
+of a device rather than the correctness of the ring."* Every runner is that
+machine.
+
+§9 names three sounds and describes none of them — §10's asset table specifies a
+*pipeline*, not content — so four things were decided rather than read, and they
+are `UPSTREAM.md` items 20 and 21 with a mirrored issue. The load-bearing one is
+that the monster's footfall differs from yours by **timbre**: `audio.hpp` gives
+it `kMonsterFootfallEmission = 14`, the same leather-step loudness as your own,
+deliberately — so at equal distance the two arrive at equal *gain* and gain
+cannot tell them apart. Measured spectral tilt is party 435, monster 120, sting
+56, and the assertion is the **ratio**, so a retune that keeps the distinction
+passes and one that loses it does not.
+
+Two things the tests found that reading did not. `Mixer::refused` exists because
+the threaded case was first written as `started == accepted` and failed with the
+left side pinned at **16** — the voice-slot count — against a right side in the
+low hundreds. (The right side is a race outcome and varies run to run, 192–394
+across sixteen runs; only the 16 is deterministic, and it is the half that
+matters.) Every command in that case carries the same gain, so once sixteen
+slots were full the rest were discarded and counted *nowhere* — not by
+`Ring::dropped` (the command arrived), not by `stolen` (nothing was displaced).
+And
+`MonsterFootfall` peaked at exactly **1.0000**, flat-topped at the source by the
+clamp in `to_float` — inside the range the "every sample is finite" case checks,
+and audibly distorted. The mixer's limiter is for the *sum* of voices and cannot
+undo that.
+
+The dependency needed two defects worked around, both verified rather than
+inferred, and both in `UPSTREAM.md` item 23. RtAudio's CMake package advertises
+its **libtool ABI version** — 5.2.0 reports 6.0.2, 6.0.1 reports 7.0.0, with
+`AnyNewerVersion` — so `find_package(RtAudio 6)` accepts 5.2.0, whose
+`openStream` *throws* where this code checks a return value. And its install
+rules read `${CMAKE_BINARY_DIR}` for files it wrote to
+`${CMAKE_CURRENT_BINARY_DIR}`, which breaks `cmake --install` under FetchContent
+with no option to disable. So `cmake/deps/rtaudio.cmake` takes the sources and
+owns the compile line: one static target, ALSA only, no install rules to leak.
+
+§11's tick-to-first-sample row stays **`PENDING`**, and its marker is *narrowed*
+rather than deleted. `Command::stamp` is written by `DeviceSink::play` and read
+by the mixer, the arithmetic is asserted exactly over a synthetic clock, and the
+only term left is `RtAudio::getStreamLatency()` — the driver's own, which is
+hardware. The row is not met, and it says so.
 
 ## Design
 
@@ -384,12 +459,14 @@ Three commitments shape almost every file:
 design/           the specification the code cites — a snapshot; see design/README.md
 include/gloam/    the deterministic core's public headers, plus sixteen off-umbrella
 src/lib/          its implementation — standard library only, no I/O, no clock
-src/bin/          the diagnostic binary, gloam_bake and gloam_replay; termforge
-                  lands here too
+src/bin/          the diagnostic binary, gloam_bake and gloam_replay; the SFX
+                  synthesiser, the mixer and the RtAudio device, which reaches
+                  exactly one translation unit (§9.1); termforge lands here too
 test/             property tests (§13.3) and budget assertions (§11)
 cmake/            the template's build machinery, plus check_layer_z.cmake (§4.5),
                   check_kitty_boundary.cmake (§16), check_pack_repro.cmake (§10),
-                  check_replay_determinism.cmake (§12) and check_audio_mute.cmake (§9)
+                  check_replay_determinism.cmake (§12), check_audio_mute.cmake (§9.2),
+                  check_rtaudio_boundary.cmake (§9.1) and check_audio_device.cmake (§9.2)
 ```
 
 Sixteen headers in `include/gloam/` are not simulation and are deliberately left
@@ -581,9 +658,6 @@ pull request, enforcing the "both compilers, always" rule:
 * **GCC and Clang** ×
 * the **default** toolchain plus every sanitizer (**address**, **thread**,
   **undefined**) — 8 build/test jobs in all,
-* a **library disabled** job, covering the `-D<PROJECT>_BUILD_LIB=OFF` path the
-  matrix never takes — it installs as well as builds, and asserts the prefix
-  gets the executable and nothing else,
 * two **consumer** jobs (one per compiler) building `example/consumer/` against
   this project three ways — the only coverage of the consumed, not-top-level
   path,
@@ -591,6 +665,22 @@ pull request, enforcing the "both compilers, always" rule:
   fetched dependency and checks the install/export files survive it — the one
   shape this project cannot exercise as itself,
 * plus a fast, dependency-free `version-parse-selftest` job.
+
+(This list used to name a **library disabled** job as well. That job was removed
+along with the `-D<PROJECT>_BUILD_LIB=OFF` option it covered — `src/bin/` is a
+thin consumer of the simulation core, so a build without the library is a link
+error rather than an application, and `ci.yml` carries the reasoning where the
+job was. The entry outlived the job by several releases.)
+
+The 8 build jobs install **`libasound2-dev`**, and only the headers: RtAudio's
+ALSA backend needs them to compile and the runner has no `/dev/snd` to use them
+with. That is the intended shape rather than a shortfall — §9's whole device path
+is written to degrade instead of crash on exactly such a machine, and
+`audio-no-device-degrades` is the ctest case that proves it on every leg. The
+`consumer` and `public dependency` jobs need nothing either: both configure with
+the executable off, which prunes RtAudio from the dependency list before it is
+ever fetched. `version-parse-selftest` needs nothing because it configures
+nothing at all — it is a `cmake -P` script with no compiler and no project.
 
 A change that only builds on one compiler turns that compiler's jobs red, so a
 one-sided break is visible on the PR.

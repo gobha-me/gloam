@@ -16,13 +16,16 @@
 #include <unistd.h>  // STDOUT_FILENO — do not lean on libstdc++ leaking it
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdio>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include "gloam/budgets.hpp"
@@ -37,7 +40,10 @@
 #include "gloam/plate.hpp"
 #include "gloam/png.hpp"
 #include "gloam/replay.hpp"
+#include "audio_device.hpp"
+#include "sfx.hpp"
 #include "tty_writer.hpp"
+#include "voice_mixer.hpp"
 
 namespace {
 
@@ -137,9 +143,25 @@ auto print_instruments() -> bool {
   // The field values are REPRESENTATIVE rather than minimal, and that is the
   // difference between a useful line and a flattering one. Every integer here
   // is `to_chars`'d, so an id of 1 at cell (0,0) is the cheapest placement that
-  // can exist — measuring it would print 64 B and derive a headroom of 32, when
-  // §4.2's own slot inventory measures 66.5 B and 30. A 6% optimistic figure on
-  // the exact quantity gloam#26's overrun turns on is worse than no figure.
+  // can exist, and measuring THAT would flatter the exact quantity gloam#26's
+  // overrun turns on.
+  //
+  // What it prints, re-measured rather than asserted: 70 B, and a headroom of
+  // 29. The minimal case really is 64 B and a headroom of 32.
+  //
+  // Averaged over §4.2's 71 resident images through the real emitter, a
+  // placement is 67.4-67.8 B depending on how the cell columns are sampled — a
+  // headroom of 30 on every basis tried. So this probe is about 3% PESSIMISTIC:
+  // three-digit ids and two-digit cell coordinates are the widest fields a real
+  // placement carries, not the mean ones. Erring that way is the right direction
+  // for a budget that is already over, and it is not the same thing as landing
+  // on the mean.
+  //
+  // (This comment has been wrong twice. It first claimed the probe printed the
+  // mean, quoting numbers that described neither this code nor the minimal case.
+  // The correction then quoted "66.5 B" as §4.2's average, which appears nowhere
+  // in the spec — §4.2 is a table of image COUNTS with no byte figures at all —
+  // and is the midpoint of the observed 63-70 B range rather than its mean.)
   emit::ByteSink probe;
   const kitty::Placement sample{
       .image_id = 103,
@@ -236,6 +258,81 @@ auto print_instruments() -> bool {
   return failure.error == tty::WriteError::Closed;
 }
 
+/// SPEC 9 — what the audio subsystem did this run.
+///
+/// Printed every run, like the block above and for the same reason: an
+/// instrument behind a flag is an optional instrument. It is printed AFTER the
+/// traces rather than beside the other instruments because most of what it
+/// reports is a count of things the traces did, and a counter printed before the
+/// work is a constant wearing a counter's clothes.
+///
+/// THE ARENA DIGEST IS THE LOAD-BEARING ROW ON THIS MACHINE. Neither the dev box
+/// nor a CI runner has an output device, so `voices` and `latency` are
+/// structurally zero here and prove nothing on their own. The digest proves the
+/// synthesiser ran, and that two runs of the same binary produced the same
+/// 153,600 B — which is the one claim about §9.2's resident arena that a
+/// device-less machine can actually make.
+auto print_audio(const device::DeviceSink* sink, std::span<const float> arena) -> void {
+  std::printf("\naudio (SPEC 9, build-order step 9)\n");
+  std::printf("  stream        %d Hz float32, %d-frame buffer (%d us), %d ch\n",
+              sfx::kSampleRateHz, sfx::kBufferFrames,
+              (sfx::kBufferFrames * 1'000'000) / sfx::kSampleRateHz, sfx::kChannels);
+
+  if (sink == nullptr) {
+    std::printf("  device        muted (--audio opens a device; --mute is the default)\n");
+    std::printf("  arena         not synthesised - nothing would have read it\n");
+    return;
+  }
+
+  // FNV-1a over the raw arena bytes. Not a cryptographic claim and not
+  // `pack_sha256` — this arena is deliberately outside that digest (gloam#23) —
+  // just enough to make "the same seed produced the same samples" observable
+  // from outside the process, which is what `audio-arena-deterministic` checks.
+  std::uint64_t digest = 0xCBF29CE484222325ULL;
+  const auto* bytes = reinterpret_cast<const unsigned char*>(arena.data());
+  for (std::size_t i = 0; i < arena.size_bytes(); ++i) {
+    digest = (digest ^ bytes[i]) * 0x100000001B3ULL;
+  }
+
+  std::array<char, 128> line{};
+  const auto written = sink->describe(line);
+  std::printf("  device        %.*s\n", static_cast<int>(written), line.data());
+
+  std::printf("  arena         %zu B / %zu frames resident, digest %016llx\n", sfx::kArenaBytes,
+              sfx::kArenaFrames, static_cast<unsigned long long>(digest));
+  std::printf("                synthesised at startup from Stream::Ambience; SCHEMAS.md 1\n"
+              "                has no audio record, so it is NOT in the pack     (gloam#23)\n");
+
+  const auto& mixer = sink->mixer();
+  // Three ways a command ends, all named: the ring refused it, it sounded, or
+  // every slot was busy with something at least as loud. `started + refused` is
+  // every command the mixer popped — see Mixer::refused.
+  std::printf("  voices        %llu started, %llu dropped by the ring, %llu refused for want of\n"
+              "                a slot, %llu stolen, peak %u of %zu slots\n",
+              static_cast<unsigned long long>(mixer.started()),
+              static_cast<unsigned long long>(sink->dropped_voices()),
+              static_cast<unsigned long long>(mixer.refused()),
+              static_cast<unsigned long long>(mixer.stolen()), mixer.peak_voices(),
+              mix::kVoiceSlots);
+  std::printf("  mix           %llu samples clipped, %llu driver underflows\n",
+              static_cast<unsigned long long>(mixer.clipped()),
+              static_cast<unsigned long long>(sink->underflows()));
+
+  if (sink->state() == device::DeviceState::Running || mixer.worst_latency_ns() > 0) {
+    std::printf("  latency       %llu us tick -> mixed, plus %u frames of driver latency,\n"
+                "                against %d ms\n",
+                static_cast<unsigned long long>(mixer.worst_latency_ns() / 1000ULL),
+                sink->stream_latency_frames(), budget::kMaxAudioLatencyMs);
+  } else {
+    // Says PENDING rather than printing a zero. SPEC 11's row is not met, and a
+    // zero here would read as "0 ms, well inside budget" — which is the exact
+    // failure mode `test/10budgets/`'s marker exists to prevent.
+    std::printf("  latency       PENDING - tick -> first sample needs a device to produce a\n"
+                "                first sample. Against %d ms          (gloam#4, test/10budgets/)\n",
+                budget::kMaxAudioLatencyMs);
+  }
+}
+
 /// M0's corridor: four cells long, one intersection (SPEC 15).
 auto build_corridor() -> Level {
   Level level{7, 5};
@@ -312,7 +409,10 @@ void trace_corridor() {
   return std::find(m.patrol.route.begin(), m.patrol.route.end(), m.at) != m.patrol.route.end();
 }
 
-void trace_patrol() {
+/// `voices` is the sink the simulation emits through, or null when muted. It is
+/// the ONLY audio-shaped thing this function knows about — §9.3's "the game only
+/// ever calls Sink::play".
+void trace_patrol(audio::Sink* voices, bool paced) {
   const Tuning& t = kDefaultTuning;
 
   // The monster walks the side passage: (3,0) south to (3,4) and back, crossing
@@ -376,7 +476,32 @@ void trace_patrol() {
         apply(world, replay::Event::Step, static_cast<std::uint16_t>(Dir::East), t);
       }
     }
-    advance(world, t);
+    advance(world, t, voices);
+
+    // §5.1's pump, at wall-clock rate, and ONLY when a device is actually
+    // draining the ring.
+    //
+    // Unpaced, all 95 ticks land inside one 5.33 ms callback period, and the
+    // trace stops being a corridor you can hear. MEASURED rather than argued,
+    // because the first version of this comment claimed the 64-slot ring would
+    // overflow and that was simply false: the 95 ticks emit NINETEEN voice
+    // commands in total, which fits the ring three times over. Nothing is
+    // dropped.
+    //
+    // What actually happens to those nineteen arriving at once — measured by
+    // pushing the trace's OWN commands through the real mixer, not nineteen
+    // synthetic ones — is `started 18, stolen 2, refused 1, 370 samples
+    // clipped`, peaking at exactly 1.0. Sixteen voice slots, so three of the
+    // nineteen are displaced or never sound, and the rest pile into one buffer
+    // hard enough to sit on the limiter. §11's drop budget is untouched; what is
+    // lost is the thing the trace exists to demonstrate.
+    //
+    // Gated on a RUNNING sink rather than on `voices` alone so the no-device
+    // path — every machine this project builds on — keeps the wall time it
+    // always had, and so `audio-no-device-degrades` stays a fast test rather
+    // than a ten-second one.
+    if (paced) std::this_thread::sleep_for(std::chrono::milliseconds{1000 / replay::kTickHz});
+
     const auto& mon = world.monsters[0];
 
     // Read the same way the simulation does, so this table cannot disagree with
@@ -427,6 +552,12 @@ auto main(int argc, char** argv) -> int {
   ::signal(SIGPIPE, SIG_IGN);
 
   bool quiet = false;
+  // OPT-IN, so every existing invocation of this binary stays byte-identical and
+  // costs the same wall time. The spelling and the pair mirror gloam_replay's,
+  // which accepts `--mute` even though muted is already its default — §19 step
+  // 9's two halves are written as a symmetric pair on purpose, so the gate can
+  // compare `--mute` against `--audio` rather than a flag against its absence.
+  bool audio = false;
   for (int i = 1; i < argc; ++i) {
     const std::string_view arg{argv[i]};
     if (arg == "--version") {
@@ -437,16 +568,54 @@ auto main(int argc, char** argv) -> int {
       quiet = true;
       continue;
     }
+    if (arg == "--audio") {
+      audio = true;
+      continue;
+    }
+    if (arg == "--mute") {
+      audio = false;
+      continue;
+    }
     if (arg == "--help" || arg == "-h") {
       std::printf(
-          "usage: gloam [--version] [--quiet]\n\n"
+          "usage: gloam [--version] [--quiet] [--audio] [--mute]\n\n"
           "Headless diagnostic for the GLOAM simulation core.\n"
-          "There is no playable game yet - see UPSTREAM.md.\n");
+          "There is no playable game yet - see UPSTREAM.md.\n\n"
+          "  --audio  open an output device and sound the corridor trace (SPEC 9).\n"
+          "           A machine with no device stays silent and carries on.\n"
+          "  --mute   the default. Named so it can be written down.\n");
       return 0;
     }
     std::fprintf(stderr, "gloam: unrecognised argument '%s'\n", argv[i]);
     return 2;
   }
+
+  // Caller-owned, and on the heap, for deflate::Scratch's reason: gloam::lib
+  // owns no plate and src/bin/ owns no exception to that. 153,600 B, allocated
+  // once, only when something will read it.
+  std::vector<float> arena(audio ? sfx::kArenaFrames : 0);
+  std::array<sfx::Clip, audio::kSoundIdCount> clips{};
+  std::optional<device::DeviceSink> sink;
+
+  if (audio) {
+    // A FIXED SEED, not a drawn one. The arena must be identical on every run of
+    // every build or `gloam --audio` twice is two different games — and
+    // Stream::Ambience is excluded from `world_hash` (world.cpp), so this cannot
+    // move a replay in either direction.
+    constexpr std::uint64_t kArenaSeed = 0x9105A3ULL;
+    if (!sfx::synthesise(kArenaSeed, arena, clips)) {
+      std::fprintf(stderr, "gloam: could not synthesise the audio arena\n");
+      return 1;
+    }
+    sink.emplace(std::span<const float>{arena},
+                 std::span<const sfx::Clip, audio::kSoundIdCount>{clips});
+    // A false return is a supported outcome, not an error: §9.2 says device loss
+    // is a degradation. `print_audio` is what reports which one happened.
+    static_cast<void>(sink->open());
+  }
+
+  audio::Sink* voices = sink ? &*sink : nullptr;
+  const bool paced = sink && sink->state() == device::DeviceState::Running;
 
   std::printf("GLOAM %s - simulation core\n\n", gloam::version_string());
   print_geometry();
@@ -457,8 +626,12 @@ auto main(int argc, char** argv) -> int {
   const bool instrumented = print_instruments();
   if (!quiet) {
     trace_corridor();
-    trace_patrol();
+    trace_patrol(voices, paced);
   }
+
+  // Also outside the --quiet guard, and also printed when muted — same rule.
+  print_audio(sink ? &*sink : nullptr, arena);
+  if (sink) sink->close();
 
   // Non-zero when the instruments could not be printed at all. Step 4's contract
   // is that they are printed every run; a script that reads $? and sees success

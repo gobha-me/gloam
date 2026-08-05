@@ -71,11 +71,42 @@ issue so the call gets made rather than absorbed.
    **forward declaration** so that ticking a world does not drag a `std::atomic`
    ring into every translation unit.
 
+   **That device now exists, and it is `src/bin/audio_device.cpp`** — the only
+   file in the tree that includes `<RtAudio.h>`, with `rtaudio-boundary-single-module`
+   (a `cmake -P` grep over `include/` and `src/`, in the shape of the kitty one)
+   keeping it that way. §9 lands as *three* files in `src/bin/`, not one, and the
+   split is load-bearing rather than cosmetic:
+
+   | | RtAudio | Why it is separate |
+   | --- | --- | --- |
+   | `sfx.cpp` | no | float32 PCM synthesis — rule 2 keeps it out of the library, and the arena is caller-owned storage the library may not hold |
+   | `voice_mixer.cpp` | no | the callback's whole body. `render` takes the ring, the buffer, the frame count and **the current time** as parameters, so a test drives it on the main thread |
+   | `audio_device.cpp` | **yes** | the stream, the failure ladder, and the one `steady_clock` the simulation side reads |
+
+   The first two are RtAudio-free so `test/27sfxarena/` and `test/28voicemix/`
+   can compile them directly, the way `test/18ttywrite/` compiles
+   `tty_writer.cpp` — which puts §9's float half under all eight sanitizer legs
+   on a machine with no sound card, i.e. every machine this project builds on.
+   Adding the include to a second file would compile, link, pass, and silently
+   take both suites out of the matrix. That is what the gate is for.
+
+   Two more rules that are easy to break by being helpful. `sfx.cpp` may not
+   include `<cmath>` and may not widen a sample past 16 bits — `sinf` and `expf`
+   are not required to be correctly rounded, and both rules exist so the arena is
+   *bit-identical* across compilers rather than approximately equal. And
+   `DeviceSink::play` must return early unless the stream is running: a sink
+   queueing into a ring nobody drains reports drops on every device-less machine,
+   and §11's zero-drop budget would then be measuring the absence of a sound card.
+
    `gloam::audio::saturating_add` is a deliberate three-line duplicate of
    `gloam::emit::saturating_add`. Do not "fix" it by including `emit.hpp`: that
    would pull the byte sink through `world.hpp` into every consumer and silently
-   reverse the umbrella exclusion the header documents by name. If a third copy
-   ever appears, that is the moment to give them a shared home.
+   reverse the umbrella exclusion the header documents by name. There is now a
+   **third** copy, in `src/bin/voice_mixer.cpp`, and it is deliberately not the
+   moment to unify: the other two are in `gloam::lib` and that one is not, so a
+   shared home would mean either a library header existing for the binary's
+   benefit or an include edge from `src/bin/` into the library's internals. Both
+   are worse than four lines. Revisit if a fourth appears **inside `src/bin/`**.
 
 2. **No floating point in simulation state.** §6 is explicit: "Every number
    below is an integer." Where the design prose says a multiplier — creep is
@@ -119,9 +150,14 @@ you if you forget.
   `undefined.cmake`. To add a configuration, add a file that `include()`s
   `default.cmake` and layers its flags — don't edit `default.cmake` to force a
   specific setup.
-- **Library pattern** in `src/lib/`: a compiled `STATIC` lib by default
-  (toggle `${PROJECT_NAME}_BUILD_LIB`), public API in `include/lib.hpp`, with the
-  header-only (`INTERFACE`) variant shown commented. Flipping to `INTERFACE`
+- **Library pattern** in `src/lib/`: a compiled `STATIC` lib, unconditionally.
+  **GLOAM dropped `${PROJECT_NAME}_BUILD_LIB` and the header-only (`INTERFACE`)
+  variant**, and `src/lib/CMakeLists.txt` says why: `src/bin/` is a thin consumer
+  of the simulation core, so a build with the library switched off produces a
+  link error rather than an application, and a knob that cannot work is worse
+  than no knob. The CI job that covered that path went with it. The paragraph
+  below describes the upstream template, which keeps both. Flipping to
+  `INTERFACE`
   means every function in that header has to become an `inline` definition, or
   nothing that calls it links. Keep both patterns present and buildable — the
   template teaches by having both. That is a rule for *this* repo; a project
@@ -148,7 +184,9 @@ you if you forget.
 - **Tests are auto-discovered**: `test/CMakeLists.txt` loops over `test/*/`.
   A new test is just `test/<name>/test.cpp` (no CMakeLists needed); it gets
   `main()` from `test/main.cpp`, plus Catch2 and `${PROJECT_NAME}::lib` behind an
-  `if (TARGET ...)` guard, so `-D<PROJECT>_BUILD_LIB=OFF` still configures. Add a
+  `if (TARGET ...)` guard. That guard is inherited defensive machinery here — the
+  option it protected against is gone, so the false branch is unreachable in this
+  repo and is kept only so the spelling matches the template's. Add a
   `CMakeLists.txt` in the dir only if the test needs custom build control — that
   dir then owns its own wiring, the library link included. Directory names sort
   the glob, which sets registration order, not execution order; use fixtures or

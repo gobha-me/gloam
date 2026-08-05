@@ -56,17 +56,20 @@ option(${PROJECT_NAME}_INSTALL   "Generate install / package-config rules" ${PRO
 # (find_package first, FetchContent fallback). This is the prune point for a new
 # project: drop a name to stop fetching that dep.
 # GLOAM's own dependency floor is deliberately at the standard library, matching
-# termforge's stated policy. The simulation core links nothing at all; the only
-# third-party name here serves the test suite.
+# termforge's stated policy. The simulation core links nothing at all — neither
+# name below reaches ${PROJECT_NAME}::lib, and that is a hard architectural
+# boundary rather than a coincidence (AGENTS.md rule 1).
 #
-# Two deps are coming and are NOT here yet, on purpose:
+# One dep is still coming and is NOT here yet, on purpose:
 #   termforge — the terminal layer, once the compositor has an API to sit on
 #               (upstream #83 and the GL-A residency epic; see UPSTREAM.md).
-#   RtAudio   — SPEC §9. It lives in GLOAM permanently and must NEVER be pushed
-#               upstream: termforge ships standard library only, and RtAudio
-#               would break that promise (§9.1).
 set(${PROJECT_NAME}_DEPS
   catch2    # Catch2 v3 — test framework (test/)
+  rtaudio   # SPEC §9 — the output stream (src/bin/). ⚠ It lives in GLOAM
+            # PERMANENTLY and must NEVER be pushed upstream: termforge ships
+            # standard library only, and RtAudio would break that promise
+            # (§9.1). Exactly one translation unit includes it, enforced by the
+            # ctest case `rtaudio-boundary-single-module`.
 )
 
 # Component gating: a dependency that exists only to serve a target we are not
@@ -80,10 +83,16 @@ if (NOT ${PROJECT_NAME}_TESTS)
   list(REMOVE_ITEM ${PROJECT_NAME}_DEPS catch2)
 endif ()
 
-# The executable currently pulls in no third-party dependency of its own. The
-# block is kept rather than deleted because termforge lands here the moment the
-# terminal layer starts, and re-deriving where it goes is the expensive part.
+# RtAudio serves src/bin/ alone — it is linked into no library and exported from
+# no target set. This prune is what keeps example/consumer/ and
+# example/public-dep/ from fetching an audio library to build a project that has
+# no audio in it: all three consumer modes have GLOAM non-top-level, so BUILD_BIN
+# defaults OFF, and mode 3 passes -D<project>_BUILD_BIN=OFF explicitly.
+#
+# termforge lands beside it the moment the terminal layer starts, which is why
+# that line is kept commented rather than deleted.
 if (NOT ${PROJECT_NAME}_BUILD_BIN)
+  list(REMOVE_ITEM ${PROJECT_NAME}_DEPS rtaudio)
   # list(REMOVE_ITEM ${PROJECT_NAME}_DEPS termforge)
 endif ()
 

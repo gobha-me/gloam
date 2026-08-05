@@ -2,9 +2,33 @@
 # rather than in src/lib/ for the reason AGENTS.md rule 1 gives: producing bytes
 # is not needing a terminal, writing them is. It joins this target and NOT bake
 # or replay — those own file descriptors, but never a terminal.
+#
+# ── The three audio files, and why they are three rather than one (§9) ───────
+#
+# The same rule splits §9 the same way, and the split is the design rather than
+# a filing convention:
+#
+#   sfx.cpp          synthesises the resident PCM arena. float32, so AGENTS.md
+#                    rule 2 keeps it out of the library; deterministic integer
+#                    arithmetic with no clock, no libm and no allocation.
+#   voice_mixer.cpp  the work the real-time callback actually does. Knows
+#                    nothing about RtAudio and reads no clock — `render` takes
+#                    the time as a parameter.
+#   audio_device.cpp the stream. THE ONLY TRANSLATION UNIT IN THIS TREE THAT
+#                    INCLUDES RtAudio, enforced by the ctest case
+#                    `rtaudio-boundary-single-module` (§9.1, §9.3).
+#
+# The first two are device-free on purpose: test/27sfxarena/ and
+# test/28voicemix/ compile them directly, the way test/18ttywrite/ compiles
+# tty_writer.cpp, which puts the entire float half of §9 under all eight
+# sanitizer legs on machines that have no sound card — which is every machine
+# this project builds on.
 add_executable(${PROJECT_NAME}
   main.cpp
   tty_writer.cpp
+  sfx.cpp
+  voice_mixer.cpp
+  audio_device.cpp
 )
 
 # PROJECT_SOURCE_DIR, not CMAKE_SOURCE_DIR: the latter is the top-level build's
@@ -13,10 +37,16 @@ target_include_directories(${PROJECT_NAME}
   PRIVATE ${PROJECT_SOURCE_DIR}/include
 )
 
-# The simulation core. termforge joins this line when the terminal layer starts
-# — see the dependency note in the top-level CMakeLists.txt.
+# The simulation core, plus §9's output stream. termforge joins this line when
+# the terminal layer starts — see the dependency note in the top-level
+# CMakeLists.txt.
+#
+# RtAudio reaches THIS TARGET AND NO OTHER. ${PROJECT_NAME}::lib does not link
+# it (rule 1), and neither _bake nor _replay does — src/bin/replay.cpp says so in
+# capitals, and these two lines are what make that true rather than intended.
 target_link_libraries(${PROJECT_NAME}
   PRIVATE ${PROJECT_NAME}::lib
+  PRIVATE RtAudio::rtaudio
 )
 
 # ── The offline asset pipeline (SPEC §10) ───────────────────────────────────

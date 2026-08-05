@@ -356,6 +356,18 @@ Two more, which are design questions rather than factual errors:
     lost meanwhile: the PCM is not covered by the manifest digest, so §9.2's
     "shares §10's manifest hash" is unmet.
 
+    **That device PR has now landed (G-10), and the paragraph above is the
+    record of a prediction rather than a plan.** `src/bin/sfx.cpp` synthesises
+    38,400 frames — 153,600 B — from `Stream::Ambience` at startup, exactly as
+    described. The loss is now real rather than prospective: nothing in
+    `pack_sha256` covers a sample. What replaced it is weaker and worth naming —
+    `test/27sfxarena/` asserts the arena is bit-identical from the same seed via
+    `memcmp`, and `audio-no-device-degrades` compares an FNV digest printed by
+    two separate runs of the binary. Those answer "is it reproducible", which is
+    most of what a manifest hash is for here, and not "is it the same content
+    the pack was built against", which stays unanswerable while there is no
+    record to put it in. gloam#23 remains open.
+
 11. **§11 judges a frame against a per-frame budget and never says how a frame's
     CLASS is determined.** Mirrored as
     [#24](https://github.com/gobha-me/gloam/issues/24). `BUDGETS.md`'s per-frame
@@ -771,6 +783,99 @@ Two more, which are design questions rather than factual errors:
     two planes into one index. The comment has been corrected rather than the
     code: the two-plane split is still right for the reason it gave, and the
     MSB-first bit order really is PNG's, so the merge never reverses anything.
+
+20. **§9 names sounds and describes none of them.** Mirrored as
+    [#40](https://github.com/gobha-me/gloam/issues/40). §9.3 fixes the
+    *interface* — `Sink::play(SoundId, Gain, Pan)` — and §6.2 fixes how loud
+    each is. Nothing anywhere says what one *is*. §9's own intro names "Monster
+    footfalls, door noise and distance attenuation" and §10's asset table names
+    "Ambience, footfalls, stings"; neither enumerates the three `SoundId`s the
+    code implements, and neither mentions a party footfall. §10 comes closest to
+    content and describes a *pipeline*: "Normalise, trim, tag with an attenuation
+    class, decode to raw PCM into the pack". That is a process, not content, and
+    the device could not be built without content.
+
+    Decided in `src/bin/sfx.cpp`, and all four halves are decisions rather than
+    readings:
+
+    | | Decided | |
+    | --- | --- | --- |
+    | Durations | 90 ms party footfall, 110 ms monster footfall, 600 ms sting | the sting is §6.1's SEARCHING→HUNTING edge and has to be legible as an event; the footfalls have to feel co-incident with their tick |
+    | Character | footfalls are filtered noise, the sting is two falling partials | a footfall is a weight landing; a sting is a thing noticing you |
+    | Discrimination | the two footfalls differ by **TIMBRE** | `audio.hpp` gives a monster's footfall `kMonsterFootfallEmission = 14`, the same leather-step loudness as the party's, *deliberately* — so at equal distance they arrive at equal gain and **gain cannot tell them apart**. If the waveforms were also alike, §9's promise that you can read a dark corridor by ear would be one you could not act on |
+    | Layout | the arena is mono, panned at mix time | pan is per-command (`Command::pan`), so a stereo clip would be re-panned per voice anyway, at twice the resident cost |
+
+    The timbre row is the one that matters and it is the one §9 leaves most
+    open. `test/27sfxarena/` pins it with a spectral-tilt ratio — party 435,
+    monster 120, sting 56, and the assertion is `party > 2 × monster` rather
+    than any single figure, so a retune that keeps the distinction passes and
+    one that loses it does not.
+
+    **What closes this issue:** §9 gaining a sentence about what its three
+    sounds are, or a statement that the content is the sink's to choose and the
+    above is the standing default.
+
+21. **§9 specifies no pan law.** Part of
+    [#40](https://github.com/gobha-me/gloam/issues/40). §9.3 says gain and pan
+    come from `propagate_noise` and stops there; `pan_from_bearing` produces a
+    number on a ±256 scale and nothing says what a listener should do with it.
+
+    `mix::pan_to_lr` is **linear** — left and right sum to exactly 1 at every
+    one of the 513 legal pans — and not the constant-power law a mixing desk
+    would use. The reason is `gain_from_loudness`'s: §6.2's attenuation is
+    subtractive and linear, and a −3 dB curve here would put a shape in what the
+    player hears that the model the monsters are tested against does not have.
+    §9.3's whole argument is that those two stay the same thing.
+
+    **The cost is real and accepted:** a centred sound is quieter than a
+    hard-panned one by about 3 dB, which a constant-power law exists to avoid.
+
+22. **§9.2's "one output stream … 256-frame buffer" is not something a program
+    can insist on.** Mirrored as
+    [#41](https://github.com/gobha-me/gloam/issues/41). `RtAudio::openStream`
+    takes `bufferFrames` as an **in/out** parameter: a driver may grant 512, or
+    128, and report it back. §9.2 reads as though 256 were a property of the
+    system, and §11's latency arithmetic is written against it —
+    `test/10budgets/` asserts that doubling the buffer would blow the 20 ms row.
+
+    GLOAM asks for 256 and **reports what it was given**
+    (`DeviceSink::granted_buffer_frames`), which is the difference between an
+    instrument and a restatement of a constant. What it does *not* do is refuse
+    a stream that came back with something else — silence is a worse outcome
+    than latency, and §9.2's own degradation rule points that way.
+
+    **Unverifiable from here.** Every machine this project builds on takes the
+    no-device branch, so no driver has ever answered. Whoever first runs this
+    against real hardware should record what came back.
+
+23. **RtAudio's own CMake package is unusable as written, in two independent
+    ways.** Not a design correction — a dependency note, recorded here because
+    `cmake/deps/rtaudio.cmake` looks over-engineered without it, and because
+    §9.1 forbids filing either upstream at *termforge*. Both were verified
+    against `thestk/rtaudio` 6.0.1 and against this dev box.
+
+    **(a) `find_package(RtAudio 6)` accepts 5.2.0.** `project(RtAudio LANGUAGES
+    CXX)` declares no VERSION, and `write_basic_package_version_file` is fed the
+    **libtool ABI triple** from `configure.ac` with `COMPATIBILITY
+    AnyNewerVersion`. Release 5.2.0 advertises 6.0.2; release 6.0.1 advertises
+    7.0.0. On this box: a header reading `RTAUDIO_VERSION "5.2.0"` beside
+    `librtaudio.so.6.0.2`. The APIs are not compatible — pre-6 `openStream`
+    *throws* where 6.x returns an `RtAudioErrorType` — so the recipe gates on
+    `RTAUDIO_VERSION_MAJOR` and `audio_device.cpp` carries an `#error` backstop.
+
+    **(b) A FetchContent'd RtAudio breaks `cmake --install`.** It writes its
+    package config into `${CMAKE_CURRENT_BINARY_DIR}` and installs it from
+    `${CMAKE_BINARY_DIR}` — the same directory standalone, different directories
+    under `add_subdirectory` — and there is no `RTAUDIO_INSTALL` option to
+    switch the rules off. Since `gloam_INSTALL` defaults to
+    `PROJECT_IS_TOP_LEVEL`, an ordinary dev build is precisely the configuration
+    that fails, or leaks RtAudio's headers, static library, `.pc` file and
+    package config into GLOAM's prefix — the leak `example/public-dep/` exists
+    to assert against.
+
+    So the recipe takes the sources via `SOURCE_SUBDIR` pointing at a directory
+    that does not exist, and owns a two-line compile recipe instead. Verified:
+    `cmake --install` on a top-level build deposits nothing matching `rtaudio`.
 
 #### Proposed: nine rows for `TEST-PLAN.md` §3
 
