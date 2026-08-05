@@ -13,7 +13,7 @@
 # CURRENT TIME as parameters, and owns no thread. That is what lets this target
 # call it on the main thread, on a machine with no sound card, under all eight
 # sanitizer legs. If the mixer had opened its own stream or read its own clock,
-# none of the eighteen cases in test.cpp could exist and §9.2's three
+# none of the twenty cases in test.cpp could exist and §9.2's three
 # prohibitions would be comments.
 #
 # It deliberately does NOT compile src/bin/audio_device.cpp. That TU links

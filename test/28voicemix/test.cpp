@@ -21,6 +21,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <span>
 #include <thread>
 #include <vector>
@@ -319,7 +320,10 @@ TEST_CASE("gain converts exactly at every boundary", "[mix]") {
   CHECK(mix::gain_to_float(512) == 0.5F);
   CHECK(mix::gain_to_float(256) == 0.25F);
   CHECK(mix::gain_to_float(1) == 1.0F / 1024.0F);
-  CHECK(mix::gain_to_float(-1024) == -1.0F);
+  // Negative is SILENCE, not inversion. This line asserted -1.0 until the clamp
+  // landed; see "an out-of-range gain clamps, like an out-of-range pan" for why
+  // a phase-inverted voice was worth refusing rather than rendering.
+  CHECK(mix::gain_to_float(-1024) == 0.0F);
 
   // Every representable gain round-trips through a multiply by 1024 without
   // drift, which is the property that makes the divisor's power-of-two-ness
@@ -377,7 +381,88 @@ TEST_CASE("a hostile gain does not invert or explode the mix", "[mix]") {
     CHECK(sample >= -1.0F);
     CHECK(sample <= 1.0F);
   }
+
+  // AND IT NO LONGER GETS AS FAR AS THE LIMITER. This asserted `clipped() > 0`
+  // while `gain_to_float` was unclamped: 32,767 is 32x unity, so a single voice
+  // sat on the limiter for most of the buffer. Now the gain is clamped at the
+  // conversion and the limiter never sees it — two voices at unity and silence
+  // respectively cannot reach full scale. Containing a hostile value earlier is
+  // strictly better than containing it later, so the assertion inverts.
+  CHECK(mixer.clipped() == 0);
+  CHECK(mixer.started() == 2);
+}
+
+TEST_CASE("a non-finite arena sample is contained and counted, not passed on", "[mix]") {
+  // The limiter is two float comparisons, and NaN compares false against both.
+  // Before this case existed, an arena of NaN produced 512 of 512 non-finite
+  // output samples with `clipped()` reading zero — the one value class that
+  // walked past the thing voice_mixer.hpp calls "what stands between the mix and
+  // the DAC".
+  //
+  // Not reachable from sfx::synthesise, which is fuzzed over millions of seeds
+  // and never produces one. Reachable from `Mixer`, which takes the arena as an
+  // unvalidated span from whoever constructs it.
+  Clips clips{};
+  clips[static_cast<std::size_t>(audio::SoundId::PartyFootfall)] = sfx::Clip{0, 64};
+
+  const std::vector<float> poison(64, std::numeric_limits<float>::quiet_NaN());
+  mix::Mixer mixer{std::span<const float>{poison},
+                   std::span<const sfx::Clip, audio::kSoundIdCount>{clips}};
+
+  audio::Ring<> ring;
+  audio::Command command{};
+  command.sound = audio::SoundId::PartyFootfall;
+  command.gain = audio::kGainUnity;
+  REQUIRE(ring.try_push(command));
+
+  std::vector<float> out(std::size_t{kFrames} * 2U, 0.0F);
+  mixer.render(ring, out, kFrames, 0);
+
+  for (const float sample : out) {
+    CHECK(sample == sample);
+    CHECK(sample >= -1.0F);
+    CHECK(sample <= 1.0F);
+  }
   CHECK(mixer.clipped() > 0);
+
+  // The other non-finite values were already contained; pinned so a future
+  // rewrite of the limiter has to keep all of them.
+  for (const float poison_value : {std::numeric_limits<float>::infinity(),
+                                   -std::numeric_limits<float>::infinity(), 1e30F, -1e30F}) {
+    const std::vector<float> filled(64, poison_value);
+    mix::Mixer other{std::span<const float>{filled},
+                     std::span<const sfx::Clip, audio::kSoundIdCount>{clips}};
+    audio::Ring<> other_ring;
+    REQUIRE(other_ring.try_push(command));
+    std::vector<float> other_out(std::size_t{kFrames} * 2U, 0.0F);
+    other.render(other_ring, other_out, kFrames, 0);
+    for (const float sample : other_out) {
+      CHECK(sample == sample);
+      CHECK(sample >= -1.0F);
+      CHECK(sample <= 1.0F);
+    }
+  }
+}
+
+TEST_CASE("an out-of-range gain clamps, like an out-of-range pan", "[mix]") {
+  // The counterpart the suite was missing. `pan_to_lr` clamped on the stated
+  // principle that a Command is a POD read off a ring; `gain_to_float` did not,
+  // three lines away, and 32,767 is 32x unity.
+  CHECK(mix::gain_to_float(32'767) == 1.0F);
+  CHECK(mix::gain_to_float(audio::kGainUnity + 1) == 1.0F);
+  CHECK(mix::gain_to_float(-1) == 0.0F);
+  CHECK(mix::gain_to_float(-32'768) == 0.0F);
+
+  // Legal values are untouched, so this is a defence and not a retune.
+  for (audio::Gain g = audio::kGainSilent; g <= audio::kGainUnity; ++g) {
+    CHECK(mix::gain_to_float(g) == static_cast<float>(g) * (1.0F / 1024.0F));
+  }
+
+  // And the consequence that made it worth fixing rather than documenting: the
+  // steal policy ranks voices by level, so a negative gain — a full-volume
+  // phase inversion — used to sort BELOW a gain of 1 and be stolen first. A
+  // clamped level cannot be negative, so the ranking is monotone in loudness.
+  CHECK(mix::gain_to_float(-1024) <= mix::gain_to_float(1));
 }
 
 TEST_CASE("a command naming a sound outside the table starts nothing", "[mix]") {

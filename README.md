@@ -365,7 +365,7 @@ it, and what is left is as small as it can be made:
 `mix::Mixer::render` takes the ring, the buffer, the frame count and **the
 current time** as parameters and owns no thread, so a test calls it on the main
 thread with the clock of its choosing. That is why the latency instrument is
-asserted with `==` rather than a tolerance, and why 32 new cases cover §9's float
+asserted with `==` rather than a tolerance, and why 34 new cases cover §9's float
 half on a machine with no sound card. `rtaudio-boundary-single-module` is a
 source-level grep, in the shape of `kitty-boundary-single-module`, that keeps the
 split from eroding — because adding the include to a second file compiles, links,

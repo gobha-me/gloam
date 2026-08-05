@@ -158,11 +158,25 @@ auto Mixer::render(audio::Ring<>& ring, std::span<float> out, std::uint32_t fram
   // ships.
   std::uint64_t clipped = 0;
   for (std::size_t i = 0; i < samples; ++i) {
-    if (out[i] > 1.0F) {
+    const float sample = out[i];
+    if (sample > 1.0F) {
       out[i] = 1.0F;
       clipped += 1;
-    } else if (out[i] < -1.0F) {
+    } else if (sample < -1.0F) {
       out[i] = -1.0F;
+      clipped += 1;
+    } else if (!(sample == sample)) {
+      // NaN, AND IT NEEDS ITS OWN BRANCH. It compares false against both bounds
+      // above, so two comparisons alone let it through untouched and uncounted —
+      // which made the claim in voice_mixer.hpp that this loop "is what stands
+      // between the mix and the DAC" false for exactly one class of value. An
+      // adversarial pass found it by filling an arena with NaN: 512 of 512
+      // output samples non-finite, `clipped` still reading zero.
+      //
+      // Silence rather than a bound, because a NaN sample carries no
+      // information about which bound it overshot. Counted, because an
+      // instrument that hides it is how a NaN reaches a speaker.
+      out[i] = 0.0F;
       clipped += 1;
     }
   }

@@ -164,6 +164,12 @@ TEST_CASE("no clip reaches full scale, so nothing is flat-topped at the source",
   // sixteen voices, and a single clip has already lost the information by then.
   //
   // Measured after the fix: party 0.704, sting 0.483, monster 0.581.
+  //
+  // This case checks the shipped seed only, so an adversarial pass swept 2.6
+  // million seeds instead: no clip on any of them reaches the clamp, and the
+  // worst case anywhere is 0.941 (a party footfall, seed 192583). Six percent of
+  // headroom at the worst seed is thinner than it looks from the 0.704 above,
+  // and it is the number to watch if the envelope or the filters are retuned.
   for (const auto& clip : clips) {
     if (clip.frames == 0) continue;
     float peak = 0.0F;

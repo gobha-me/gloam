@@ -49,8 +49,20 @@ inline constexpr std::size_t kVoiceSlots = 16;
 /// of two, so this is exact in binary floating point on every IEEE-754 target.
 /// `test/28voicemix/` asserts it with `==` rather than a tolerance, which is the
 /// only way that claim means anything.
+///
+/// CLAMPED FIRST, for `pan_to_lr`'s reason and not a different one. `Gain` is a
+/// plain `std::int16_t` arriving off the same ring as `Pan`, so the same
+/// sentence applies: the mixer trusts the wire, not the producer. This was
+/// asymmetric until an adversarial pass pointed out that the argument three
+/// lines down had no counterpart up here — a wire gain of 32,767 is 32x unity,
+/// and a NEGATIVE one is a full-volume phase inversion that the steal policy
+/// then ranks BELOW a gain of 1, because that policy orders by level and a
+/// negative level sorts first. `gain_from_loudness` already saturates to
+/// `kGainUnity`, so this is a no-op for every value the simulation can produce.
 [[nodiscard]] constexpr auto gain_to_float(audio::Gain g) noexcept -> float {
-  return static_cast<float>(g) * (1.0F / 1024.0F);
+  const audio::Gain clamped =
+      g < audio::kGainSilent ? audio::kGainSilent : (g > audio::kGainUnity ? audio::kGainUnity : g);
+  return static_cast<float>(clamped) * (1.0F / 1024.0F);
 }
 
 struct Lr {
