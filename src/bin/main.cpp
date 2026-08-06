@@ -412,7 +412,7 @@ void trace_corridor() {
 /// `voices` is the sink the simulation emits through, or null when muted. It is
 /// the ONLY audio-shaped thing this function knows about — §9.3's "the game only
 /// ever calls Sink::play".
-void trace_patrol(audio::Sink* voices, bool paced) {
+void trace_patrol(audio::Sink* voices, device::DeviceSink* active_device, bool paced) {
   const Tuning& t = kDefaultTuning;
 
   // The monster walks the side passage: (3,0) south to (3,4) and back, crossing
@@ -469,6 +469,24 @@ void trace_patrol(audio::Sink* voices, bool paced) {
   auto previous_party = world.party;
 
   for (int tick = 0; tick < kTicks; ++tick) {
+    // DEVICE LOSS IS CONSUMED AT A TICK BOUNDARY, on the simulation thread.
+    // The RtAudio callback only publishes Lost; stopping a stream from the
+    // callback that reported its own failure would be a re-entrancy hazard.
+    if (active_device != nullptr && active_device->take_state_change()) {
+      if (active_device->state() == device::DeviceState::Lost) {
+        std::array<char, 128> line{};
+        const auto written = active_device->describe(line);
+        std::printf("\n  audio device  %.*s\n", static_cast<int>(written), line.data());
+        active_device->close();
+        active_device = nullptr;
+        voices = nullptr;
+        paced = false;
+      }
+      // Running is the other transition an active device can present here. It
+      // needs no message: the final instrument block reports it. Consuming it
+      // now leaves the next `true` unambiguously meaning a later transition.
+    }
+
     if (world.tick == kLampUpAtTick) apply(world, replay::Event::Lamp, 3, t);
     if (world.tick == kLampOutAtTick) apply(world, replay::Event::Lamp, 0, t);
     for (int r = 0; r < kRetreatSteps; ++r) {
@@ -596,6 +614,7 @@ auto main(int argc, char** argv) -> int {
   std::vector<float> arena(audio ? sfx::kArenaFrames : 0);
   std::array<sfx::Clip, audio::kSoundIdCount> clips{};
   std::optional<device::DeviceSink> sink;
+  bool stream_started = false;
 
   if (audio) {
     // A FIXED SEED, not a drawn one. The arena must be identical on every run of
@@ -611,7 +630,7 @@ auto main(int argc, char** argv) -> int {
                  std::span<const sfx::Clip, audio::kSoundIdCount>{clips});
     // A false return is a supported outcome, not an error: §9.2 says device loss
     // is a degradation. `print_audio` is what reports which one happened.
-    static_cast<void>(sink->open());
+    stream_started = sink->open();
   }
 
   audio::Sink* voices = sink ? &*sink : nullptr;
@@ -626,7 +645,7 @@ auto main(int argc, char** argv) -> int {
   const bool instrumented = print_instruments();
   if (!quiet) {
     trace_corridor();
-    trace_patrol(voices, paced);
+    trace_patrol(voices, stream_started ? &*sink : nullptr, paced);
   }
 
   // Also outside the --quiet guard, and also printed when muted — same rule.

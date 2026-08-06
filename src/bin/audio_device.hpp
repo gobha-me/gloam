@@ -29,6 +29,7 @@
 #include <memory>
 #include <span>
 
+#include "device_state.hpp"
 #include "gloam/audio.hpp"
 #include "sfx.hpp"
 #include "voice_mixer.hpp"
@@ -36,24 +37,6 @@
 class RtAudio;  // opaque here on purpose — see the header note
 
 namespace gloam::device {
-
-/// §9.2: "Device loss is a degradation, not a crash."
-///
-/// EVERY VALUE BELOW IS A STATE THE GAME KEEPS RUNNING IN. There is no fatal
-/// one, and there must not be: §17 reserves fatality for a missing kitty
-/// protocol, because a game you cannot see is not a game and a game you cannot
-/// hear is a worse game. The distinction is the whole of this enum.
-enum class DeviceState : std::uint8_t {
-  /// `--mute`, or `--audio` was never passed. `open()` was not attempted.
-  Muted = 0,
-  /// No output device exists. Every machine this project builds on, today.
-  NoDevice = 1,
-  /// A device exists and refused the stream — format, rate or channel count.
-  Failed = 2,
-  Running = 3,
-  /// Unplugged mid-run. Reported once, then silence; the game carries on.
-  Lost = 4,
-};
 
 /// §9.3's sink, backed by a real stream.
 ///
@@ -90,11 +73,14 @@ class DeviceSink final : public audio::Sink {
 
   [[nodiscard]] auto state() const noexcept -> DeviceState;
 
-  /// True exactly once per state transition.
+  /// True when at least one state transition happened since the previous call.
   ///
-  /// §9.2 asks for "message line reports it", singular. Without this the report
-  /// is either printed once at exit — too late to be a message line — or every
-  /// tick, which is a log flood rather than a message.
+  /// Several transitions before the simulation thread polls are coalesced, with
+  /// `state()` carrying the latest one. Re-publishing the same state is not a
+  /// transition and does not re-arm this flag. §9.2 asks for "message line
+  /// reports it", singular; without this the report is either printed once at
+  /// exit — too late to be a message line — or every tick, which is a log flood
+  /// rather than a message.
   [[nodiscard]] auto take_state_change() noexcept -> bool;
 
   /// Render one line describing the current state into a CALLER-OWNED buffer,
