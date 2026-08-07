@@ -69,8 +69,7 @@ struct DeviceSink::Impl {
   audio::Ring<> ring;
   std::unique_ptr<RtAudio> rt;
 
-  std::atomic<DeviceState> state{DeviceState::Muted};
-  std::atomic<bool> state_changed{false};
+  detail::StateSignal state;
   std::atomic<int> last_error{0};
   std::atomic<std::uint64_t> underflows{0};
 
@@ -105,13 +104,20 @@ DeviceSink::~DeviceSink() { close(); }
 auto DeviceSink::open() noexcept -> bool {
   auto* impl = m_impl.get();
 
+  // A caller may retry after NoDevice or Failed. Finish any previous attempt
+  // before returning the state signal to its opening state; after `close()` no
+  // old callback remains that could publish into the new attempt.
+  if (impl->rt) close();
+  impl->state.begin_open();
+
   // The error callback may be invoked FROM THE STREAM THREAD.
   //
-  // It captures only `this` and does two relaxed stores. The message text is
-  // DELIBERATELY IGNORED: copying a std::string allocates, and §9.2's second
-  // rule covers anything reachable from that thread. `describe()` renders a
-  // fixed line from the type, on the simulation thread, where allocating would
-  // be legal and still is not done.
+  // It captures only `impl`, records the numeric type, and publishes Lost
+  // through the lock-free `StateSignal`. The message text is DELIBERATELY
+  // IGNORED: copying a std::string allocates, and §9.2's second rule covers
+  // anything reachable from that thread. `describe()` renders a fixed line from
+  // the type, on the simulation thread, where allocating would be legal and
+  // still is not done.
   //
   // It does NOT call stopStream(). Tearing down a stream from inside a callback
   // the stream invoked is a re-entrancy hazard; the flag is set here and `main`
@@ -120,14 +126,14 @@ auto DeviceSink::open() noexcept -> bool {
       RtAudio::UNSPECIFIED, [impl](RtAudioErrorType type, const std::string&) {
         impl->last_error.store(static_cast<int>(type), std::memory_order_relaxed);
         if (type == RTAUDIO_DEVICE_DISCONNECT) {
-          impl->state.store(DeviceState::Lost, std::memory_order_relaxed);
-          impl->state_changed.store(true, std::memory_order_relaxed);
+          impl->state.mark_lost();
         }
       });
 
   const auto fail = [&](DeviceState why) {
-    impl->state.store(why, std::memory_order_relaxed);
-    impl->state_changed.store(true, std::memory_order_relaxed);
+    // A disconnect reported from the stream thread wins this race. Failure is
+    // still the return value; `StateSignal` preserves the more precise reason.
+    static_cast<void>(impl->state.mark_failed(why));
     return false;
   };
 
@@ -164,8 +170,14 @@ auto DeviceSink::open() noexcept -> bool {
   const long latency = impl->rt->getStreamLatency();
   impl->latency_frames = latency > 0 ? static_cast<std::uint32_t>(latency) : 0U;
 
-  impl->state.store(DeviceState::Running, std::memory_order_relaxed);
-  impl->state_changed.store(true, std::memory_order_relaxed);
+  // `startStream()` launches the callback thread before it returns. Publishing
+  // Running with an unconditional store here used to erase a disconnect that
+  // thread reported during startup. If Lost won, close from this simulation
+  // thread and leave the reason sticky.
+  if (!impl->state.mark_running()) {
+    close();
+    return false;
+  }
   return true;
 }
 
@@ -177,12 +189,9 @@ auto DeviceSink::close() noexcept -> void {
   if (impl->rt->isStreamOpen()) impl->rt->closeStream();
   impl->rt.reset();
 
-  // Not back to Muted: the caller and the instrument block both want to know
-  // which of the five states the run ended in, and a close that erased the
-  // reason would make `Lost` unreportable.
-  if (impl->state.load(std::memory_order_relaxed) == DeviceState::Running) {
-    impl->state.store(DeviceState::Muted, std::memory_order_relaxed);
-  }
+  // Running returns to Muted; Lost stays Lost. The compare/exchange also makes
+  // a disconnect racing this close win in either interleaving.
+  impl->state.mark_closed();
 }
 
 auto DeviceSink::play(audio::SoundId sound, audio::Gain gain, audio::Pan pan) -> void {
@@ -199,7 +208,7 @@ auto DeviceSink::play(audio::SoundId sound, audio::Gain gain, audio::Pan pan) ->
   // Every CI runner and this project's dev box ARE that machine. Without this
   // line `budget::kMaxDroppedVoiceCommands == 0` fails everywhere GLOAM builds,
   // and it fails for a reason that has nothing to do with the ring.
-  if (impl->state.load(std::memory_order_relaxed) != DeviceState::Running) return;
+  if (impl->state.state() != DeviceState::Running) return;
 
   audio::Command command{};
   // THE ONLY CLOCK IN THE AUDIO PATH THAT THE SIMULATION SIDE READS, and it is
@@ -219,15 +228,15 @@ auto DeviceSink::play(audio::SoundId sound, audio::Gain gain, audio::Pan pan) ->
 }
 
 auto DeviceSink::state() const noexcept -> DeviceState {
-  return m_impl->state.load(std::memory_order_relaxed);
+  return m_impl->state.state();
 }
 
 auto DeviceSink::take_state_change() noexcept -> bool {
-  return m_impl->state_changed.exchange(false, std::memory_order_relaxed);
+  return m_impl->state.take_change();
 }
 
 auto DeviceSink::describe(std::span<char> out) const noexcept -> std::size_t {
-  switch (m_impl->state.load(std::memory_order_relaxed)) {
+  switch (m_impl->state.state()) {
     case DeviceState::Muted:
       return put(out, "muted (--audio opens a device; --mute is the default)");
     case DeviceState::NoDevice:

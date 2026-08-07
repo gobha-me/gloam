@@ -18,7 +18,9 @@
 #
 #   * the real tick -> first-sample figure (§11's row; needs a device to produce
 #     a first sample — test/10budgets/ keeps the PENDING marker);
-#   * RTAUDIO_DEVICE_DISCONNECT mid-run, which needs a device to unplug;
+#   * a real backend delivering RTAUDIO_DEVICE_DISCONNECT mid-run, which needs a
+#     device to unplug. The state transition, its startup race and sticky Lost
+#     semantics are device-free and covered by test/29devicestate/;
 #   * whether the callback meets its 5.33 ms deadline under load;
 #   * whether a driver grants the 256-frame buffer §9.2 asks for;
 #   * whether the mix is audible, and the three sounds distinguishable, TO A
