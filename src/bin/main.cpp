@@ -2,8 +2,9 @@
 //
 // There is no game here yet, and there deliberately is not: SPEC §19 puts the
 // layer API, the lifecycle tests and the byte instruments before any game
-// logic, and the terminal layer is blocked on upstream termforge work (see
-// UPSTREAM.md). What this binary does instead is the part of §19 step 4 that
+// logic. The required termforge APIs have landed, but GLOAM's lifecycle and
+// compositor integration have not (see UPSTREAM.md). What this binary does
+// instead is the part of §19 step 4 that
 // can exist today — print the frozen constants and the ruleset hash, and run
 // M0's corridor through the real perception model so the numbers in §6 can be
 // read rather than trusted.
@@ -85,7 +86,7 @@ struct ColdStart {
 ///
 /// The bytes go nowhere — this is the upload path run for its size and its cost,
 /// not an upload. The real one belongs to the compositor's startup (gloam#7,
-/// upstream #97's `on_start`), and doing it here would put a plate on a terminal
+/// termforge's `on_start`), and doing it here would put a plate on a terminal
 /// that has not asked for one.
 ///
 /// A clock is read, which nothing in `gloam::lib` may do — which is exactly why

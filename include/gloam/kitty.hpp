@@ -34,13 +34,13 @@
 /// same category and is excluded from the umbrella for the same reason.
 ///
 ///
-/// WRITTEN AGAINST THE SHAPE TERMFORGE WILL HAVE
+/// WRITTEN AGAINST THE SHAPE TERMFORGE NOW HAS
 ///
 /// The placement command below carries a source crop and a sub-cell pixel offset,
-/// which is what upstream #115 (GL-B3) will expose, and it carries no destination
-/// cell rect at all, which is what upstream #137 (GL-B5) is asking for. That is
-/// not today's `draw_image`. When those land this module should SHRINK rather
-/// than change shape — see UPSTREAM.md.
+/// which upstream #115 (GL-B3) exposed as `ImagePlacementOptions`, and it carries
+/// no destination pixel extent, matching upstream #137's (GL-B5)
+/// `PlacementFit::Exact`. Both have landed. When termforge is integrated this
+/// module should SHRINK rather than change shape — see UPSTREAM.md.
 
 #include <cstddef>
 #include <cstdint>
@@ -196,10 +196,10 @@ struct EmitResult {
 //      `deflate.hpp`. `o=z` was not used — it compresses an `f=24`/`f=32`
 //      payload, and compressing an already-compressed PNG buys nothing.
 //
-// What is NOT here, and is deliberately somebody else's problem: which image id
-// belongs to which plate, when to upload, and what to do if the terminal drops
-// the image. That is residency (gloam#7, upstream #109), and a module that
-// answered it would need the registry condition 2 forbids.
+// What is NOT here: which live `PinnedImage` belongs to which plate, when to
+// upload, and how to repin after `ImageInvalidatedEvent`. That is residency
+// orchestration (gloam#5/#7, upstream #109/#113), owned by the terminal binary;
+// putting it here would require the registry condition 2 forbids.
 
 /// Bytes of raw payload per chunk.
 ///
@@ -235,9 +235,10 @@ inline constexpr std::size_t kTransmitChunkBase64Bytes = 4096;
 /// IHDR, from the plate it was given. This function never sees a geometry and so
 /// cannot get one wrong.
 ///
-/// `t=d` is direct transmission — the payload is in the escape sequence. The file
-/// and shared-memory media (upstream #111 / GL-A3) would change this key and
-/// nothing else about the shape.
+/// `t=d` is direct transmission — the payload is in the escape sequence.
+/// termforge v0.54.0's shared-memory transport (upstream #111 / GL-A3) changes
+/// this key without changing anything else about the payload shape; GLOAM's
+/// standalone byte emitter remains the direct form.
 ///
 /// Unlike `emit_placement` this CAN write bytes and then stop, but only in the
 /// sense that a multi-chunk transfer is many byte strings: every chunk it writes

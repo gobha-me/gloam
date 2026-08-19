@@ -21,9 +21,9 @@
 /// WHAT THIS DELIBERATELY DOES NOT DO
 ///
 /// No backpressure policy: no `poll`, no timeout, no retry budget, no spinning
-/// on `EAGAIN`. Those are decisions for a frame loop, and there is no frame loop
-/// — the compositor is blocked on termforge #137 and #109 (gloam#7). A policy
-/// chosen now would be chosen against an imaginary caller and would be load
+/// on `EAGAIN`. Those are decisions for a frame loop, and GLOAM's termforge-backed
+/// frame loop has not landed yet (gloam#5, gloam#7). A policy chosen now would be
+/// chosen against an imaginary caller and would be load
 /// bearing by the time a real one appeared. `write_all` returns what got through
 /// and the caller decides.
 ///

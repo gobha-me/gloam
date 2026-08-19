@@ -60,9 +60,10 @@ option(${PROJECT_NAME}_INSTALL   "Generate install / package-config rules" ${PRO
 # name below reaches ${PROJECT_NAME}::lib, and that is a hard architectural
 # boundary rather than a coincidence (AGENTS.md rule 1).
 #
-# One dep is still coming and is NOT here yet, on purpose:
-#   termforge — the terminal layer, once the compositor has an API to sit on
-#               (upstream #83 and the GL-A residency epic; see UPSTREAM.md).
+# One dep is still absent, on purpose:
+#   termforge — its required APIs have landed, but no target in this tree calls
+#               them yet. Add it with G-5/G-7's terminal layer rather than make
+#               every binary fetch an unused dependency (see UPSTREAM.md).
 set(${PROJECT_NAME}_DEPS
   catch2    # Catch2 v3 — test framework (test/)
   rtaudio   # SPEC §9 — the output stream (src/bin/). ⚠ It lives in GLOAM

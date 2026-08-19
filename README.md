@@ -38,14 +38,21 @@ diagnostic rather than a game. What exists is the deterministic simulation core:
 | The transmit path: indexed PNG, DEFLATE, and the cold-start upload | §4.1, §10, §11 |
 | The audio device: the RtAudio stream, the resident arena, and the mixer | §9.1, §9.2, §9.3 |
 
-The **compositor** is still blocked upstream — see [UPSTREAM.md](UPSTREAM.md).
-termforge stretches a placed image to fill its cell rect and states that scaling
-is the contract, which §3.2 rules out by name because resampling a pre-dithered
-plate reintroduces the dither crawl the whole pipeline exists to avoid. So
-[#7](https://github.com/gobha-me/gloam/issues/7) has nothing to sit on yet.
+The **compositor is no longer blocked upstream**. Re-read at termforge v0.55.0,
+the library now supplies pinned encoded images, exact unscaled placement, named
+layers, sub-cell offsets and crops, terminal-driven animation, explicit image
+lifecycle invalidation, residency accounting and a 256-slot application-resident
+budget. GLOAM's plate pins plus animation roots use 74 slots at M0 and 252 in the
+full game, so both fit. [UPSTREAM.md](UPSTREAM.md) records the landing releases
+and the lifecycle contract.
 
-The layer API is built anyway, and deliberately so: §16's mitigation for that
-exact risk is to keep every kitty call behind GLOAM's own boundary from day one,
+What has not landed is GLOAM's integration. The tree has no termforge dependency
+yet, so the binary remains a headless diagnostic. The next terminal work is
+[#5](https://github.com/gobha-me/gloam/issues/5)'s lifecycle matrix, then
+[#7](https://github.com/gobha-me/gloam/issues/7)'s compositor.
+
+GLOAM's layer API remains deliberate: §16's mitigation for upstream risk is to
+keep every kitty call behind GLOAM's own boundary from day one,
 "so a vendored driver is a swap and not a rewrite". A boundary built after the
 driver arrives is not insurance. Two ctest cases keep it honest —
 `layer-z-single-definition` (no code hand-writes a z-index) and
