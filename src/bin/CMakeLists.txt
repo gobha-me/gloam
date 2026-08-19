@@ -26,6 +26,8 @@
 add_executable(${PROJECT_NAME}
   main.cpp
   tty_writer.cpp
+  terminal_sink.cpp
+  resident_plates.cpp
   sfx.cpp
   voice_mixer.cpp
   audio_device.cpp
@@ -37,16 +39,16 @@ target_include_directories(${PROJECT_NAME}
   PRIVATE ${PROJECT_SOURCE_DIR}/include
 )
 
-# The simulation core, plus §9's output stream. termforge joins this line when
-# the terminal layer starts — see the dependency note in the top-level
-# CMakeLists.txt.
+# The simulation core, §9's output stream, and §4.8's terminal lifecycle.
+# Both third-party targets remain private to this unexported executable.
 #
-# RtAudio reaches THIS TARGET AND NO OTHER. ${PROJECT_NAME}::lib does not link
-# it (rule 1), and neither _bake nor _replay does — src/bin/replay.cpp says so in
-# capitals, and these two lines are what make that true rather than intended.
+# RtAudio reaches THIS TARGET AND NO OTHER. Neither it nor termforge reaches
+# ${PROJECT_NAME}::lib (rule 1), _bake or _replay — these lines are what make
+# that true rather than intended.
 target_link_libraries(${PROJECT_NAME}
   PRIVATE ${PROJECT_NAME}::lib
   PRIVATE RtAudio::rtaudio
+  PRIVATE termforge::lib
 )
 
 # ── The offline asset pipeline (SPEC §10) ───────────────────────────────────

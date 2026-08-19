@@ -37,6 +37,7 @@ diagnostic rather than a game. What exists is the deterministic simulation core:
 | The pathfinder, the pursuit, and the walk home | §6.1, §5.2 |
 | The transmit path: indexed PNG, DEFLATE, and the cold-start upload | §4.1, §10, §11 |
 | The audio device: the RtAudio stream, the resident arena, and the mixer | §9.1, §9.2, §9.3 |
+| The resident plate owner and the real-PTY terminal lifecycle matrix | §3.2, §4.5, §4.8 |
 
 The **compositor is no longer blocked upstream**. Re-read at termforge v0.55.0,
 the library now supplies pinned encoded images, exact unscaled placement, named
@@ -46,18 +47,28 @@ budget. GLOAM's plate pins plus animation roots use 74 slots at M0 and 252 in th
 full game, so both fit. [UPSTREAM.md](UPSTREAM.md) records the landing releases
 and the lifecycle contract.
 
-What has not landed is GLOAM's integration. The tree has no termforge dependency
-yet, so the binary remains a headless diagnostic. The next terminal work is
-[#5](https://github.com/gobha-me/gloam/issues/5)'s lifecycle matrix, then
-[#7](https://github.com/gobha-me/gloam/issues/7)'s compositor.
+The first GLOAM integration has now landed. termforge v0.55.0 is a private
+binary/test dependency; `resident::PlateSet` verifies the pack, encodes its raw
+planes as indexed PNG, preflights the shared 256-slot budget, pins the complete
+batch atomically, and maps pack ids to generation-qualified handles. Resize
+retains those handles and only reflows the native-resolution cell rect;
+suspend/resume and both reattach routes invalidate them and repin from the
+caller-owned payloads. `31imagelifecycle-test` drives all of that through real
+ptys, including actual SIGTSTP/SIGCONT and exception teardown.
+
+The binary remains a headless diagnostic because the component is not yet
+driven by a game frame. The next terminal work is
+[#7](https://github.com/gobha-me/gloam/issues/7)'s compositor, which will place
+the resident set from real world state.
 
 GLOAM's layer API remains deliberate: §16's mitigation for upstream risk is to
-keep every kitty call behind GLOAM's own boundary from day one,
+keep every kitty sequence GLOAM authors behind its own boundary from day one,
 "so a vendored driver is a swap and not a rewrite". A boundary built after the
 driver arrives is not insurance. Two ctest cases keep it honest —
 `layer-z-single-definition` (no code hand-writes a z-index) and
-`kitty-boundary-single-module` (no code outside `src/lib/kitty.cpp` writes an
-escape sequence).
+`kitty-boundary-single-module` (no shipped GLOAM source outside
+`src/lib/kitty.cpp` authors an escape sequence). The live resident path calls
+termforge's typed driver API and authors none itself.
 
 The **asset pipeline** ([#1](https://github.com/gobha-me/gloam/issues/1)) has
 landed its first slice, and it is the one thing on the critical path that never
@@ -467,9 +478,10 @@ design/           the specification the code cites — a snapshot; see design/RE
 include/gloam/    the deterministic core's public headers, plus sixteen off-umbrella
 src/lib/          its implementation — standard library only, no I/O, no clock
 src/bin/          the diagnostic binary, gloam_bake and gloam_replay; the SFX
-                  synthesiser, the mixer and the RtAudio device, which reaches
-                  exactly one translation unit (§9.1); termforge lands here too
-test/             property tests (§13.3) and budget assertions (§11)
+                  synthesiser, mixer and one-file RtAudio boundary; the private
+                  termforge sink and resident plate owner (§4.8, §9.1)
+test/             property tests, budget assertions, and the real-PTY lifecycle
+                  matrix (§4.8, §11, §13.3)
 cmake/            the template's build machinery, plus check_layer_z.cmake (§4.5),
                   check_kitty_boundary.cmake (§16), check_pack_repro.cmake (§10),
                   check_replay_determinism.cmake (§12), check_audio_mute.cmake (§9.2),

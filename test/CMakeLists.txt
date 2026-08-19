@@ -329,6 +329,14 @@ if (TEST 28voicemix-test)
   set_tests_properties(28voicemix-test PROPERTIES TIMEOUT 120)
 endif ()
 
+# SPEC §4.8 deliberately drives real ptys and, in one case, a child process
+# through an actual SIGTSTP/SIGCONT cycle. Every internal wait is bounded, but
+# the outer bound is what turns a broken job-control or reply loop into a test
+# failure instead of a wedged CI runner.
+if (TEST 31imagelifecycle-test)
+  set_tests_properties(31imagelifecycle-test PROPERTIES TIMEOUT 120)
+endif ()
+
 # SET FIXTURE DEPENDENCIES
 set_tests_properties(startup PROPERTIES FIXTURES_SETUP runners)
 set_tests_properties(shutdown PROPERTIES FIXTURES_CLEANUP runners)

@@ -124,11 +124,13 @@ available and composes with the others:
   tests. Shared-memory transport is available as an opt-in policy for initial
   pinned uploads; animation frames deliberately remain direct.
 
-That makes [G-5](https://github.com/gobha-me/gloam/issues/5) and
-[G-7](https://github.com/gobha-me/gloam/issues/7) **ready, not implemented**.
-GLOAM still has no termforge dependency to repin: the dependency recipe and
-binary link belong in the first terminal-facing implementation, not in a status
-change with no caller.
+[G-5](https://github.com/gobha-me/gloam/issues/5) now consumes that contract.
+GLOAM pins termforge v0.55.0 privately in `src/bin/`, owns encoded payloads and
+`plate_id -> PinnedImage` handles there, retains them across both kinds of resize,
+and repins after suspend/resume or either reattach route. Its acceptance suite
+uses real ptys, a child process for SIGTSTP/SIGCONT, and the full 256/257 capacity
+edge. [G-7](https://github.com/gobha-me/gloam/issues/7), the compositor that
+places this resident set from game state, remains ready.
 
 ## Corrections to the design document
 
@@ -928,10 +930,10 @@ than routed around — a workaround that survives long enough becomes the reason
 the upstream fix never lands.
 
 That policy did its job: the register above is closed or deliberately resolved,
-and GLOAM no longer needs a shim or vendored driver. The next terminal work is
-G-5's lifecycle matrix, followed by G-7's compositor. Those changes will add
-termforge to `src/bin/`; the deterministic library underneath it — geometry,
-noise, perception, light, runes and budgets — remains dependency-free by design.
+and GLOAM no longer needs a shim or vendored driver. G-5's lifecycle matrix now
+pins termforge privately in `src/bin/`; G-7's compositor is next. The
+deterministic library underneath it — geometry, noise, perception, light, runes
+and budgets — remains dependency-free by design.
 
 **One correction to an earlier version of this paragraph, because it is the
 sentence someone would cite to undo build-order step 2.** It used to read
