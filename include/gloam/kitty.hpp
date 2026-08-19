@@ -39,8 +39,11 @@
 /// The placement command below carries a source crop and a sub-cell pixel offset,
 /// which upstream #115 (GL-B3) exposed as `ImagePlacementOptions`, and it carries
 /// no destination pixel extent, matching upstream #137's (GL-B5)
-/// `PlacementFit::Exact`. Both have landed. When termforge is integrated this
-/// module should SHRINK rather than change shape — see UPSTREAM.md.
+/// `PlacementFit::Exact`. Both have landed, and `src/bin/resident_plates.cpp`
+/// now consumes them for live plate placement. This pure emitter remains the
+/// source of the diagnostic and budget fixtures until gloam#7 routes the real
+/// compositor through termforge; that change should SHRINK this module rather
+/// than change its shape — see UPSTREAM.md.
 
 #include <cstddef>
 #include <cstdint>

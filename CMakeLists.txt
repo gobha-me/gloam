@@ -56,14 +56,9 @@ option(${PROJECT_NAME}_INSTALL   "Generate install / package-config rules" ${PRO
 # (find_package first, FetchContent fallback). This is the prune point for a new
 # project: drop a name to stop fetching that dep.
 # GLOAM's own dependency floor is deliberately at the standard library, matching
-# termforge's stated policy. The simulation core links nothing at all — neither
-# name below reaches ${PROJECT_NAME}::lib, and that is a hard architectural
+# termforge's stated policy. The simulation core links nothing at all — none of
+# the names below reaches ${PROJECT_NAME}::lib, and that is a hard architectural
 # boundary rather than a coincidence (AGENTS.md rule 1).
-#
-# One dep is still absent, on purpose:
-#   termforge — its required APIs have landed, but no target in this tree calls
-#               them yet. Add it with G-5/G-7's terminal layer rather than make
-#               every binary fetch an unused dependency (see UPSTREAM.md).
 set(${PROJECT_NAME}_DEPS
   catch2    # Catch2 v3 — test framework (test/)
   rtaudio   # SPEC §9 — the output stream (src/bin/). ⚠ It lives in GLOAM
@@ -71,6 +66,8 @@ set(${PROJECT_NAME}_DEPS
             # standard library only, and RtAudio would break that promise
             # (§9.1). Exactly one translation unit includes it, enforced by the
             # ctest case `rtaudio-boundary-single-module`.
+  termforge # SPEC §4.8 — terminal lifecycle and resident image ownership.
+            # Private to src/bin/ and its binary-side lifecycle test.
 )
 
 # Component gating: a dependency that exists only to serve a target we are not
@@ -90,11 +87,16 @@ endif ()
 # no audio in it: all three consumer modes have GLOAM non-top-level, so BUILD_BIN
 # defaults OFF, and mode 3 passes -D<project>_BUILD_BIN=OFF explicitly.
 #
-# termforge lands beside it the moment the terminal layer starts, which is why
-# that line is kept commented rather than deleted.
 if (NOT ${PROJECT_NAME}_BUILD_BIN)
   list(REMOVE_ITEM ${PROJECT_NAME}_DEPS rtaudio)
-  # list(REMOVE_ITEM ${PROJECT_NAME}_DEPS termforge)
+endif ()
+
+# The real lifecycle test compiles the same binary-side owner, so termforge is
+# needed when either application code OR the test suite is built. A library-only
+# consumer has both switches off and therefore fetches neither terminal nor
+# audio dependencies.
+if (NOT ${PROJECT_NAME}_BUILD_BIN AND NOT ${PROJECT_NAME}_TESTS)
+  list(REMOVE_ITEM ${PROJECT_NAME}_DEPS termforge)
 endif ()
 
 include(${CMAKE_CURRENT_LIST_DIR}/cmake/dependencies.cmake)

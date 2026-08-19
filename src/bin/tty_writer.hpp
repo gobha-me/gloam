@@ -11,21 +11,20 @@
 /// AGENTS.md rule 1). This header is the other half, and it is why it lives in
 /// `src/bin/`: it is the only place in GLOAM allowed to call `write`.
 ///
-/// AGENTS.md already promised this file existed — "the `write` that puts those
-/// bytes on a terminal stays in `src/bin/`, and that one line is the whole
-/// terminal-facing surface". Until now it did not. Writing it before termforge
-/// arrives means the boundary is a fact when the driver lands rather than a
-/// negotiation, which is §16's argument for build-order step 2 applied one layer
-/// out.
+/// AGENTS.md promises that "the `write` that puts those bytes on a terminal
+/// stays in `src/bin/`, and that one line is the whole terminal-facing surface".
+/// `TerminalSink` now routes termforge's complete frames through this function,
+/// so that boundary remains a fact after the driver lands rather than a
+/// convention, which is §16's argument applied one layer out.
 ///
 /// WHAT THIS DELIBERATELY DOES NOT DO
 ///
 /// No backpressure policy: no `poll`, no timeout, no retry budget, no spinning
-/// on `EAGAIN`. Those are decisions for a frame loop, and GLOAM's termforge-backed
-/// frame loop has not landed yet (gloam#5, gloam#7). A policy chosen now would be
-/// chosen against an imaginary caller and would be load
-/// bearing by the time a real one appeared. `write_all` returns what got through
-/// and the caller decides.
+/// on `EAGAIN`. `TerminalSink` is the termforge adapter and consumes a whole
+/// blocking terminal write or reports a refused frame; the future frame loop
+/// (gloam#7) owns any reconnect/buffering policy. `write_all` still reports what
+/// got through so both that adapter and the diagnostic entry point can account
+/// for kernel-accepted bytes without inventing progress.
 ///
 /// PORTABILITY
 ///

@@ -1,17 +1,17 @@
 // GLOAM — headless diagnostic entry point.
 //
 // There is no game here yet, and there deliberately is not: SPEC §19 puts the
-// layer API, the lifecycle tests and the byte instruments before any game
-// logic. The required termforge APIs have landed, but GLOAM's lifecycle and
-// compositor integration have not (see UPSTREAM.md). What this binary does
-// instead is the part of §19 step 4 that
+// layer API, lifecycle and byte instruments before any game logic. GLOAM's
+// termforge-backed resident owner now exists beside this file and is exercised
+// through real ptys in test/31imagelifecycle; the compositor that drives it from
+// world state is still gloam#7. What this diagnostic does instead is the part of
+// §19 step 4 that
 // can exist today — print the frozen constants and the ruleset hash, and run
 // M0's corridor through the real perception model so the numbers in §6 can be
 // read rather than trusted.
 //
-// Standard library only, apart from the one POSIX write in tty_writer.hpp. This
-// binary will grow a termforge dependency; it must not grow one that reaches
-// back into gloam::lib's determinism.
+// This target now privately links termforge and RtAudio. Neither reaches back
+// into gloam::lib's deterministic, standard-library-only boundary.
 
 #include <signal.h>
 #include <unistd.h>  // STDOUT_FILENO — do not lean on libstdc++ leaking it
@@ -85,9 +85,10 @@ struct ColdStart {
 /// Bake, encode and transmit the whole resident plate set into a sink.
 ///
 /// The bytes go nowhere — this is the upload path run for its size and its cost,
-/// not an upload. The real one belongs to the compositor's startup (gloam#7,
-/// termforge's `on_start`), and doing it here would put a plate on a terminal
-/// that has not asked for one.
+/// not an upload. `resident::PlateSet` owns the real termforge pin path and its
+/// `on_start` lifecycle tests; invoking it from this diagnostic still waits for
+/// the compositor (gloam#7), because otherwise the process would put a plate on
+/// a terminal that has not asked for a game frame.
 ///
 /// A clock is read, which nothing in `gloam::lib` may do — which is exactly why
 /// this function is in `src/bin/` and the thing it measures is not.
