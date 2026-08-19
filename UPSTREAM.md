@@ -11,83 +11,87 @@ and termforge never learns about it. The goal is a robust framework for TUI
 projects of all shapes and sizes; GLOAM is a demanding first consumer, not a
 special case.
 
-## Filed
+## Filed, and now landed
 
-Twelve requests, 2026-07-30, all against `gobha-me/termforge`. Each carries a
-named bug class, an acceptance test, and the mutation that proves the test bites
-— termforge's own register (`AGENTS.md`).
+Requests were filed beginning 2026-07-30 against `gobha-me/termforge`. Each
+carries a named bug class, an acceptance test, and the mutation that proves the
+test bites — termforge's own register (`AGENTS.md`). This living status was last
+read against **termforge v0.55.0 on 2026-08-19**. Every request below is closed
+or deliberately resolved; no termforge issue now blocks GLOAM's lifecycle tests
+or compositor.
 
-### GL-A · Application-owned resident images — blocks the compositor
+### GL-A · Application-owned resident images
 
-| | Need | Issue |
+| | Need | Resolution |
 | --- | --- | --- |
-| GL-A1 | Pin an image against LRU eviction | [#109](https://github.com/gobha-me/termforge/issues/109) |
-| GL-A2 | Application-allocated image ids, or a reserved range | [#110](https://github.com/gobha-me/termforge/issues/110) |
-| GL-A3 | Shared-memory transfer path for the bulk startup upload | [#111](https://github.com/gobha-me/termforge/issues/111) |
-| GL-A4 | Residency accounting and quota query | [#112](https://github.com/gobha-me/termforge/issues/112) |
-| GL-A5 | Documented image lifecycle across alt-screen / resize / reattach | [#113](https://github.com/gobha-me/termforge/issues/113) |
+| GL-A1 | Pin an image against LRU eviction | [#109](https://github.com/gobha-me/termforge/issues/109), [PR #188](https://github.com/gobha-me/termforge/pull/188) — **v0.8.0** |
+| GL-A2 | Stable application-visible identity | [#110](https://github.com/gobha-me/termforge/issues/110) — resolved by v0.8.0's owner- and generation-qualified `PinnedImage`; raw protocol ids remain driver-owned |
+| GL-A3 | Shared-memory transfer path for the bulk startup upload | [#111](https://github.com/gobha-me/termforge/issues/111), [PR #299](https://github.com/gobha-me/termforge/pull/299) — **v0.54.0** |
+| GL-A4 | Residency accounting and quota query | [#112](https://github.com/gobha-me/termforge/issues/112), [PR #270](https://github.com/gobha-me/termforge/pull/270) — **v0.35.0** |
+| GL-A5 | Documented image lifecycle across alt-screen / resize / reattach | [#113](https://github.com/gobha-me/termforge/issues/113), [PR #266](https://github.com/gobha-me/termforge/pull/266) — **v0.33.0** |
 
-**GL-A1 and [#137](https://github.com/gobha-me/termforge/issues/137) are the hard blockers.** See "What #83 landing changed"
-below — the cell rect arrived, and with it a stretch-to-fill contract that a
-pre-dithered plate cannot survive.
+The lifecycle result is explicit rather than magical. A grid or cell-geometry
+resize preserves resident payloads and refreshes placements. Suspend/resume or
+an embedding reattach invalidates driver state without emitting deletes,
+delivers `ImageInvalidatedEvent`, and makes every old `PinnedImage` stale; GLOAM
+then repins from its pack. Normal teardown deletes through the live sink.
 
-**GL-A1's own detail:** `KittyDriver` tracks 16 region slots keyed on
-`(x, y, w, h)` and evicts the least-recently-drawn past that, recycling ids
-(`src/lib/drivers/kitty_driver.cpp:173-201`). Moving a sprite one cell allocates
-a new slot; `gc_regions()` drops anything not redrawn in the last frame. For a
-dashboard that is correct. For a set of plates transmitted once at startup it
-means every eviction is a silent re-upload — the exact cost the resident-image
-design exists to avoid.
+The capacity follow-up is landed too. [#199](https://github.com/gobha-me/termforge/issues/199)
+and [PR #207](https://github.com/gobha-me/termforge/pull/207) corrected and
+real-terminal-verified the Unicode placeholder in **v0.9.4**;
+[#205](https://github.com/gobha-me/termforge/issues/205) and
+[PR #216](https://github.com/gobha-me/termforge/pull/216) then raised the shared
+pin/animation budget to 256 in **v0.10.2**.
 
 ### GL-B · Placement and layering
 
-| | Need | Issue |
+| | Need | Resolution |
 | --- | --- | --- |
-| GL-B1 | `draw_image` takes a cell rect | **[#83](https://github.com/gobha-me/termforge/issues/83) — LANDED in v0.3.0** |
-| GL-B2 | Named layer API over raw z-index | [#114](https://github.com/gobha-me/termforge/issues/114) |
-| GL-B3 | Sub-cell pixel offset (`X=`/`Y=`) and source crop | [#115](https://github.com/gobha-me/termforge/issues/115) |
-| GL-B4 | Query the terminal's cell pixel size | **[#100](https://github.com/gobha-me/termforge/issues/100) — LANDED in v0.3.0** |
-| GL-B5 | **Opt out of stretch-to-fill — place a pre-rendered image at 1:1** | [#137](https://github.com/gobha-me/termforge/issues/137) — **the compositor's blocker** |
+| GL-B1 | `draw_image` takes a cell rect | [#83](https://github.com/gobha-me/termforge/issues/83) — **v0.3.0** |
+| GL-B2 | Named layer API over raw z-index | [#114](https://github.com/gobha-me/termforge/issues/114), [PR #275](https://github.com/gobha-me/termforge/pull/275) — **v0.39.0** |
+| GL-B3 | Sub-cell pixel offset (`X=`/`Y=`) and source crop | [#115](https://github.com/gobha-me/termforge/issues/115), [PR #276](https://github.com/gobha-me/termforge/pull/276) — **v0.40.0** |
+| GL-B4 | Query the terminal's cell pixel size | [#100](https://github.com/gobha-me/termforge/issues/100) — **v0.3.0** |
+| GL-B5 | Opt out of stretch-to-fill for pre-rendered images | [#137](https://github.com/gobha-me/termforge/issues/137), [PR #168](https://github.com/gobha-me/termforge/pull/168) — **v0.6.10**; encoded PNG composition in [#169](https://github.com/gobha-me/termforge/issues/169), [PR #172](https://github.com/gobha-me/termforge/pull/172) — **v0.6.11** |
 
-**GL-B2 now exists GLOAM-side and is available to lift.** `include/gloam/layer.hpp`
+**GL-B2 also exists GLOAM-side.** `include/gloam/layer.hpp`
 is the named layer API §4.5 asks for: `gloam::layer::Band` over the six
 compositing bands, `image_z(band, rank)` as the only route to a z-index, and the
 below-background threshold behind a name rather than hand-written at a call site.
 The whole header depends on `<cstdint>` and `<optional>` and nothing else — it is
-deliberately a leaf, so #114 can take it whole. `cmake/check_layer_z.cmake` and
-`test/06layer/` are the acceptance test and the mutation that proves it bites.
+deliberately a leaf. `cmake/check_layer_z.cmake` and `test/06layer/` are the
+acceptance test and the mutation that proves it bites; termforge's semantic
+`ImageLayer` now supplies the driver-side counterpart.
 
-**GL-B3 and GL-B5 are what `gloam::kitty::Placement` is written against.** It
-carries a source crop and a sub-cell `X=`/`Y=` offset — #115's shape — and it has
-no destination cell-rect field at all, so it structurally cannot emit the `c=`/`r=`
-that §3.2 rules out and #137 asks to opt out of. When both land, this module
-should **shrink** rather than change shape. Until then GLOAM constructs the
-placement bytes itself, behind the boundary `cmake/check_kitty_boundary.cmake`
-enforces.
+**GL-B3 and GL-B5 are what `gloam::kitty::Placement` was written against.** It
+carries the source crop and sub-cell `X=`/`Y=` offset now exposed by
+`ImagePlacementOptions`, and it has no destination pixel extent that could ask
+for scaling. During termforge integration this module should **shrink** rather
+than change shape. Until then GLOAM still constructs placement bytes itself,
+behind the boundary `cmake/check_kitty_boundary.cmake` enforces.
 
 ### GL-C · Terminal-side animation
 
-| | Need | Issue |
+| | Need | Resolution |
 | --- | --- | --- |
-| GL-C1 | Register a pre-baked frame sequence at startup, by name | [#116](https://github.com/gobha-me/termforge/issues/116) |
-| GL-C2 | Trigger by name, query completion, interrupt cleanly | [#117](https://github.com/gobha-me/termforge/issues/117) |
+| GL-C1 | Register a pre-baked frame sequence at startup | [#116](https://github.com/gobha-me/termforge/issues/116), [PR #277](https://github.com/gobha-me/termforge/pull/277) — **v0.41.0** |
+| GL-C2 | Trigger, query completion, seek and interrupt cleanly | [#117](https://github.com/gobha-me/termforge/issues/117), [PR #278](https://github.com/gobha-me/termforge/pull/278) — **v0.42.0** |
 
 ### GL-D · Input and startup
 
-| | Need | Issue |
+| | Need | Resolution |
 | --- | --- | --- |
-| GL-D1 | Kitty keyboard protocol — key release and repeat | **[#60](https://github.com/gobha-me/termforge/issues/60) — LANDED in v0.2.2** |
-| GL-D2 | Declare a capability floor and refuse to start below it | **[#91](https://github.com/gobha-me/termforge/issues/91)** — commented as a consumer |
-| GL-D3 | Virtual `setup`/`teardown` hooks for app-owned resources | **[#97](https://github.com/gobha-me/termforge/issues/97)** — in progress; lands as `on_start`/`on_stop` |
+| GL-D1 | Kitty keyboard protocol — key release and repeat | [#60](https://github.com/gobha-me/termforge/issues/60) — **v0.2.2** |
+| GL-D2 | Declare a capability floor and refuse to start below it | [#91](https://github.com/gobha-me/termforge/issues/91), [PR #251](https://github.com/gobha-me/termforge/pull/251) — **v0.30.0** |
+| GL-D3 | Lifecycle hooks for app-owned resources | [#97](https://github.com/gobha-me/termforge/issues/97), [PR #138](https://github.com/gobha-me/termforge/pull/138) — `on_start`/`on_stop` in **v0.6.3** |
 
 ### GL-E · Determinism and replay
 
-| | Need | Issue |
+| | Need | Resolution |
 | --- | --- | --- |
-| GL-E1 | Promote the three headless-pump seams to supported API | [#118](https://github.com/gobha-me/termforge/issues/118) |
-| GL-E2 | Synthetic clock injection as public API | [#119](https://github.com/gobha-me/termforge/issues/119) |
-| GL-E3 | Record and playback of the event stream | [#120](https://github.com/gobha-me/termforge/issues/120) |
-| GL-E4 | `App::post_event` | **[#28](https://github.com/gobha-me/termforge/issues/28)** — commented as a consumer |
+| GL-E1 | Promote the three headless-pump seams to supported API | [#118](https://github.com/gobha-me/termforge/issues/118), [PR #236](https://github.com/gobha-me/termforge/pull/236) — **v0.20.0** |
+| GL-E2 | Synthetic clock injection as public API | [#119](https://github.com/gobha-me/termforge/issues/119), [PR #237](https://github.com/gobha-me/termforge/pull/237) — **v0.21.0** |
+| GL-E3 | Record and playback of the event stream | [#120](https://github.com/gobha-me/termforge/issues/120), [PR #239](https://github.com/gobha-me/termforge/pull/239) — **v0.22.0** |
+| GL-E4 | Cross-thread event posting | [#28](https://github.com/gobha-me/termforge/issues/28), [PR #235](https://github.com/gobha-me/termforge/pull/235) — `App::post(Event)` in **v0.19.0** |
 
 ## Never filed upstream
 
@@ -101,44 +105,30 @@ enforces.
   offline dither pipeline, the `replay.gloam` container. None of these are a TUI
   framework's business.
 
-## What #83 landing changed
+## Current graphics status
 
-Read against termforge **v0.6.2** (2026-07-31). #83 and #100 both closed in
-v0.3.0, and the compositor is **no closer**.
+Read against termforge **v0.55.0** (2026-08-19), every compositor requirement is
+available and composes with the others:
 
-`draw_image` now takes a cell rect and cell pixel size is queryable and
-re-pushed on every `SIGWINCH` — both real wins. But #83's resolution made
-scaling the written contract:
+- `EncodedImage` accepts pre-compressed PNG and `PlacementFit::Exact`, so kitty
+  receives neither `c=` nor `r=` and never resamples a pre-dithered plate.
+- `ImagePlacementOptions` carries semantic layers, sub-cell pixel offsets and
+  source crops; a placement-only change does not retransmit resident pixels.
+- `PinnedImage` separates application-owned payload lifetime from placement
+  lifetime, is protected against stale/foreign handles, and shares a queryable
+  **256-slot** application-resident budget with animation registrations.
+  GLOAM uses 71/246 plate pins plus 3/6 animation roots: 74 slots at M0 and 252
+  in the full game, both inside the cap.
+- Animation registration and control cover the three transition sequences,
+  while residency accounting and explicit invalidation cover the lifecycle
+  tests. Shared-memory transport is available as an opt-in policy for initial
+  pinned uploads; animation frames deliberately remain direct.
 
-> Stretch-to-fill, nearest neighbour. No letterbox or fit modes… Scaling is the
-> contract, so it is not a degradation and raises no event.
-> — `include/termforge/drivers/terminal_driver.hpp`
-
-`place_classic` emits `c=`/`r=` on every placement, with no path that omits
-them. That is in direct opposition to SPEC §3.2:
-
-> **Kitty's `c=`/`r=` cell scaling is never used** — it resamples, and
-> resampling a pre-dithered plate is exactly the dither crawl §4.3 exists to
-> avoid.
-
-The arithmetic makes it unavoidable rather than merely likely. `image_cell_extent`
-uses ceiling division, so at the 9×18 px cells termforge measured on real
-hardware a 480 px plate is 53.3 cells → 54 → stretched to 486 px. At the 8×16 px
-nominal fallback, 360 px becomes 368 px vertically. No plate size survives,
-because the cell geometry belongs to the terminal.
-
-**Scoring the compositor's four needs against v0.6.2: none are met.** Exact
-placement ([#137](https://github.com/gobha-me/termforge/issues/137)), sub-cell
-offsets ([#115](https://github.com/gobha-me/termforge/issues/115)), z-order
-([#114](https://github.com/gobha-me/termforge/issues/114)), residency
-([#109](https://github.com/gobha-me/termforge/issues/109) — still 16 slots,
-still keyed on the destination rect, so moving one cell is still a full
-re-upload).
-
-#137 asks for an **opt-out, not a reversal**: stretch-to-fill stays the default
-and stays right for widgets, which generate their images and can re-rasterize at
-`preferred_pixel_extent()`. A pre-rendered image cannot, and that is the
-distinction the API is missing.
+That makes [G-5](https://github.com/gobha-me/gloam/issues/5) and
+[G-7](https://github.com/gobha-me/gloam/issues/7) **ready, not implemented**.
+GLOAM still has no termforge dependency to repin: the dependency recipe and
+binary link belong in the first terminal-facing implementation, not in a status
+change with no caller.
 
 ## Corrections to the design document
 
@@ -157,20 +147,19 @@ This section is the amendment record, and it wins over the snapshot wherever the
 disagree.
 
 The specification was checked against termforge **v0.1.18**. The library is at
-**v0.6.2** and four claims no longer hold:
+**v0.55.0** and four claims no longer hold:
 
 1. **#60 has landed.** The design gates §7.4's hold-a-number-to-aim on the kitty
    keyboard protocol and says M2 combat cannot start without it. It shipped in
    v0.2.2 — `KeyAction::{Press, Repeat, Release}` on `KeyEvent::action`, behind
    `KeyboardMode::Enhanced`. The fallback plan in §7.4 is no longer needed.
 2. **The CMake target is `termforge::lib`,** not `termforge::termforge`.
-3. **`App::post_event` does not exist** — the design's §14.1 implies GL-E4 is
-   partly available. It is not; #28 is still open. `dispatch_event` is public but
-   synchronous and not thread-safe.
-4. **The loop seams are `private virtual`, not `protected`** (`app.hpp:422-429`).
-   Still overridable — access control does not affect overriding, and termforge's
-   own suite relies on that — but not a supported extension point, which is what
-   GL-E1 asks for.
+3. **The design's `App::post_event` concept exists as `App::post(Event)`.**
+   Cross-thread posting shipped in v0.19.0; the spelling differs, not the
+   capability.
+4. **The loop seams are a supported protected extension point.** `now_steady`,
+   `wait_readable` and `read_available` shipped as the documented GL-E1 surface
+   in v0.20.0, with first-class synthetic time following in v0.21.0.
 
 Two more, which are design questions rather than factual errors:
 
@@ -931,17 +920,18 @@ Two notes worth carrying forward from #12's implementation:
   what keeps it a decision rather than a dominant strategy. Both sides of that
   boundary are pinned in `test/04perception/`.
 
-## Working around an open request
+## Working with the landed requests
 
 GLOAM does not build elaborate shims for blocked APIs. Where a request blocks
 real progress, the work stops and the blocker is escalated to termforge rather
 than routed around — a workaround that survives long enough becomes the reason
 the upstream fix never lands.
 
-What that means today: the entire §4 compositor is still blocked on GL-A1 and
-GL-B5 (#137). The deterministic core underneath it — geometry, noise, perception,
-light, runes, budgets — has no terminal dependency by design and is complete and
-tested.
+That policy did its job: the register above is closed or deliberately resolved,
+and GLOAM no longer needs a shim or vendored driver. The next terminal work is
+G-5's lifecycle matrix, followed by G-7's compositor. Those changes will add
+termforge to `src/bin/`; the deterministic library underneath it — geometry,
+noise, perception, light, runes and budgets — remains dependency-free by design.
 
 **One correction to an earlier version of this paragraph, because it is the
 sentence someone would cite to undo build-order step 2.** It used to read

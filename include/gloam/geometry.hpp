@@ -66,7 +66,7 @@ inline constexpr int kReferenceCellWidthPx = 10;
 inline constexpr int kReferenceCellHeightPx = 20;
 
 /// The reference grid, and the floor GLOAM refuses to start below (§14, GL-D2 /
-/// upstream #91).
+/// upstream #91, landed in termforge v0.30.0).
 inline constexpr int kReferenceCols = 80;
 inline constexpr int kReferenceRows = 24;
 
@@ -106,7 +106,7 @@ inline constexpr CellRegion kStatusLine{1, 80, 24, 24};
 /// Whether a terminal of this cell geometry can host GLOAM at all: the viewport
 /// needs its full pixel extent AND `kChromeRows` rows beneath it. Below this,
 /// GLOAM refuses to start rather than degrading — §17, and the whole point of
-/// upstream #91.
+/// upstream #91, landed in termforge v0.30.0.
 [[nodiscard]] constexpr auto fits(int cols, int rows, int cell_w_px, int cell_h_px) -> bool {
   if (cell_w_px <= 0 || cell_h_px <= 0) return false;
   const int need_cols = cells_to_cover(kViewportWidthPx, cell_w_px);

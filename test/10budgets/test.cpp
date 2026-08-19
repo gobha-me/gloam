@@ -144,7 +144,7 @@ TEST_CASE("§11 byte budgets are declared and ordered sanely", "[budget]") {
   //
   // The animation, recomposition and sustained-p95 rows are measured at the end
   // of this file against an explicitly-labelled MODEL of the placement list,
-  // because the §4 compositor is still blocked upstream (UPSTREAM.md). Read the
+  // because the §4 compositor has not been implemented yet (gloam#7). Read the
   // banner on that case before quoting its number.
 }
 
@@ -420,8 +420,8 @@ TEST_CASE("§11's two cold-start timing rows, one measured and one modelled",
   //             destination is a temporary file rather than a pipe, on purpose:
   //             a pipe holds 64 KiB and a payload that outgrew it would not fail
   //             this test, it would HANG it, and a hung runner reports nothing.
-  //   NOT       the terminal's own decode and upload time, which is upstream
-  //             #109's problem and unmeasurable from here.
+  //   NOT       the terminal's own decode and upload time, which is beyond the
+  //             process boundary and unmeasurable from here.
   //
   // The throttled row is arithmetic over the measured byte count — 1 Mbit/s of
   // wire time plus the measured local cost. A test that actually slept for the
@@ -1164,8 +1164,8 @@ TEST_CASE("§4.6's idle frame costs zero bytes, measured at the sink", "[budget]
 //
 //  READ THIS BEFORE QUOTING THE NUMBER BELOW.
 //
-//  There is no compositor. §4 is blocked on termforge #137 and #109 (gloam#7),
-//  so nothing in this tree builds a placement list from a world. What follows is
+//  There is no compositor yet (gloam#7), so nothing in this tree builds a
+//  placement list from a world. What follows is
 //  a MODEL of one: for each tick it places §4.2's M0 slot inventory — twelve
 //  wall slots, eight floor and ceiling bands, one light field, one sprite per
 //  monster — through the real `kitty::emit_placement`, with NO DIFF.

@@ -14,8 +14,8 @@
 /// buffers live here, in `main`.
 ///
 /// WHAT IT RECORDS TODAY: one scripted session over M0's corridor. There is no
-/// input device to record from — the terminal layer is blocked upstream — so
-/// the session is synthesised. `record` and `play` are still the two halves
+/// input device to record from because the terminal layer is not integrated yet,
+/// so the session is synthesised. `record` and `play` are still the two halves
 /// that have to agree, and they are separated by a file and a process boundary,
 /// which is the property the gate needs.
 

@@ -134,7 +134,7 @@ auto emit_placement(emit::ByteSink& sink, const Placement& placement, CellPixelS
   append_key(sink, ",i=", placement.image_id);
   append_key(sink, ",p=", placement.placement_id);
 
-  // Source crop — the shape upstream #115 (GL-B3) will expose.
+  // Source crop — the shape termforge #115 (GL-B3) now exposes.
   append_key(sink, ",x=", placement.crop_x);
   append_key(sink, ",y=", placement.crop_y);
   append_key(sink, ",w=", placement.crop_w);

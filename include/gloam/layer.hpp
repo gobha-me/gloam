@@ -32,8 +32,9 @@
 /// here and not in `kitty.hpp` — a driver swap changes the wire format, not which
 /// band a monster sprite belongs to. This header must survive that swap untouched.
 ///
-/// termforge has no layer API and no z-index parameter at all. GLOAM ships one
-/// and offers it upstream — see UPSTREAM.md, GL-B2.
+/// termforge now exposes semantic `ImageLayer` placement through GL-B2 / #114.
+/// GLOAM keeps this game-specific band vocabulary and maps it into that driver
+/// surface when the terminal layer lands — see UPSTREAM.md.
 
 #include <cstdint>
 #include <optional>

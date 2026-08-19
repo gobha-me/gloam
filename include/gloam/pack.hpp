@@ -130,11 +130,12 @@ inline constexpr std::uint8_t kCodecMax = 1;
 /// One plate. Fifty-two bytes on disk, in this field order.
 ///
 /// There is NO KITTY IMAGE ID HERE, and that absence is the design. An image id
-/// is a property of a live terminal session — kitty reads `i=0` as unset,
-/// termforge recycles ids and LRU-evicts them (upstream #109) — so binding one
-/// at bake time would burn a runtime residency policy into a build artifact and
-/// change `pack_sha256` whenever that policy changed. The `plate_id -> image_id`
-/// map belongs to the uploader, and the uploader is a binary.
+/// is a property of a live terminal session — kitty reads `i=0` as unset, and
+/// termforge deliberately keeps recycled protocol ids behind generation-qualified
+/// `PinnedImage` handles (upstream #109/#110). Binding one at bake time would
+/// burn a runtime residency policy into a build artifact and change `pack_sha256`
+/// whenever that policy changed. The `plate_id -> PinnedImage` map belongs to the
+/// uploader, and the uploader is a binary.
 struct Record {
   std::uint16_t plate_id{0};
   Role role{Role::Wall};
