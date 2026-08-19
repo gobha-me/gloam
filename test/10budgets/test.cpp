@@ -19,6 +19,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <span>
+#include <string>
+#include <termforge/drivers/kitty_driver.hpp>
 #include <vector>
 
 #include "gloam/assets.hpp"
@@ -45,9 +47,13 @@
 // half. All three are reachable here because this test directory owns its own
 // wiring — see CMakeLists.txt. None of them is in gloam::lib, and none of them
 // includes RtAudio.
+#include "resident_plates.hpp"
 #include "sfx.hpp"
+#include "terminal_compositor.hpp"
 #include "tty_writer.hpp"
 #include "voice_mixer.hpp"
+
+#include "compositor_fixture.hpp"
 
 using namespace gloam;
 
@@ -143,9 +149,7 @@ TEST_CASE("§11 byte budgets are declared and ordered sanely", "[budget]") {
   // that can report what a syscall accepted.
   //
   // The animation, recomposition and sustained-p95 rows are measured at the end
-  // of this file against an explicitly-labelled MODEL of the placement list,
-  // because the §4 compositor has not been implemented yet (gloam#7). Read the
-  // banner on that case before quoting its number.
+  // of this file through G-7's real compositor, resident owner and Kitty driver.
 }
 
 TEST_CASE("§11 timing budgets are declared", "[budget]") {
@@ -1159,194 +1163,20 @@ TEST_CASE("§4.6's idle frame costs zero bytes, measured at the sink", "[budget]
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-//  TEST-PLAN.md §4's headline: a 200-tick scripted replay, counted at the emit
-//  path.
-//
-//  READ THIS BEFORE QUOTING THE NUMBER BELOW.
-//
-//  There is no compositor yet (gloam#7), so nothing in this tree builds a
-//  placement list from a world. What follows is
-//  a MODEL of one: for each tick it places §4.2's M0 slot inventory — twelve
-//  wall slots, eight floor and ceiling bands, one light field, one sprite per
-//  monster — through the real `kitty::emit_placement`, with NO DIFF.
-//
-//  So the BYTES are real and the LIST is a model. Two consequences, both of
-//  which have to travel with the number:
-//
-//   1. It is an UPPER BOUND on what a compositor emits for the same event
-//      stream, because §4.6's diff can only remove placements from a full list.
-//   2. That bound holds only while the compositor allocates ONE PLACEMENT ID PER
-//      SLOT AND REUSES IT. §4.6's diff is place-and-delete: re-placing an id
-//      costs one place, but a placement that VACATES costs a delete as well. A
-//      compositor that allocates ids per frame pays ~25 B per vacated slot and
-//      this measurement stops being an upper bound. That is a constraint this
-//      instrument places on #7, not a caveat about this test.
+//  TEST-PLAN.md §4's headline: a 200-tick scripted replay, counted at the real
+//  compositor's terminal-driver boundary.
 // ════════════════════════════════════════════════════════════════════════════
 
 namespace {
 
-/// A frame's class, from the state delta across a tick.
-///
-/// The design names §11's three per-frame rows by SITUATION and never gives a
-/// rule code can evaluate — UPSTREAM.md item 11, gloam#24, which record the call
-/// this function implements.
-///
-/// On the delta rather than on the `replay::Event`, deliberately. `apply()`
-/// already refuses a step into an impassable edge, so classifying on the event
-/// charges a blocked step as a 2 KB recomposition — and lets an input log
-/// manufacture its own budget class by spamming Step into a wall until every
-/// tick draws a 2 KB allowance while nothing moves.
-struct FrameState {
-  Coord party{};
-  Dir facing{};
-  std::int32_t lamp_level{};
-  std::vector<Awareness> minds{};
-  /// Captured one slice BEFORE `advance` could move a monster, against exactly
-  /// the day §6.4's patrols landed: a tick where a monster relocates WITHOUT
-  /// changing awareness would otherwise classify as idle, emit nothing, and
-  /// quietly falsify this case's upper-bound claim while CI stayed green.
-  ///
-  /// It was cheaper to capture then than to remember now, and the case that
-  /// cashes it is at the end of this file.
-  ///
-  /// NOTE WHAT STOPPED BEING TRUE ABOUT IT WITH gloam#32: this used to add that
-  /// "the 200-tick harness's own monsters stay route-less, so this field costs
-  /// it nothing". Pursuit needs no route, so route-less stopped meaning
-  /// stationary, and the harness's monsters now move under it.
-  std::vector<Coord> positions{};
-
-  // AND A `facings` FIELD IS DELIBERATELY NOT HERE, which is worth writing down
-  // because it looks like the obvious next one. The argument for it: a monster
-  // halted at arm's reach re-faces its target on every tick it holds, so its
-  // POSE could change while its awareness and position do not — an Animation
-  // frame that would classify Idle and be asserted at zero bytes.
-  //
-  // It was added, and then removed, because the frame it describes is not
-  // reachable. Every facing write in `advance` is driven by a target that only
-  // moves when the PARTY moves — `mind.last_known` is written from
-  // `senses.party_position` — and a tick on which the party moves is a
-  // Recomposition by the first rule, whatever the monsters did. Checked by
-  // mutation rather than by argument: with the field in place, deleting it from
-  // `classify_frame` left the whole suite green, which is the signature of a
-  // branch no scenario reaches.
-  //
-  // If §7 ever gives a monster a reason to turn that the party did not cause —
-  // an idle look-around, a head turn toward another monster — this is the field
-  // to add, and `test/22pursuit/`'s "a halted hunter keeps facing you" is where
-  // the behaviour is pinned meanwhile.
-};
-
-auto snapshot(const World& w) -> FrameState {
-  FrameState s{w.party, w.facing, w.lamp_level, {}, {}};
-  s.minds.reserve(w.monsters.size());
-  s.positions.reserve(w.monsters.size());
-  for (const auto& m : w.monsters) {
-    s.minds.push_back(m.mind.state);
-    s.positions.push_back(m.at);
+auto acknowledge_compositor_pins(resident::PlateSet& plates,
+                                  termforge::KittyDriver& driver) -> void {
+  for (const auto& record : test_support::compositor_records()) {
+    const auto handle = plates.handle(record.plate_id);
+    REQUIRE(handle);
+    driver.consume_reply(
+        termforge::TerminalReply{handle->id, std::nullopt, "OK"});
   }
-  return s;
-}
-
-auto classify_frame(const FrameState& before, const FrameState& after) -> meter::FrameClass {
-  if (before.party != after.party || before.facing != after.facing) {
-    return meter::FrameClass::Recomposition;
-  }
-  if (before.lamp_level != after.lamp_level || before.minds != after.minds ||
-      before.positions != after.positions) {
-    return meter::FrameClass::Animation;
-  }
-  return meter::FrameClass::Idle;
-}
-
-/// The reference cell (§3.2), so the byte counts below are the ones §11 is
-/// written against rather than an artefact of some other terminal.
-constexpr kitty::CellPixelSize kReferenceCell{geometry::kReferenceCellWidthPx,
-                                              geometry::kReferenceCellHeightPx};
-
-/// One placement into a named slot. Coordinates are inside §3.2's viewport
-/// region; ids are 1-based because zero is refused.
-auto place(emit::ByteSink& sink, std::uint32_t slot, layer::Band band, int rank,
-           geometry::Ring ring) -> std::size_t {
-  const kitty::Placement p{
-      .image_id = slot,
-      .placement_id = slot,
-      .band = band,
-      .band_rank = rank,
-      .cell_col = static_cast<std::int32_t>(slot % 40),
-      .cell_row = static_cast<std::int32_t>(slot % 17),
-      .offset_x_px = 0,
-      .offset_y_px = 0,
-      .crop_x = 0,
-      .crop_y = 0,
-      .crop_w = ring.width,
-      .crop_h = ring.height,
-  };
-  const auto result = kitty::emit_placement(sink, p, kReferenceCell);
-  REQUIRE(static_cast<bool>(result));
-  return result.bytes;
-}
-
-/// §4.2's M0 slot inventory as a placement list. NOT a compositor: no diff, no
-/// visibility culling, no depth sorting, no transition sequences.
-auto model_recomposition(emit::ByteSink& sink, const World& w) -> int {
-  int placements = 0;
-  std::uint32_t slot = 1;
-
-  // §4.1's twelve wall slots: left and right trapezoids at depths 0-3, front
-  // faces at depths 1-4. The depth ring gives each its extent.
-  for (int depth = 0; depth < geometry::kDepthCount - 1; ++depth) {
-    place(sink, slot++, layer::Band::Geometry, depth, geometry::kDepths[depth]);
-    place(sink, slot++, layer::Band::Geometry, depth, geometry::kDepths[depth]);
-    place(sink, slot++, layer::Band::Geometry, depth, geometry::kDepths[depth + 1]);
-    placements += 3;
-  }
-
-  // Floor and ceiling bands, one pair per depth.
-  for (int depth = 0; depth < 4; ++depth) {
-    place(sink, slot++, layer::Band::Geometry, 16 + depth, geometry::kDepths[depth]);
-    place(sink, slot++, layer::Band::Geometry, 20 + depth, geometry::kDepths[depth]);
-    placements += 2;
-  }
-
-  // §4.4's light field, above the geometry band and below the sprites. The same
-  // lamp_level that picks the plate is the one perception reads.
-  place(sink, static_cast<std::uint32_t>(100 + w.lamp_level), layer::Band::Light, 0,
-        geometry::kDepths[0]);
-  ++placements;
-
-  for (std::size_t m = 0; m < w.monsters.size(); ++m) {
-    place(sink, static_cast<std::uint32_t>(200 + m), layer::Band::Sprites,
-          static_cast<int>(m), geometry::kDepths[2]);
-    ++placements;
-  }
-
-  return placements;
-}
-
-/// §4.6's "two or three placements, not twenty-four": the light field, plus the
-/// sprite of every monster whose awareness OR POSITION moved.
-///
-/// Position joined that list with §6.4. A monster that relocates without
-/// changing awareness needs re-placing for exactly the same reason one that
-/// changes pose does, and a model that skipped it would under-count an
-/// animation frame — reporting headroom this row does not have.
-auto model_animation(emit::ByteSink& sink, const World& w, const FrameState& before) -> int {
-  int placements = 0;
-
-  place(sink, static_cast<std::uint32_t>(100 + w.lamp_level), layer::Band::Light, 0,
-        geometry::kDepths[0]);
-  ++placements;
-
-  for (std::size_t m = 0; m < w.monsters.size(); ++m) {
-    const bool mind_still = m < before.minds.size() && before.minds[m] == w.monsters[m].mind.state;
-    const bool body_still = m < before.positions.size() && before.positions[m] == w.monsters[m].at;
-    if (mind_still && body_still) continue;
-    place(sink, static_cast<std::uint32_t>(200 + m), layer::Band::Sprites,
-          static_cast<int>(m), geometry::kDepths[2]);
-    ++placements;
-  }
-
-  return placements;
 }
 
 }  // namespace
@@ -1424,7 +1254,19 @@ TEST_CASE("§11's per-frame rows, over a 200-tick scripted replay", "[budget]") 
   // added to `play` for it: a byte meter is downstream of a compositor, not of a
   // tick, and `advance` cannot classify from inside because it mutates in place
   // and retains nothing to compare against.
-  emit::ByteSink sink;
+  const auto pack_image = test_support::compositor_pack();
+  auto plates = resident::PlateSet::from_pack(pack_image);
+  REQUIRE(plates);
+  termforge::KittyDriver driver;
+  driver.set_cell_pixel_size({geometry::kReferenceCellWidthPx,
+                              geometry::kReferenceCellHeightPx});
+  std::string wire;
+  driver.set_output(&wire);
+  REQUIRE(plates->pin_all(driver));
+  driver.flush();
+  acknowledge_compositor_pins(*plates, driver);
+  wire.clear();
+  terminal::Compositor renderer{*plates};
   meter::FrameMeter frame_meter;
 
   int recompositions = 0;
@@ -1432,33 +1274,42 @@ TEST_CASE("§11's per-frame rows, over a 200-tick scripted replay", "[budget]") 
   int idles = 0;
 
   for (const auto& record : script) {
-    const auto before = snapshot(world);
+    const auto before = compositor::snapshot(world);
 
     apply(world, record.event, record.payload, t);
     advance(world, t);
 
-    const auto after = snapshot(world);
-    const auto frame_class = classify_frame(before, after);
+    const auto after = compositor::snapshot(world);
+    const auto frame_class = compositor::classify(before, after);
+
+    const auto staged = renderer.stage(
+        world, {geometry::kReferenceCellWidthPx,
+                geometry::kReferenceCellHeightPx});
+    REQUIRE(staged);
+    REQUIRE(*staged == frame_class);
+    REQUIRE(renderer.emit(driver));
+    driver.flush();
+    const bool accepted = !driver.take_output_error().has_value();
+    REQUIRE(accepted);
+    renderer.finish(accepted);
+    const auto bytes = driver.last_frame_bytes().total();
+    frame_meter.record(frame_class, bytes);
 
     switch (frame_class) {
       case meter::FrameClass::Recomposition:
-        model_recomposition(sink, world);
         ++recompositions;
         break;
       case meter::FrameClass::Animation:
-        model_animation(sink, world, before);
         ++animations;
         break;
       case meter::FrameClass::Idle:
         // §4.6: identical list, zero bytes. Asserted INSIDE the loop, because a
         // single idle frame that emitted a cursor move would be invisible in the
         // totals and is exactly the regression this row exists to catch.
-        CHECK(sink.size() == budget::kIdleFrameBytes);
+        CHECK(bytes == budget::kIdleFrameBytes);
         ++idles;
         break;
     }
-
-    frame_meter.end_frame(sink, frame_class);
   }
 
   // ── The traffic guard ────────────────────────────────────────────────────
@@ -1513,45 +1364,10 @@ TEST_CASE("§11's per-frame rows, over a 200-tick scripted replay", "[budget]") 
   INFO("sustained p95 " << *p95 << " B/s over " << windows
                         << " one-second windows, against a budget of "
                         << budget::kMaxSustainedBytesPerSecond
-                        << " B/s — UPPER BOUND, no diff");
-  // ── AND THE ROW IS BLOWN. THIS ASSERTION IS DELIBERATELY INVERTED. ───────
-  //
-  // Measured: 8,459 B/s against a budget of 8,192 — 3.3% over, on a number that
-  // is an UPPER BOUND and is byte-stable across compilers (every placement is
-  // integer `to_chars` output over a fixed list, and the awareness transitions
-  // that pick the animation frames come from `rng.hpp`'s own bounded draw).
-  //
-  // The overrun is not a defect in the model. It is a contradiction between two
-  // rows of the same design document: §4.7's 140 ms step transition and §11's
-  // 8 KB/s sustained p95 are mutually unreachable at §4.1's own "roughly two
-  // dozen sprites" and the current wire form.
-  //
-  // IT WENT UP WITH gloam#32, from 8,321 (1.6% over) to 8,459 (3.3% over), and
-  // the cause is this harness's own monsters: they are route-less, which used to
-  // mean stationary and no longer does, so ticks that were Idle now carry a
-  // moving sprite. The overrun is worse than it was and it is worse for a stated
-  // reason, which is the only way a budget number is allowed to move. At §4.7's rate rather than this
-  // script's tick-quantised 5 steps/s it is worse — about 1.4x.
-  //
-  // Recorded as UPSTREAM.md item 13 and gloam#26, with the named escape: kitty
-  // defaults `x=0,y=0` and reads `w=0,h=0` as "to the edge", so a full-plate
-  // placement can drop 20 of its ~66 bytes and the row comes back inside budget
-  // with room. That is #7's to spend — it breaks test/07emit's golden literal,
-  // the crop fields are load-bearing for any future atlas, and `kitty.cpp`'s
-  // `validate()` refuses a zero crop for a documented and correct reason.
-  //
-  // Inverted rather than left as prose, for the reason #17's cold-start row is:
-  // a budget recorded in a comment is not a budget. THIS GOES RED the day a diff
-  // or a shorter wire form lands, and whoever lands it has to come here and flip
-  // it into the real row.
-  CHECK(*p95 > budget::kMaxSustainedBytesPerSecond);
-
-  // How far over, pinned in both directions. The overrun is small — which is
-  // itself the finding, because a budget whose satisfaction turns on the third
-  // significant figure of an assumed wire form is not yet a budget. If this goes
-  // red upward, something made emission much more expensive and that is a
-  // regression rather than a re-measurement.
-  CHECK(*p95 * 100 / budget::kMaxSustainedBytesPerSecond <= 105);
+                        << " B/s — measured compositor diff");
+  // #26 named the escape: whole-image placement omits kitty's default crop
+  // keys. G-7 now exercises that real wire form and the real diff.
+  CHECK(*p95 <= budget::kMaxSustainedBytesPerSecond);
 }
 
 TEST_CASE("a monster that relocates without changing awareness is an ANIMATION frame",
@@ -1574,9 +1390,9 @@ TEST_CASE("a monster that relocates without changing awareness is an ANIMATION f
   // Dull, doused and far from the party: nothing here can move an awareness
   // state, so a change of CLASS can only have come from the body moving.
   Monster mon{};
-  mon.at = Coord{8, 1};
+  mon.at = Coord{3, 1};
   mon.kind = MonsterKind{Acuity::Dull, false};
-  mon.patrol.route = {Coord{8, 1}, Coord{9, 1}};
+  mon.patrol.route = {Coord{3, 1}, Coord{4, 1}};
   mon.patrol.dwell = {0, 0};
 
   auto world = make_world(0x9A14ULL, std::move(level), {mon});
@@ -1584,30 +1400,54 @@ TEST_CASE("a monster that relocates without changing awareness is an ANIMATION f
   world.facing = Dir::East;
   world.lamp_level = 0;
 
-  emit::ByteSink sink;
+  const auto pack_image = test_support::compositor_pack();
+  auto plates = resident::PlateSet::from_pack(pack_image);
+  REQUIRE(plates);
+  termforge::KittyDriver driver;
+  driver.set_cell_pixel_size({geometry::kReferenceCellWidthPx,
+                              geometry::kReferenceCellHeightPx});
+  std::string wire;
+  driver.set_output(&wire);
+  REQUIRE(plates->pin_all(driver));
+  driver.flush();
+  acknowledge_compositor_pins(*plates, driver);
+  wire.clear();
+  terminal::Compositor renderer{*plates};
   meter::FrameMeter frame_meter;
+
+  REQUIRE(renderer.stage(world, {geometry::kReferenceCellWidthPx,
+                                 geometry::kReferenceCellHeightPx}));
+  REQUIRE(renderer.emit(driver));
+  driver.flush();
+  REQUIRE_FALSE(driver.take_output_error());
+  renderer.finish(true);
 
   int animations = 0;
   int idles = 0;
   constexpr int kTicks = 12;
   for (int tick = 0; tick < kTicks; ++tick) {
-    const auto before = snapshot(world);
+    const auto before = compositor::snapshot(world);
     advance(world, t);
-    const auto after = snapshot(world);
+    const auto after = compositor::snapshot(world);
 
     // The party never acts, so nothing can classify as a recomposition.
-    const auto klass = classify_frame(before, after);
+    const auto klass = compositor::classify(before, after);
     REQUIRE(klass != meter::FrameClass::Recomposition);
     REQUIRE(before.minds == after.minds);  // awareness is NOT what moved
 
-    sink.clear();
+    REQUIRE(renderer.stage(world, {geometry::kReferenceCellWidthPx,
+                                   geometry::kReferenceCellHeightPx}));
+    REQUIRE(renderer.emit(driver));
+    driver.flush();
+    REQUIRE_FALSE(driver.take_output_error());
+    renderer.finish(true);
+    const auto bytes = driver.last_frame_bytes().total();
     if (klass == meter::FrameClass::Animation) {
-      static_cast<void>(model_animation(sink, world, before));
       ++animations;
     } else {
       ++idles;
     }
-    frame_meter.record(klass, sink.size());
+    frame_meter.record(klass, bytes);
   }
 
   // Both classes exercised, or the two rows below are peak() over an empty set.

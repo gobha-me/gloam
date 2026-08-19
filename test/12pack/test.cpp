@@ -492,7 +492,7 @@ TEST_CASE("a flipped byte in a record trips the pack digest", "[pack]") {
   // is why the header digest has to span the record table rather than only the
   // blobs.
   auto f = make_pack();
-  f.image[record_at(0) + 5] = std::byte{0x42};  // wall_type: structurally legal
+  f.image[record_at(0) + 5] = std::byte{0x42};  // variant: structurally legal
   CHECK(gloam::pack::verify(f.image).error == PackError::PackDigestMismatch);
 }
 
@@ -667,7 +667,7 @@ TEST_CASE("write_record and read_record are inverses over everything assemble em
           r.role = static_cast<gloam::pack::Role>(role);
           r.lateral = static_cast<gloam::pack::Lateral>(lateral);
           r.depth = depth;
-          r.wall_type = 3;
+          r.variant = 3;
         }
         std::vector<std::span<const std::byte>> blobs{
             std::span<const std::byte>{f.plate_bytes}.subspan(0, blob_bytes),
@@ -806,7 +806,7 @@ TEST_CASE("the light-field pack is byte-identical across two independent bakes",
   // If this changes, something changed the ART. That is allowed — the falloff
   // band width in lightfield.hpp is explicitly a look decision — but it has to
   // be a deliberate line in a diff rather than a number that drifted.
-  CHECK(hex_of(first) == "1f448bbffc7e8274477cdc65b0155b9c5ba3cf54c4e3fd329bdd10cf0f325b1b");
+  CHECK(hex_of(first) == "f096b862e99be363ffe7d64454f5b8b1a973e8c01b6f73a90690065f82b33acc");
 
   // §11's residency cap. pack.hpp deliberately does not know about budgets —
   // emit.hpp's rule, "the sink reports, the budget judges" — so the comparison
@@ -815,6 +815,15 @@ TEST_CASE("the light-field pack is byte-identical across two independent bakes",
   REQUIRE(gloam::pack::read_header(first, h));
   CHECK(h.plate_count == lightfield::kFieldCount);
   CHECK(h.plate_count <= budget::kMaxResidentImages);
+  for (std::uint16_t index = 0; index < h.plate_count; ++index) {
+    pack::Record record{};
+    REQUIRE(pack::read_record(
+        std::span<const std::byte>{first}.subspan(
+            pack::kHeaderBytes + pack::kRecordBytes * index, pack::kRecordBytes),
+        record));
+    CHECK(record.role == pack::Role::LightField);
+    CHECK(record.variant == index);
+  }
 
   // A NECESSARY CONDITION, NOT §11's BUDGET. `kMaxColdStartPayloadBytes` is the
   // BASE64 TRANSMIT payload, and the pack is not that: kitty is handed pixels,

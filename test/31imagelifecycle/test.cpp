@@ -75,7 +75,7 @@ auto small_pack(std::size_t count) -> PackImage {
         .role = gloam::pack::Role::Ui,
         .depth = gloam::pack::kDepthFullFrame,
         .lateral = gloam::pack::Lateral::FullFrame,
-        .wall_type = 0,
+        .variant = 0,
         .codec = gloam::pack::Codec::RawPlanes,
         .w = 2,
         .h = 2,

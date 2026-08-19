@@ -44,6 +44,7 @@ add_library(${PROJECT_NAME}_lib STATIC
   assets.cpp
   audio.cpp
   base64.cpp
+  compositor.cpp
   deflate.cpp
   gloam.cpp
   kitty.cpp

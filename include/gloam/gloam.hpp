@@ -16,8 +16,8 @@
 ///
 /// WHAT THIS UMBRELLA DELIBERATELY LEAVES OUT
 ///
-/// Sixteen headers ship in `include/gloam/` and are NOT included below. Fifteen
-/// of them are listed here; `sha256.hpp` is the sixteenth and has its own
+/// Seventeen headers ship in `include/gloam/` and are NOT included below. Sixteen
+/// of them are listed here; `sha256.hpp` is the seventeenth and has its own
 /// paragraph at the end, because it is the one that arrives anyway. That is a
 /// decision, not an oversight, and it is written down here so the next person
 /// does not helpfully "fix" it:
@@ -27,6 +27,7 @@
 ///   emit.hpp       the byte sink §11's budget counters wrap around
 ///   meter.hpp      §11's per-frame classes, and the p95 over their history
 ///   kitty.hpp      the kitty call boundary — every escape sequence, one module
+///   compositor.hpp §4's pure world-to-placement-list and diff
 ///   audio.hpp      §9's voice ring, and the gain/pan derivation over §6.2
 ///   dither.hpp     §4.3's fixed ordered matrix, and the one comparison
 ///   plate.hpp      §10's palette, as two bit-packed planes over a caller's blob
@@ -38,12 +39,12 @@
 ///   deflate.hpp    a zlib stream, because §11's payload budget needs one
 ///   base64.hpp     the encoding §4.1's one upload per plate pays for
 ///
-/// The first five are render-side; `audio.hpp` is §9; the last nine are the
-/// offline asset pipeline and the upload path it feeds (§10, §4.1). All fifteen
+/// The first six are render-side; `audio.hpp` is §9; the last nine are the
+/// offline asset pipeline and the upload path it feeds (§10, §4.1). All sixteen
 /// are inside `gloam::lib` because they
 /// are pure — integers and bytes, no clock, no file descriptor, no global,
 /// nothing beyond the standard library — and because tests link only
-/// `${PROJECT_NAME}::lib`. PRODUCING bytes is not the same as needing a
+/// `${PROJECT_NAME}::lib`. PRODUCING values or bytes is not the same as needing a
 /// terminal; WRITING them is, and that write lives in `src/bin/`.
 ///
 /// `audio.hpp` is the one whose NAME argues hardest against its placement, so it
