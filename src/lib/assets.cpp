@@ -16,7 +16,9 @@ namespace {
   r.role = pack::Role::LightField;
   r.depth = pack::kDepthFullFrame;
   r.lateral = pack::Lateral::FullFrame;
-  r.wall_type = 0;
+  // The generic variant byte selects the member within a semantic role. For
+  // light fields that member is exactly the lamp level (§4.4).
+  r.variant = static_cast<std::uint8_t>(lamp_level - kLampLevelMin);
   r.codec = pack::Codec::RawPlanes;
   r.w = static_cast<std::uint16_t>(lightfield::kWidthPx);
   r.h = static_cast<std::uint16_t>(lightfield::kHeightPx);

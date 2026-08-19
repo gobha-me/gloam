@@ -4,12 +4,12 @@
 # gloam::lib: the simulation core is standard-library-only and cannot own a
 # terminal, a clock or an I/O policy (AGENTS.md rule 1).
 #
-# v0.55.0 is the first GLOAM pin. It contains the complete contract this layer
-# consumes: application-resident PinnedImage handles, generation-qualified
-# invalidation, native-resolution PlacementFit::Exact, opaque PNG upload, a
-# caller-owned ByteSink and terminal cell-pixel geometry.
+# v0.56.0 adds public placement and zero-wire retention of registered animation
+# roots. G-7 consumes that final piece alongside application-resident pins,
+# generation-qualified invalidation, native-resolution PlacementFit::Exact,
+# opaque PNG upload, a caller-owned ByteSink and cell-pixel geometry.
 
-find_package(termforge 0.55 CONFIG QUIET)
+find_package(termforge 0.56 CONFIG QUIET)
 
 if (NOT TARGET termforge::lib)
   if (NOT termforge_URI)
@@ -17,7 +17,7 @@ if (NOT TARGET termforge::lib)
   endif ()
 
   if (NOT termforge_TAG)
-    set(termforge_TAG v0.55.0)
+    set(termforge_TAG v0.56.0)
   endif ()
 
   # This dependency is an implementation detail of unexported targets. Its

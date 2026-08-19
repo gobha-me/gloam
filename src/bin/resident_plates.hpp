@@ -17,6 +17,7 @@
 
 #include <termforge/drivers/terminal_driver.hpp>
 
+#include "gloam/compositor.hpp"
 #include "gloam/layer.hpp"
 #include "gloam/pack.hpp"
 #include "gloam/png.hpp"
@@ -36,6 +37,7 @@ enum class ErrorCode : std::uint8_t {
   InvalidLayer,
   StaleHandle,
   PlacementFailed,
+  InvalidCatalog,
 };
 
 struct Error {
@@ -43,6 +45,7 @@ struct Error {
   std::uint16_t plate_id{0};
   pack::PackError pack_error{pack::PackError::None};
   png::PngError png_error{png::PngError::None};
+  std::optional<compositor::Error> compositor;
   std::optional<termforge::ErrorEvent> terminal;
 };
 
@@ -76,12 +79,18 @@ class PlateSet {
 
   [[nodiscard]] auto draw(termforge::TerminalDriver& driver, const Placement& placement)
       -> std::expected<void, Error>;
+  [[nodiscard]] auto retain(termforge::TerminalDriver& driver,
+                            const Placement& placement)
+      -> std::expected<void, Error>;
 
   [[nodiscard]] auto handle(std::uint16_t plate_id) const noexcept
       -> std::optional<termforge::PinnedImage>;
   [[nodiscard]] auto size() const noexcept -> std::size_t { return uploads_.size(); }
   [[nodiscard]] auto pinned() const noexcept -> bool {
     return !uploads_.empty() && handles_.size() == uploads_.size();
+  }
+  [[nodiscard]] auto catalog() const noexcept -> const compositor::Catalog& {
+    return catalog_;
   }
 
  private:
@@ -91,10 +100,16 @@ class PlateSet {
     std::vector<std::byte> png;
   };
 
-  explicit PlateSet(std::vector<Upload> uploads) : uploads_(std::move(uploads)) {}
+  PlateSet(std::vector<Upload> uploads, compositor::Catalog catalog)
+      : uploads_(std::move(uploads)), catalog_(std::move(catalog)) {}
+
+  [[nodiscard]] auto place(termforge::TerminalDriver& driver,
+                           const Placement& placement, bool retain)
+      -> std::expected<void, Error>;
 
   std::vector<Upload> uploads_;
   std::vector<termforge::PinnedImage> handles_;
+  compositor::Catalog catalog_;
 };
 
 /// The cell footprint that covers the frozen 480x360 viewport at native pixel

@@ -28,6 +28,7 @@ add_executable(${PROJECT_NAME}
   tty_writer.cpp
   terminal_sink.cpp
   resident_plates.cpp
+  terminal_compositor.cpp
   sfx.cpp
   voice_mixer.cpp
   audio_device.cpp

@@ -16,7 +16,7 @@ special case.
 Requests were filed beginning 2026-07-30 against `gobha-me/termforge`. Each
 carries a named bug class, an acceptance test, and the mutation that proves the
 test bites — termforge's own register (`AGENTS.md`). This living status was last
-read against **termforge v0.55.0 on 2026-08-19**. Every request below is closed
+read against **termforge v0.56.0 on 2026-08-19**. Every request below is closed
 or deliberately resolved; no termforge issue now blocks GLOAM's lifecycle tests
 or compositor.
 
@@ -107,7 +107,7 @@ behind the boundary `cmake/check_kitty_boundary.cmake` enforces.
 
 ## Current graphics status
 
-Read against termforge **v0.55.0** (2026-08-19), every compositor requirement is
+Read against termforge **v0.56.0** (2026-08-19), every compositor requirement is
 available and composes with the others:
 
 - `EncodedImage` accepts pre-compressed PNG and `PlacementFit::Exact`, so kitty
@@ -125,7 +125,7 @@ available and composes with the others:
   pinned uploads; animation frames deliberately remain direct.
 
 [G-5](https://github.com/gobha-me/gloam/issues/5) now consumes that contract.
-GLOAM pins termforge v0.55.0 privately in `src/bin/`, owns encoded payloads and
+GLOAM pins termforge v0.56.0 privately in `src/bin/`, owns encoded payloads and
 `plate_id -> PinnedImage` handles there, retains them across both kinds of resize,
 and repins after suspend/resume or either reattach route. Its acceptance suite
 uses real ptys, a child process for SIGTSTP/SIGCONT, and the full 256/257 capacity
@@ -149,7 +149,7 @@ This section is the amendment record, and it wins over the snapshot wherever the
 disagree.
 
 The specification was checked against termforge **v0.1.18**. The library is at
-**v0.55.0** and four claims no longer hold:
+**v0.56.0** and four claims no longer hold:
 
 1. **#60 has landed.** The design gates §7.4's hold-a-number-to-aim on the kitty
    keyboard protocol and says M2 combat cannot start without it. It shipped in
@@ -420,51 +420,28 @@ Two more, which are design questions rather than factual errors:
     `W` from `replay::kTickHz` and asserts the identity; otherwise a change to
     the tick rate silently rescales the budget.
 
-13. **§4.7's 140 ms step transition and §11's 8 KB/s sustained p95 are mutually
-    unreachable at §4.1's own placement count.** Mirrored as
-    [#26](https://github.com/gobha-me/gloam/issues/26). Unlike 11 and 12 this is
-    not a gap — it is a contradiction between two rows of the same document, and
-    it is measured rather than argued.
+13. **§4.7's 140 ms step transition and §11's 8 KB/s sustained p95 appeared
+    mutually unreachable before the real placement diff existed.** Mirrored as
+    [#26](https://github.com/gobha-me/gloam/issues/26), and resolved by G-7
+    without relaxing either number.
 
-    `test/10budgets/` now runs TEST-PLAN.md §4's 200-tick scripted replay through
-    the real `kitty::emit_placement`, at the fastest walk the simulation can
-    express (a step every two ticks — §4.7's 140 ms is faster still, and 10 Hz
-    cannot express it). Measured:
+    `test/10budgets/` runs TEST-PLAN.md §4's 200-tick scripted replay through
+    the real compositor, resident owner and termforge Kitty driver, at the
+    fastest walk the simulation can express. Measured at §3.2's reference cell:
 
     | | |
     | --- | --- |
-    | One placement, reference cell | ~66 B |
-    | Full recomposition, 24 placements | **1,596 B** vs 2,048 — passes |
+    | Peak recomposition | **885 B** vs 2,048 — passes |
     | Animation-only frame | **137 B** vs 400 — passes |
     | Idle frame | **0 B** — passes |
-    | Sustained p95, sliding 1 s windows | **8,459 B/s** vs 8,192 — **3.3% over** |
+    | Sustained p95, sliding 1 s windows | **1,262 B/s** vs 8,192 — passes |
 
-    At §4.7's own 140 ms rate rather than the tick-quantised 5 steps/s the script
-    can reach, it is roughly **1.4x** over.
-
-    The p95 is an **upper bound**: the model places §4.2's M0 slot inventory with
-    no diff, and §4.6's diff can only remove placements from a full list. That
-    bound holds under one assumption, which is now a constraint on
-    [#7](https://github.com/gobha-me/gloam/issues/7): the compositor must
-    allocate **one placement id per slot and reuse it**. §4.6's diff is
-    place-and-delete, so a compositor that allocates ids per frame pays ~25 B per
-    vacated slot and the measurement stops bounding anything.
-
-    **The named escape.** kitty defaults `x=0,y=0` and reads `w=0,h=0` as "to the
-    right/bottom edge", so a full-plate placement can omit
-    `,x=0,y=0,w=480,h=360` — 20 of the ~66 bytes, which brings even §4.7's rate
-    inside budget with room. Deliberately not taken in this slice: it breaks
-    `test/07emit/`'s golden literal, the crop fields are load-bearing for any
-    future atlas, and `kitty.cpp`'s `validate()` refuses a zero crop for a
-    documented and correct reason. It belongs to whoever builds the compositor.
-
-    `test/10budgets/` asserts the overrun **inverted**, the way #17's cold-start
-    row is asserted, so the row goes red the day a diff or a shorter wire form
-    fixes it and whoever lands that has to come back and flip it. A second
-    assertion pins the overrun at ≤ 5%: the margin being this thin is itself part
-    of the finding, because a budget whose satisfaction turns on the third
-    significant figure of an assumed wire form is not yet a budget.
-
+    Two production choices close the contradiction. Logical slots are stable and
+    unchanged placements go through termforge's zero-wire `retain_pinned`; a
+    retirement is omission from the frame, not a new id. Whole-plate placements
+    also take #26's named escape by leaving `source` empty, so kitty omits its
+    defaulted crop keys. Atlas crops remain explicit when a future caller supplies
+    one. The budget assertion is now in its ordinary `<=` direction.
 14. **§6.4 specifies neither a route representation nor a re-join rule, and
     `SCHEMAS.md`'s `patrol` record cannot express either.** Mirrored as
     [#28](https://github.com/gobha-me/gloam/issues/28). Settled in
@@ -868,6 +845,20 @@ Two more, which are design questions rather than factual errors:
     that does not exist, and owns a two-line compile recipe instead. Verified:
     `cmake --install` on a top-level build deposits nothing matching `rtaudio`.
 
+24. **`SCHEMAS.md` names record byte +5 `wall_type`, although the same fixed
+    record describes every plate role.** Mirrored as
+    [#51](https://github.com/gobha-me/gloam/issues/51). G-7 needs one semantic
+    lookup key for wall kinds, six light fields and three monster poses, so the
+    C++ field is `variant` and its meaning is role-specific: wall 0=plain and
+    1=door; light 0..5 is lamp level; monster 0=calm, 1=alert, 2=hunting;
+    floor/ceiling use 0.
+
+    This is a wording correction, not a new wire field. Pack version 1, record
+    size 52 and byte offset +5 are unchanged. The compositor catalog validates
+    each role's range and refuses duplicate semantic bindings at startup.
+    Item/UI/rune plates remain instance-addressed and need not have unique
+    semantic keys.
+
 #### Proposed: nine rows for `TEST-PLAN.md` §3
 
 §3's property table has six rows and **none of them are about movement**, because
@@ -896,7 +887,7 @@ they are recorded here as a proposed amendment rather than written into
 
 ### Decisions taken
 
-Amendments to `design/SPEC.md`, decided 2026-07-31. The snapshot is not edited;
+Amendments to `design/SPEC.md`, beginning 2026-07-31. The snapshot is not edited;
 these rows are the amendment, and the code implements them.
 
 | | Decision | Effect |
@@ -906,6 +897,7 @@ these rows are the amendment, and the code implements them.
 | [#12](https://github.com/gobha-me/gloam/issues/12) | **§6.1 gains a LOST_TRACK → HUNTING row, with its own tell.** Condition is the same `saw` as SEARCHING → HUNTING. The tell is the head snapping mid-cast-about and an immediate close, with **no audio sting**. | `Tell::SnapsBack`. The sting is reserved for a first sighting: it means "found you", and its absence here means "never lost you". Tell selection is now keyed on the `(before, next)` pair, because two transitions land on HUNTING and §6.1 requires them to read differently. |
 | [#10](https://github.com/gobha-me/gloam/issues/10) | **Confirmed:** transition sequences are animation registrations, not resident images. | Already encoded; no change. |
 | [#13](https://github.com/gobha-me/gloam/issues/13) | **Recorded, deliberately not built.** Capacity from (carry − equipped), over-capacity as a noise penalty, multiplicative rather than subtractive noise reduction, armour **classes** not slots, enchantments derived from URN bindings, and the bag is **silent, not weightless**. | No code. §19 is explicit that nothing in §7 or §8 makes M0's question easier to answer and building either first makes it more expensive to act on the answer. Implement at M1, when the party exists. |
+| [#51](https://github.com/gobha-me/gloam/issues/51) | **Pack byte +5 is a role-specific `variant`, not wall-only `wall_type`.** | No v1 wire-layout change. The compositor catalog selects plain/door walls, L0–L5 light fields and calm/alert/hunting monster poses through one validated semantic key. |
 
 | [#32](https://github.com/gobha-me/gloam/issues/32) | **§6.1 gains a SEARCHING → LOST_TRACK row, and it needs no new tunable and no new tell.** Condition: the trail is exhausted — the monster is standing on `last_known`, or cannot reach it from where it stands — **and** `hunting_lost_ticks` have passed with no perception hit. Ordered AFTER the `saw` check, on #12's re-acquisition precedent. | Without it, pursuit's only terminal state is a monster frozen off its route for the rest of the session — strictly worse for §6.4's "the world feels alive" than the hold-position boundary it replaces, and it would poison #8's gate rather than approximate it. The tell is the existing `Tell::CastsAbout` — "casts about **at the last position**, turning in place" — which `world.cpp` recorded as satisfied *vacuously* until #32; this is the row that cashes it. #12's rule that two paths into one state must not read alike does not apply, because both mean the identical thing: the trail went cold here. `Senses` gains `trail_exhausted`, derived in `advance` where the distance field is, so `perception.cpp` never learns how a monster paths — and it defaults false, so no existing caller changed. `kTuningFieldCount` unchanged at **49**, `ruleset_hash` unmoved, and **no recorded replay is invalidated**. |
 
@@ -930,8 +922,8 @@ than routed around — a workaround that survives long enough becomes the reason
 the upstream fix never lands.
 
 That policy did its job: the register above is closed or deliberately resolved,
-and GLOAM no longer needs a shim or vendored driver. G-5's lifecycle matrix now
-pins termforge privately in `src/bin/`; G-7's compositor is next. The
+and GLOAM no longer needs a shim or vendored driver. G-5's lifecycle matrix and
+G-7's compositor now pin termforge privately in `src/bin/`. The
 deterministic library underneath it — geometry, noise, perception, light, runes
 and budgets — remains dependency-free by design.
 

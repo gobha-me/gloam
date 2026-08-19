@@ -141,7 +141,12 @@ struct Record {
   Role role{Role::Wall};
   std::uint8_t depth{kDepthFullFrame};
   Lateral lateral{Lateral::FullFrame};
-  std::uint8_t wall_type{0};
+  /// Role-specific visual variant. Wall uses 0=plain, 1=door at M0; monster
+  /// uses 0=calm, 1=alert, 2=hunting. The byte was named `wall_type` in the
+  /// design snapshot, but every role shares this fixed record and §4.2 budgets
+  /// variant plates outside walls too. Renaming the C++ field changes no v1
+  /// wire byte, offset or record size.
+  std::uint8_t variant{0};
   Codec codec{Codec::RawPlanes};
   std::uint16_t w{0};
   std::uint16_t h{0};
@@ -233,7 +238,7 @@ struct PackResult {
 /// Build a whole pack image into `out`.
 ///
 /// The caller supplies only the DESCRIPTIVE fields of each record — id, role,
-/// depth, lateral, wall type, codec, extent. `assemble` fills `offset`, `length`
+/// depth, lateral, variant, codec, extent. `assemble` fills `offset`, `length`
 /// and `sha256`, overwriting whatever was there: a caller-supplied stale digest
 /// must not be able to survive into a pack. That division is what makes two runs
 /// byte-identical rather than merely equivalent, because nothing a caller can

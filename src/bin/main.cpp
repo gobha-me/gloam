@@ -2,11 +2,11 @@
 //
 // There is no game here yet, and there deliberately is not: SPEC §19 puts the
 // layer API, lifecycle and byte instruments before any game logic. GLOAM's
-// termforge-backed resident owner now exists beside this file and is exercised
-// through real ptys in test/31imagelifecycle; the compositor that drives it from
-// world state is still gloam#7. What this diagnostic does instead is the part of
-// §19 step 4 that
-// can exist today — print the frozen constants and the ruleset hash, and run
+// termforge-backed resident owner and compositor now exist beside this file and
+// are exercised through real drivers in test/31imagelifecycle and
+// test/33terminalcompositor. The authored scene pack and playable loop are still
+// #8. What this diagnostic does is the part of §19 step 4 that can exist today —
+// print the frozen constants and the ruleset hash, and run
 // M0's corridor through the real perception model so the numbers in §6 can be
 // read rather than trusted.
 //
@@ -87,8 +87,8 @@ struct ColdStart {
 /// The bytes go nowhere — this is the upload path run for its size and its cost,
 /// not an upload. `resident::PlateSet` owns the real termforge pin path and its
 /// `on_start` lifecycle tests; invoking it from this diagnostic still waits for
-/// the compositor (gloam#7), because otherwise the process would put a plate on
-/// a terminal that has not asked for a game frame.
+/// #8's authored scene and playable loop, because otherwise the process would
+/// put a light-field plate on a terminal that has not asked for a game frame.
 ///
 /// A clock is read, which nothing in `gloam::lib` may do — which is exactly why
 /// this function is in `src/bin/` and the thing it measures is not.
@@ -133,11 +133,11 @@ struct ColdStart {
 /// that "the write that puts those bytes on a terminal stays in src/bin/, and
 /// that one line is the whole terminal-facing surface"; this is that line.
 ///
-/// It does NOT print a p95. There is no compositor and therefore no session, and
-/// a shipped binary that printed a synthetic percentile would be quoted back as
-/// a measurement inside a month. What it prints instead is the wire form and the
-/// upload — both measured here, in this binary, by emitting a real placement and
-/// running a real cold start — and the two rules that were undecided until now.
+/// It does NOT print a live p95 because this diagnostic opens no game session;
+/// quoting the test replay as though this process rendered it would be a false
+/// instrument. What it prints instead is the wire form and the upload — both
+/// measured here, in this binary, by emitting a real placement and running a
+/// real cold start — and names the real compositor harness that owns the p95.
 auto print_instruments() -> bool {
   // The measurement: one placement through the real emitter, at §3.2's
   // reference cell. Not a quoted constant.
@@ -193,8 +193,8 @@ auto print_instruments() -> bool {
   std::string report;
   report.reserve(1024);
   report += "\ninstruments (BUDGETS.md, build-order step 4)\n";
-  report += "  wire form     a representative placement is " + num(placement_bytes) +
-            " B at the reference cell (measured here)\n";
+  report += "  wire form     a conservative atlas-capable placement is " +
+            num(placement_bytes) + " B at the reference cell (measured here)\n";
   report += "  frame classes idle " + num(budget::kIdleFrameBytes) + " B / animation <= " +
             num(budget::kMaxAnimationFrameBytes) + " B / recomposition <= " +
             num(budget::kMaxRecompositionBytes) + " B\n";
@@ -205,7 +205,7 @@ auto print_instruments() -> bool {
   }
   report +=
       "  classified on the STATE DELTA: party or facing -> recomposition;\n"
-      "                lamp or awareness -> animation; else idle       (gloam#24)\n";
+      "                lamp, awareness or monster position -> animation; else idle\n";
   report += "  sustained     p95 by nearest rank over sliding " + num(replay::kTickHz) +
             "-tick windows, <= " + num(budget::kMaxSustainedBytesPerSecond) + " B/s  (gloam#25)\n";
 
@@ -223,10 +223,9 @@ auto print_instruments() -> bool {
       "                this replaces cost 4.6x the payload row      (gloam#17)\n";
 
   report +=
-      "  measured      0 emit bytes this run. There is no compositor (gloam#7),\n"
-      "                so no session was rendered and no p95 was computed. The\n"
-      "                200-tick harness in test/10budgets/ is where that number\n"
-      "                lives, and it is 3.3% OVER budget (gloam#26).\n";
+      "  measured      0 emit bytes this run. This diagnostic renders no session,\n"
+      "                so it computes no live p95. The real compositor harness in\n"
+      "                test/10budgets/ measures 1,262 B/s sustained p95.\n";
 
   // printf and a raw write share a file descriptor and not a buffer, so the
   // sections printed above would otherwise land after this one.

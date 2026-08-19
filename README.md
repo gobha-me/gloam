@@ -38,17 +38,18 @@ diagnostic rather than a game. What exists is the deterministic simulation core:
 | The transmit path: indexed PNG, DEFLATE, and the cold-start upload | §4.1, §10, §11 |
 | The audio device: the RtAudio stream, the resident arena, and the mixer | §9.1, §9.2, §9.3 |
 | The resident plate owner and the real-PTY terminal lifecycle matrix | §3.2, §4.5, §4.8 |
+| The fixed-slot compositor, placement diff and queued step transition | §4.1–§4.7 |
 
-The **compositor is no longer blocked upstream**. Re-read at termforge v0.55.0,
-the library now supplies pinned encoded images, exact unscaled placement, named
+The compositor is implemented against **termforge v0.56.0**. The library now
+supplies pinned encoded images, exact unscaled placement, named
 layers, sub-cell offsets and crops, terminal-driven animation, explicit image
 lifecycle invalidation, residency accounting and a 256-slot application-resident
 budget. GLOAM's plate pins plus animation roots use 74 slots at M0 and 252 in the
 full game, so both fit. [UPSTREAM.md](UPSTREAM.md) records the landing releases
 and the lifecycle contract.
 
-The first GLOAM integration has now landed. termforge v0.55.0 is a private
-binary/test dependency; `resident::PlateSet` verifies the pack, encodes its raw
+termforge v0.56.0 is a private binary/test dependency; `resident::PlateSet`
+verifies the pack, encodes its raw
 planes as indexed PNG, preflights the shared 256-slot budget, pins the complete
 batch atomically, and maps pack ids to generation-qualified handles. Resize
 retains those handles and only reflows the native-resolution cell rect;
@@ -56,10 +57,12 @@ suspend/resume and both reattach routes invalidate them and repin from the
 caller-owned payloads. `31imagelifecycle-test` drives all of that through real
 ptys, including actual SIGTSTP/SIGCONT and exception teardown.
 
-The binary remains a headless diagnostic because the component is not yet
-driven by a game frame. The next terminal work is
-[#7](https://github.com/gobha-me/gloam/issues/7)'s compositor, which will place
-the resident set from real world state.
+The binary remains a headless diagnostic because the shipped pack still contains
+only six procedural light fields. G-7 now builds and diffs real placement lists,
+maps pixels to native terminal cells, retains unchanged pins at zero wire, and
+queues inputs behind one 140 ms terminal-driven transition. The authored
+wall/monster/transition art and playable frame loop belong to
+[#8](https://github.com/gobha-me/gloam/issues/8)'s M0 gate.
 
 GLOAM's layer API remains deliberate: §16's mitigation for upstream risk is to
 keep every kitty sequence GLOAM authors behind its own boundary from day one,
@@ -164,20 +167,16 @@ Then the harness measured something worth having:
 
 | Row | Measured | Budget | |
 | --- | --- | --- | --- |
-| Full recomposition, 24 placements | 1,596 B | 2,048 B | passes |
+| Peak recomposition | 885 B | 2,048 B | passes |
 | Animation-only frame | 137 B | 400 B | passes |
 | Idle frame | 0 B | 0 B | passes |
-| Sustained p95 | **8,459 B/s** | 8,192 B/s | **3.3% over** |
+| Sustained p95 | **1,262 B/s** | 8,192 B/s | passes |
 
-§4.7's 140 ms step transition and §11's 8 KB/s sustained p95 are **mutually
-unreachable** at §4.1's own placement count and the current wire form — and the
-measured figure is an *upper bound*, taken with no diff at the fastest walk 10 Hz
-can express. [#26](https://github.com/gobha-me/gloam/issues/26) carries the
-arithmetic, the one assumption the bound rests on (the compositor must reuse
-placement ids per slot), and the escape: dropping kitty's defaulted crop keys
-saves 20 of a placement's 66 bytes and puts the row back inside budget with room.
-`test/10budgets/` asserts the overrun **inverted**, the way #17's cold-start row
-is asserted, so it goes red the day someone fixes it.
+G-7 resolves [#26](https://github.com/gobha-me/gloam/issues/26) without moving
+either contract: stable logical slots use termforge's zero-wire retention, and
+whole-plate placements omit kitty's defaulted crop keys. `test/10budgets/` now
+runs the actual compositor/PlateSet/KittyDriver path and asserts the sustained
+row in its ordinary passing direction.
 
 The **transmit path** is the other half of #6, and it is what closes
 [#17](https://github.com/gobha-me/gloam/issues/17). §4.1 puts every plate on the

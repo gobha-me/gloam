@@ -31,7 +31,7 @@ constexpr std::size_t kPlateId = 0;
 constexpr std::size_t kRole = 2;
 constexpr std::size_t kDepth = 3;
 constexpr std::size_t kLateral = 4;
-constexpr std::size_t kWallType = 5;
+constexpr std::size_t kVariant = 5;
 constexpr std::size_t kCodec = 6;
 constexpr std::size_t kReserved = 7;
 constexpr std::size_t kWidth = 8;
@@ -115,7 +115,7 @@ auto write_record(std::span<std::byte> out, const Record& record) -> PackResult 
   put_u8(out, rec::kRole, static_cast<std::uint8_t>(record.role));
   put_u8(out, rec::kDepth, record.depth);
   put_u8(out, rec::kLateral, static_cast<std::uint8_t>(record.lateral));
-  put_u8(out, rec::kWallType, record.wall_type);
+  put_u8(out, rec::kVariant, record.variant);
   put_u8(out, rec::kCodec, static_cast<std::uint8_t>(record.codec));
   put_u8(out, rec::kReserved, 0);
   put_u16(out, rec::kWidth, record.w);
@@ -170,7 +170,7 @@ auto read_record(std::span<const std::byte> in, Record& out) -> PackResult {
   if (lateral > kLateralMax) return {PackError::UnknownLateral, 0, 0};
   r.lateral = static_cast<Lateral>(lateral);
 
-  r.wall_type = get_u8(in, rec::kWallType);
+  r.variant = get_u8(in, rec::kVariant);
 
   const auto codec = get_u8(in, rec::kCodec);
   if (codec > kCodecMax) return {PackError::UnknownCodec, 0, 0};

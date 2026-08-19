@@ -29,6 +29,8 @@ add_executable(10budgets-test
   ${PROJECT_SOURCE_DIR}/src/bin/tty_writer.cpp
   ${PROJECT_SOURCE_DIR}/src/bin/voice_mixer.cpp
   ${PROJECT_SOURCE_DIR}/src/bin/sfx.cpp
+  ${PROJECT_SOURCE_DIR}/src/bin/resident_plates.cpp
+  ${PROJECT_SOURCE_DIR}/src/bin/terminal_compositor.cpp
   ${SRCS}
 )
 
@@ -50,6 +52,7 @@ target_include_directories(10budgets-test
 
 target_link_libraries(10budgets-test
   PRIVATE Catch2::Catch2
+  PRIVATE termforge::lib
 )
 
 # Guarded like the parent loop guards it, and like the two siblings copy it. The
