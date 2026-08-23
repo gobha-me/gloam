@@ -804,10 +804,13 @@ TEST_CASE("§11's tick budget still holds with the audio sink attached", "[budge
 TEST_CASE("§11's tick budget holds when sixteen monsters PURSUE", "[budget]") {
   // WHAT THIS ROW MEASURES, AND THE FACT THAT DECIDES ITS SHAPE.
   //
-  // A distance field has no cheap case: unlike `propagate_noise`, whose extent
-  // is bounded by the emission, it always fills its reachable component and
-  // there is no early-out. So the only lever on cost is how many DISTINCT
-  // targets a tick asks about.
+  // A distance field is a LAZY MEMO driven by its queries, not an up-front
+  // search — path.hpp's essay gives the argument and the measurements.
+  // Seeding stops at the sources, and each `at` expands the FIFO only until
+  // the cell it asked about is settled, so a search now costs the diamond out
+  // to the querying cell instead of the whole reachable component. The lever
+  // that remains on cost is how many DISTINCT targets a tick asks about,
+  // because each one is still a memo of its own.
   //
   // AND SIXTEEN DISTINCT TARGETS REQUIRE SIXTEEN STALE BELIEFS. `step` writes
   // `mind.last_known` from `senses.party_position` on every perception hit, so
@@ -908,40 +911,53 @@ TEST_CASE("§11's tick budget holds when sixteen monsters PURSUE", "[budget]") {
   // regression through.
   CHECK(distinct_us > shared_us * 2);
 
-  // ── AND THE ABSOLUTE ROW IS NOT ASSERTED, WHICH IS gloam#36 ──────────────
+  // ── AND THE ABSOLUTE ROW STAYS MEASURED-NOT-ASSERTED, WHICH IS gloam#36 ──
   //
-  // Not an omission and not a sanitizer caveat: this row STRADDLES the budget by
-  // machine and by compiler, which is a worse thing for a contract to be than
-  // simply blown.
+  // It used to be worse than unasserted: this row STRADDLED the budget by
+  // machine and by compiler, which is the worst thing a contract can be —
   //
   //   dev box, GCC 14 Debug        2,695 us    67% of the 4 ms budget
   //   CI runner, GCC 14 Debug      5,462 us   137%
   //   CI runner, Clang 20 Debug    under it — the same hardware, the other way
   //   dev box, GCC 14 UBSan        5,182 us   130%
   //
-  // #17 and #26 are asserted INVERTED because they are blown everywhere, so
-  // "assert what is true today and let it go red when someone fixes it" works.
-  // It does not work here: an inverted assertion would be red on the dev box and
+  // — because an inverted assertion would have been red on the dev box and
   // green on CI, and a machine-dependent assertion in EITHER direction is a
-  // flaky test wearing a budget's clothes — which this file has already been
+  // flaky test wearing a budget's clothes, which this file has already been
   // burned by once, at the worst-case sting row.
+  //
+  // The lazy field is what gloam#36 called the engineering prong, and it
+  // closed it. Measured on this machine, GCC 14 Debug, this very row:
+  //
+  //   BEFORE   2,659 us distinct / 215 us shared — matching the issue's own
+  //            dev-box 2,695 us and its CI-runner 5,462 us (137% of budget)
+  //   AFTER      806 us distinct / 174 us shared — 20% of the 4 ms budget,
+  //            a 70% cut
+  //
+  // AND THE ABSOLUTE ROW STILL IS NOT ASSERTED, which is the part to state
+  // plainly rather than let the new numbers argue out of. §11 still states no
+  // reference scale, so "under 4 ms" remains a sentence about THIS machine,
+  // and a slow enough box still blows the row — 20% of budget here is a
+  // cushion, not a contract. The early-out closed the engineering prong; the
+  // reference-scale prong remains a design decision, now obviated but
+  // available, and gloam#36 still carries it.
   //
   // What is asserted instead is the ratio above, which is machine-independent
   // and is the check that actually polices the shared-field discipline. The
   // absolute figure is measured and PRINTED every run, so it cannot quietly
-  // vanish — the same discipline the PENDING rows in this file use, and for the
-  // same reason: a row that disappeared would be indistinguishable from one that
-  // was never written.
+  // vanish — the same discipline the PENDING rows in this file use, and for
+  // the same reason: a row that disappeared would be indistinguishable from
+  // one that was never written.
   //
   // Explicitly NOT done about it: a distance cap on the primitive (it makes
   // "far" and "unreachable" the same answer, and §6.1's SEARCHING exit is keyed
   // on exactly that distinction), and a cheaper scenario (choosing a worst case
-  // to make a row pass is what BUDGETS.md exists to prevent). gloam#36 carries
-  // the escape route and what would close it.
+  // to make a row pass is what BUDGETS.md exists to prevent).
   WARN("§11 simulation tick, sixteen monsters pathing to sixteen distinct targets: "
        << distinct_us << " us against a " << budget::kMaxSimulationTickMs * 1000
-       << " us budget — MEASURED, NOT ASSERTED (gloam#36): this row straddles the budget by "
-          "machine and by compiler, so neither direction is a stable assertion.");
+       << " us budget — MEASURED, NOT ASSERTED (gloam#36): the lazy field took this row "
+          "from 2,659 us to 806 us on this machine (GCC 14 Debug), 20% of budget, but "
+          "§11 states no reference scale, so a slow enough machine still blows it.");
 }
 
 TEST_CASE("§11's tick budget holds when EVERY monster stings on one tick", "[budget]") {

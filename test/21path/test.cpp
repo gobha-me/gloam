@@ -14,6 +14,7 @@
 
 #include <cstdint>
 #include <limits>
+#include <utility>
 #include <vector>
 
 #include "gloam/noise.hpp"
@@ -45,6 +46,25 @@ auto two_rooms(EdgeKind kind, EdgeState state) -> Level {
   return level;
 }
 
+/// An open room with a wall comb through it, so the BFS diamond is bent and a
+/// lazy expansion settles cells in an order no straight-line scan predicts —
+/// which is the whole reason the lazy-field cases below do not use `open_room`.
+/// Every cell stays reachable; the walls only make the shortest paths turn.
+auto walled_room() -> Level {
+  auto level = open_room(9, 9);
+  // Column 3's east edge, rows 1..6: a barrier that can only be rounded along
+  // row 0 or below row 6.
+  for (int y = 1; y <= 6; ++y) {
+    level.link(Coord{3, y}, Dir::East, Edge{EdgeKind::Wall, EdgeState::Open, 0, 0});
+  }
+  // Row 5's south edge, columns 5..8: a second bend, so no query direction is
+  // the unconstrained one.
+  for (int x = 5; x <= 8; ++x) {
+    level.link(Coord{x, 5}, Dir::South, Edge{EdgeKind::Wall, EdgeState::Open, 0, 0});
+  }
+  return level;
+}
+
 /// Every navigable cell of a level, for the property cases.
 auto navigable_cells(const Level& level) -> std::vector<Coord> {
   std::vector<Coord> cells;
@@ -68,7 +88,7 @@ TEST_CASE("a level with no cells answers nothing and steps nowhere", "[path]") {
 
   for (const Level* level : {&empty, &clamped}) {
     const auto field = propagate_distance(*level, Coord{0, 0});
-    CHECK(field.raw().empty());
+    CHECK(field.raw(*level).empty());
     CHECK(field.at(*level, Coord{0, 0}) == kUnreachable);
     CHECK_FALSE(field.reached(*level, Coord{0, 0}));
     CHECK_FALSE(step_down(field, *level, Coord{0, 0}, Dir::North).has_value());
@@ -130,13 +150,19 @@ TEST_CASE("invalid sources are dropped, not fatal, and the rest still seed", "[p
 
   const auto from_mixed = propagate_distance(level, mixed);
   const auto from_valid = propagate_distance(level, valid);
-  CHECK(from_mixed.raw() == from_valid.raw());
+  // `raw(level)` COMPLETES both fields first, which is what keeps the compare
+  // honest under a lazy field: two unexpanded raws are both sources-only and
+  // would be equal whether or not the search beyond the seeds worked at all.
+  CHECK(from_mixed.raw(level) == from_valid.raw(level));
 }
 
 TEST_CASE("a repeated source is the same field as a single one", "[path]") {
   const auto level = open_room(5, 5);
   const std::vector<Coord> twice{Coord{1, 1}, Coord{1, 1}, Coord{1, 1}};
-  CHECK(propagate_distance(level, twice).raw() == propagate_distance(level, Coord{1, 1}).raw());
+  // Completed through `raw(level)` for the same reason: a duplicate seed is a
+  // statement about the whole search, not about the seed ring.
+  CHECK(propagate_distance(level, twice).raw(level) ==
+        propagate_distance(level, Coord{1, 1}).raw(level));
 }
 
 TEST_CASE("a field read against a different level never reads out of bounds", "[path]") {
@@ -343,11 +369,18 @@ TEST_CASE("kUnreachable is a sentinel, never a computed distance", "[path][prope
   const auto field = propagate_distance(level, Coord{0, 0});
 
   const auto cells = static_cast<std::int32_t>(level.cell_count());
-  for (const auto d : field.raw()) {
+  // `raw(level)` FORCES COMPLETION FIRST, and under a lazy field that is the
+  // whole case: an unexplored cell reads `kUnreachable` from storage too, so
+  // without the drain the `continue` below would skip every cell but the
+  // source and this test could not fail.
+  int reached = 0;
+  for (const auto d : field.raw(level)) {
     if (d == kUnreachable) continue;
     REQUIRE(d >= 0);
     REQUIRE(d < cells);
+    ++reached;
   }
+  REQUIRE(reached == cells);  // an open room is one component: nothing skipped
   CHECK(field.at(level, Coord{kSide - 1, kSide - 1}) == 2 * (kSide - 1));
 }
 
@@ -360,7 +393,11 @@ TEST_CASE("the same query answers identically every time", "[path][property]") {
   const std::vector<Coord> sources{Coord{0, 0}, Coord{5, 5}};
 
   const auto first = propagate_distance(level, sources);
-  for (int i = 0; i < 8; ++i) CHECK(propagate_distance(level, sources).raw() == first.raw());
+  // Completed through `raw(level)`, or this compares eight unexpanded fields
+  // and passes on nine different wrong answers.
+  for (int i = 0; i < 8; ++i) {
+    CHECK(propagate_distance(level, sources).raw(level) == first.raw(level));
+  }
 }
 
 // ── The golden, last ────────────────────────────────────────────────────────
@@ -374,10 +411,190 @@ TEST_CASE("a multi-source field is the distance to the NEAREST source", "[path]"
   const auto field = propagate_distance(level, route);
 
   const std::vector<std::int32_t> expected{0, 1, 2, 3, 4, 3, 2, 1, 0};
-  CHECK(field.raw() == expected);
+  CHECK(field.raw(level) == expected);
 
   // And a monster in the middle walks to whichever end its facing prefers,
   // because from (4,0) both are four steps away.
   CHECK(step_down(field, level, Coord{4, 0}, Dir::East) == Dir::East);
   CHECK(step_down(field, level, Coord{4, 0}, Dir::West) == Dir::West);
+}
+
+// ── The lazy field, which is a memo and not a second pathfinder ─────────────
+//
+// path.hpp's essay gives the proof: expansion order is a function of the level
+// and the sources ALONE, assign-on-push makes every distance final the moment
+// it is written, and a query decides only how much of that fixed order has
+// run. Every case below is a way the implementation could break that proof —
+// a stale read cursor, an exhaustion flag set early, a copy that aliases its
+// frontier — stated as the query sequence that would catch it. Each compares
+// against a field driven to completion in one go, because "the lazy field
+// equals the eager field" is the whole contract; anything less is the second
+// pathfinder the header says must not exist.
+
+TEST_CASE("a lazy field resumed mid-expansion loses nothing", "[path]") {
+  // THE FAILURE THIS PINS: a resume that drops or repeats a frontier entry.
+  // `at` expands one FIFO step at a time and stops the instant the asked cell
+  // is assigned, so the second query continues a search the first one
+  // suspended — a read cursor off by one, or a distance re-relaxed on resume,
+  // answers every query below slightly wrong. The walls matter: in an open
+  // room the diamond's settlement order is predictable enough that a skipped
+  // entry can still land the right answer on the queried cell; bent paths
+  // cannot be faked that way.
+  const auto level = walled_room();
+  const std::vector<Coord> sources{Coord{0, 0}, Coord{8, 8}};
+
+  const auto eager = propagate_distance(level, sources);
+  const auto& completed = eager.raw(level);  // forced whole before any query below
+
+  auto lazy = propagate_distance(level, sources);
+  // Interleaved on purpose: a near cell, then a far one, then a middle one,
+  // then the far one AGAIN — the repeat is served by the memo rather than the
+  // search, and must not notice the difference.
+  for (const Coord c :
+       {Coord{1, 0}, Coord{8, 0}, Coord{4, 4}, Coord{8, 0}, Coord{0, 8}, Coord{5, 6}}) {
+    INFO("query (" << c.x << "," << c.y << ")");
+    CHECK(lazy.at(level, c) == completed[level.index_of(c)]);
+  }
+  // And a partial drive must not have disturbed the rest: completing it now
+  // still yields the eager field exactly.
+  CHECK(lazy.raw(level) == completed);
+}
+
+TEST_CASE("an unreachable cell reads kUnreachable before and after the frontier runs dry",
+          "[path]") {
+  // THE FAILURE THIS PINS: the exhaustion flag answering early, or answering
+  // wrong. The first unreachable query drains the frontier and sets the flag;
+  // the second is the flag's O(1) path, with no expansion left to hide behind.
+  // A flag set too early, or consulted before the storage check, would read a
+  // SETTLED cell as kUnreachable from then on — so the sequence ends on
+  // reachable cells, and finishes by forcing completion against the eager
+  // field. This is also the world-level contract: §6.1's SEARCHING exit keys
+  // "the trail cannot be walked" on this very answer.
+  const auto level = two_rooms(EdgeKind::Door, EdgeState::Closed);
+  const auto eager = propagate_distance(level, Coord{0, 1});
+  const auto& completed = eager.raw(level);
+
+  const auto lazy = propagate_distance(level, Coord{0, 1});
+  CHECK(lazy.at(level, Coord{6, 1}) == kUnreachable);  // drains the frontier, sets the flag
+  CHECK(lazy.at(level, Coord{4, 1}) == kUnreachable);  // answered BY the flag, in O(1)
+  CHECK(lazy.at(level, Coord{2, 1}) == 2);   // the flag must not corrupt a settled cell
+  CHECK(lazy.at(level, Coord{3, 1}) == 3);   // nor one the drain itself assigned
+  CHECK(lazy.raw(level) == completed);
+}
+
+TEST_CASE("a rejected read expands nothing and disturbs nothing", "[path]") {
+  // THE FAILURE THIS PINS: a bounds or width rejection that touched the search
+  // on its way out. There is no instrument that sees the frontier's size, so
+  // the disturbance is pinned by ANSWER-CORRECTNESS alone: a reachable cell is
+  // queried before the rejected reads and after them, and a far cell is
+  // queried only after. A rejected read that popped a frontier entry or
+  // flipped the exhaustion flag would make the far cell read kUnreachable —
+  // which is exactly the wrong answer a corrupted memo gives, silently.
+  const auto level = open_room(6, 6);
+  const auto eager = propagate_distance(level, Coord{0, 0});
+  const auto& completed = eager.raw(level);
+  const Coord adjacent{1, 0};  // distance 1: settled by the first expansion step
+
+  auto lazy = propagate_distance(level, Coord{0, 0});
+  CHECK(lazy.at(level, adjacent) == 1);  // expands the source's ring and stops
+
+  // Same cell count, different width: index (2,11) is 35, IN range of the
+  // 36-cell storage, so the width check is the only thing refusing this — the
+  // case path.hpp's measured note describes.
+  const auto wrong_width = open_room(3, 12);
+  REQUIRE(wrong_width.cell_count() == level.cell_count());
+  CHECK(lazy.at(wrong_width, Coord{2, 11}) == kUnreachable);
+  CHECK(lazy.at(level, Coord{-1, 0}) == kUnreachable);  // off the grid
+  CHECK(lazy.at(level, Coord{6, 0}) == kUnreachable);   // just past the edge
+
+  CHECK(lazy.at(level, adjacent) == 1);  // the memo's answer, unchanged
+  // The far cell is the discriminating one: only an intact frontier can still
+  // settle it, and only with the eager field's value.
+  CHECK(lazy.at(level, Coord{5, 5}) == completed[level.index_of(Coord{5, 5})]);
+  CHECK(lazy.raw(level) == completed);
+}
+
+TEST_CASE("a copy or a move of a half-settled field resumes and agrees", "[path]") {
+  // THE FAILURE THIS PINS: the memo state — frontier, read cursor, exhaustion
+  // flag — is mutable, so a copy made mid-expansion could alias it, drop it,
+  // or restart it. Any of the three shows up as the copy and the original
+  // disagreeing with each other or with the eager field. The two are driven
+  // with DIFFERENT query orders from the copy point, because identical orders
+  // could hide an aliased frontier behind identical answers.
+  const auto level = walled_room();
+  const std::vector<Coord> sources{Coord{0, 0}, Coord{8, 8}};
+  const auto eager = propagate_distance(level, sources);
+  const auto& completed = eager.raw(level);
+
+  auto original = propagate_distance(level, sources);
+  CHECK(original.at(level, Coord{2, 2}) == completed[level.index_of(Coord{2, 2})]);
+
+  auto copy = original;  // copied with a frontier mid-flight
+  for (const Coord c : {Coord{4, 4}, Coord{0, 8}, Coord{8, 0}}) {
+    INFO("original query (" << c.x << "," << c.y << ")");
+    CHECK(original.at(level, c) == completed[level.index_of(c)]);
+  }
+  for (const Coord c : {Coord{8, 8}, Coord{4, 0}, Coord{2, 2}}) {
+    INFO("copy query (" << c.x << "," << c.y << ")");
+    CHECK(copy.at(level, c) == completed[level.index_of(c)]);
+  }
+  CHECK(original.raw(level) == completed);
+  CHECK(copy.raw(level) == completed);
+
+  // And the move half: the frontier travels with the storage, so the moved-to
+  // object resumes where the half-settled search stopped rather than starting
+  // over or reading a husk.
+  auto another = propagate_distance(level, sources);
+  CHECK(another.at(level, Coord{5, 5}) == completed[level.index_of(Coord{5, 5})]);
+  const auto moved = std::move(another);
+  CHECK(moved.at(level, Coord{1, 8}) == completed[level.index_of(Coord{1, 8})]);
+  CHECK(moved.raw(level) == completed);
+}
+
+TEST_CASE("step_down on a half-settled field matches step_down on a completed one", "[path]") {
+  // THE FAILURE THIS PINS: a descent that reads an unsettled neighbour as
+  // kUnreachable and concludes "no step" where a step exists — the memo's
+  // partiality becoming observable, which path.hpp's essay says must never
+  // happen. `step_down` reads `from` and then each walkable neighbour through
+  // `at`, and every one of those reads must expand the search as far as the
+  // answer requires. The lazy field here is queried ONLY through `step_down`,
+  // never drained first.
+  const auto level = walled_room();
+  const auto eager = propagate_distance(level, Coord{0, 0});
+  static_cast<void>(eager.raw(level));  // forced whole
+  const auto lazy = propagate_distance(level, Coord{0, 0});
+
+  // All four facings, and one out-of-range facing — `search_order` degrades it
+  // to plain wire order, and the lazy field must not make a second special
+  // case of it.
+  const auto prefer = GENERATE(Dir::North, Dir::East, Dir::South, Dir::West, Dir{200});
+  // A spread of cells: (2,2) has tied neighbours, so the tie-break itself is
+  // compared; (5,6) sits behind the second wall, so its descent is bent.
+  for (const Coord c : {Coord{2, 2}, Coord{4, 4}, Coord{8, 8}, Coord{8, 0}, Coord{5, 6}, Coord{0, 8}}) {
+    INFO("from (" << c.x << "," << c.y << ") prefer " << static_cast<int>(prefer));
+    CHECK(step_down(lazy, level, c, prefer) == step_down(eager, level, c, prefer));
+  }
+}
+
+TEST_CASE("the completed field is independent of the query pattern that drove it", "[path]") {
+  // THE FAILURE THIS PINS: query order leaking into storage. The FIFO and the
+  // Dir wire order are a function of the level and the sources alone, so two
+  // fields driven by different query patterns must complete to the same
+  // vector. A shortcut that settled the asked cell FIRST — or a stack where
+  // the queue should be — passes every single-field case above and fails here.
+  const auto level = walled_room();
+  const std::vector<Coord> sources{Coord{4, 4}};
+
+  auto neighbours_first = propagate_distance(level, sources);
+  auto corners_first = propagate_distance(level, sources);
+  for (const Coord c : {Coord{4, 3}, Coord{5, 4}, Coord{4, 5}}) {
+    static_cast<void>(neighbours_first.at(level, c));
+  }
+  for (const Coord c : {Coord{8, 8}, Coord{0, 0}, Coord{8, 0}, Coord{0, 8}}) {
+    static_cast<void>(corners_first.at(level, c));
+  }
+  CHECK(neighbours_first.raw(level) == corners_first.raw(level));
+  // And both equal a field no query ever touched, which is the non-vacuity
+  // half: two corrupted memos could agree with each other.
+  CHECK(neighbours_first.raw(level) == propagate_distance(level, sources).raw(level));
 }
