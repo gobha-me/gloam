@@ -713,6 +713,20 @@ Two more, which are design questions rather than factual errors:
     sanitizer legs and goes red on every box if someone reintroduces a field per
     monster.
 
+    **Resolved on the engineering prong** (the lazy distance field,
+    `path.hpp`'s "LAZY, WHICH IS A MEMO AND NOT A SECOND PATHFINDER"): seeding
+    and expanding are different events now, and each `at` runs the same FIFO in
+    the same wire order only as far as the queried cell. No reader can observe
+    the partiality — a reachable cell is never READ as `kUnreachable`, because
+    the read itself finishes the proof — so the symmetry theorem and the
+    SEARCHING exit's behavioural `kUnreachable` survive unchanged, which is
+    what the issue's "partial field" framing could not promise. Measured on
+    the same machine, GCC 14 Debug, the very row above: 2,659 → 806 µs
+    distinct, 215 → 174 µs shared — 20% of the 4 ms budget, a 70% cut. The
+    absolute row stays measured-not-asserted: §11 still states no reference
+    scale, so "under 4 ms" remains a sentence about one machine. That second
+    prong is a design decision, obviated but available.
+
 19. **§10 fixes the palette's COUNT and never its VALUES, and the transmit path
     is the first thing in the tree that needs them.** Mirrored as
     [#37](https://github.com/gobha-me/gloam/issues/37). §10 says "four colours
