@@ -42,12 +42,15 @@ auto propagate_distance(const Level& level, std::span<const Coord> sources) -> D
   if (field.m_distance.empty()) return field;
 
   auto& distance = field.m_distance;
+  auto& frontier = field.m_frontier;
 
   // A vector plus a read cursor, not a std::queue over a deque: every cell is
   // pushed at most once, so the whole frontier is bounded by `cell_count()` and
   // one reservation covers the search. `std::queue`'s default container would
-  // allocate a block per few hundred cells for no benefit.
-  std::vector<std::size_t> frontier;
+  // allocate a block per few hundred cells for no benefit. The reservation is
+  // also what keeps the ORIGINAL field allocation-free as queries expand it;
+  // a copy's frontier copies only what was pushed, so a copy may reallocate
+  // once mid-drain — that is the whole of what `raw`'s lost `noexcept` admits.
   frontier.reserve(distance.size());
 
   // SOURCES ARE DROPPED, NOT REJECTED, and a source in rock is dropped for a
@@ -63,29 +66,12 @@ auto propagate_distance(const Level& level, std::span<const Coord> sources) -> D
     frontier.push_back(index);
   }
 
-  for (std::size_t read = 0; read < frontier.size(); ++read) {
-    const auto index = frontier[read];
-    const Coord here = level.coord_of(index);
-    const std::int32_t next = distance[index] + 1;
-
-    for (int d = 0; d < kDirCount; ++d) {
-      // THE ONE MOVEMENT PREDICATE. `apply` refuses a party's step through it
-      // and `patrol_step` walks a route through it; nothing here is allowed a
-      // second opinion about whether a body fits through an edge.
-      const auto destination = level.walk(here, static_cast<Dir>(d));
-      if (!destination) continue;
-
-      const auto neighbour = level.index_of(*destination);
-      // Every edge costs one, so the first visit is the shortest one and there
-      // is nothing to relax. That is the whole difference from `propagate_noise`
-      // and it is why this needs no priority queue.
-      if (distance[neighbour] != kUnreachable) continue;
-
-      distance[neighbour] = next;
-      frontier.push_back(neighbour);
-    }
-  }
-
+  // AND THAT IS ALL. The expansion loop that stood here is the field's own
+  // `expand_one` now, driven by the queries; the header essay gives the proof
+  // that no answer can change. A field whose sources all dropped is exhausted
+  // at birth: its frontier is empty, so there is nothing any query could
+  // settle, and the flag says so in O(1) rather than per query.
+  field.m_exhausted = frontier.empty();
   return field;
 }
 

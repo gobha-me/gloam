@@ -48,7 +48,44 @@
 /// deterministic without needing a stream (§5.1), and adding a movement cost
 /// later would be a `Tuning` decision made in the open rather than a constant
 /// smuggled in here.
+///
+///
+/// LAZY, WHICH IS A MEMO AND NOT A SECOND PATHFINDER
+///
+/// `propagate_distance` used to expand the whole reachable component before
+/// returning. Measured, because this file only moves on measurements: sixteen
+/// monsters searching sixteen distinct stale targets on a 32x32 open level
+/// cost 2,695 us on a GCC 14 Debug dev box and 5,462 us on a CI runner — 137%
+/// of §11's 4 ms tick (gloam#36) — and every production reader then looked at
+/// the monster's own cell and its four neighbours and threw the rest of the
+/// search away.
+///
+/// So seeding and expanding are now different events. Construction seeds the
+/// surviving sources and stops; `at` runs the same FIFO in the same `Dir`
+/// wire order, assign-on-push, until the queried cell is settled or the
+/// frontier runs dry. THE OBJECT IS THE COMPLETE TRUE FIELD AND THE STORAGE
+/// IS A MEMO: a distance is final the moment it is pushed (every edge costs
+/// one, so the first visit is the shortest one), expansion ORDER is a function
+/// of the level and the sources and never of the query pattern, and a query
+/// decides only how much of that fixed order has run. Partiality is therefore
+/// not observable — a reachable cell is never READ as `kUnreachable`, because
+/// the read itself finishes the proof — and that is the whole of what the
+/// design leans on. The symmetry theorem `test/21path/` asserts over every
+/// navigable pair keeps holding, because both sides of the comparison settle
+/// to the same values however the pair was asked. And the SEARCHING exit in
+/// `world.cpp` keys "the trail cannot be walked" on `kUnreachable`, which is
+/// a BEHAVIOURAL reading: it must mean the map, never the memo, and it does —
+/// `kUnreachable` is produced only by a frontier that ran dry, which is
+/// exactly the eager field's answer.
+///
+/// None of this is a second pathfinder. There is one search, one predicate
+/// (`Level::walk`), one wire order, one sentinel; what changed is WHEN the
+/// work happens, not what the work is. A lazy field that answered any query
+/// differently from the eager one would simply be a bug, and `test/21path/`
+/// pins the equivalence by driving one field by queries alone and another to
+/// completion and comparing every answer.
 
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <optional>
@@ -76,6 +113,16 @@ inline constexpr std::int32_t kUnreachable = std::numeric_limits<std::int32_t>::
 /// Cells no source can reach read `kUnreachable`, as do cells outside the level
 /// and reads against a level the field was not built for — the same "out of
 /// bounds is survivable, not undefined" idiom as `Level::at`'s void cell.
+///
+/// The object logically IS the complete field; the storage is filled on
+/// demand, by the queries themselves (the header essay gives the argument).
+/// `at` stays `const` and the distance vector, frontier, read cursor and
+/// exhaustion flag are `mutable` because this is memoization, not mutation:
+/// two fields built from the same sources answer every identical query
+/// identically, however different the query patterns that drove them. The
+/// type stays copyable and movable, and a copy of a half-settled field is
+/// safe — it carries its frontier, cursor and flag, and the two then expand
+/// independently and answer identically.
 class DistanceField {
  public:
   DistanceField() = default;
@@ -89,10 +136,23 @@ class DistanceField {
     // coordinate to a different cell and the answer is confidently wrong rather
     // than refused. Measured: a field built for 10x10 reported distance 2 at
     // (3,2) against a 4x4 level, where its own level says 5.
+    //
+    // The checks never touch the search, which is what keeps a rejected read
+    // free AND consequence-free: it expands nothing, so it cannot drain the
+    // frontier for the queries that follow.
     if (level.width() != m_width) return kUnreachable;
     if (!level.in_bounds(c)) return kUnreachable;
     const auto i = level.index_of(c);
-    return i < m_distance.size() ? m_distance[i] : kUnreachable;
+    if (i >= m_distance.size()) return kUnreachable;
+
+    // THE MEMO LINE. A settled cell is a load. Anything else runs the eager
+    // loop's own iteration until the cell is assigned — its distance is final
+    // the moment it is pushed — or the frontier runs dry, which is the only
+    // way an in-bounds cell of the field's own level reads `kUnreachable`.
+    // Once dry, the flag answers later unassigned queries in O(1): there is
+    // nothing left that could settle them.
+    while (m_distance[i] == kUnreachable && !m_exhausted) expand_one(level);
+    return m_distance[i];
   }
 
   /// Prefer this to comparing against `kUnreachable` at the call site. A caller
@@ -101,13 +161,75 @@ class DistanceField {
     return at(level, c) != kUnreachable;
   }
 
-  [[nodiscard]] auto raw() const noexcept -> const std::vector<std::int32_t>& { return m_distance; }
+  /// The complete field, completing it first if no query already did.
+  ///
+  /// `at` settles only what it is asked about, so a caller that wants the
+  /// whole vector — the determinism tests; no library code is one — pays the
+  /// rest of the search here, driven through `level`, which must be the
+  /// field's own level exactly as it must be for `at`. That the signature
+  /// grew the parameter is the laziness showing through: the eager field
+  /// could answer this from storage, and the memo cannot. It also lost
+  /// `noexcept` honestly: a COPY's frontier is not reserved to the cell count,
+  /// so a drain can reallocate it.
+  [[nodiscard]] auto raw(const Level& level) const -> const std::vector<std::int32_t>& {
+    while (!m_exhausted) expand_one(level);
+    return m_distance;
+  }
 
   friend auto propagate_distance(const Level&, std::span<const Coord>) -> DistanceField;
 
  private:
+  /// One iteration of the loop `propagate_distance` used to run to completion,
+  /// now run on demand.
+  ///
+  /// `level` is the QUERIER'S, as `at`'s contract says — a field driven by a
+  /// level it was not built for gets meaningless-but-safe answers, and the
+  /// index guard below is what keeps them safe. The eager loop could never
+  /// meet that case (expansion finished before any level could be
+  /// substituted); the lazy one expands under whatever level it is handed, and
+  /// a same-width but TALLER level walks to cells this field has no storage
+  /// for. Without the guard that is a write past the vector, which the
+  /// AddressSanitizer leg demonstrates and `test/21path/` drives.
+  void expand_one(const Level& level) const {
+    if (m_read == m_frontier.size()) {
+      // Every pushed cell has been expanded, so every reachable cell is
+      // assigned: the field is complete, and the flag is what makes a later
+      // unassigned query O(1) instead of a walk over an empty frontier.
+      m_exhausted = true;
+      return;
+    }
+
+    const auto index = m_frontier[m_read++];
+    const Coord here = level.coord_of(index);
+    const std::int32_t next = m_distance[index] + 1;
+
+    for (int d = 0; d < kDirCount; ++d) {
+      // THE ONE MOVEMENT PREDICATE. `apply` refuses a party's step through it
+      // and `patrol_step` walks a route through it; nothing here is allowed a
+      // second opinion about whether a body fits through an edge.
+      const auto destination = level.walk(here, static_cast<Dir>(d));
+      if (!destination) continue;
+
+      const auto neighbour = level.index_of(*destination);
+      if (neighbour >= m_distance.size()) continue;  // a taller level's cell, not mine
+      // Every edge costs one, so the first visit is the shortest one and there
+      // is nothing to relax. That is the whole difference from
+      // `propagate_noise` and it is why this needs no priority queue.
+      if (m_distance[neighbour] != kUnreachable) continue;
+
+      m_distance[neighbour] = next;
+      m_frontier.push_back(neighbour);
+    }
+  }
+
   std::int32_t m_width{};
-  std::vector<std::int32_t> m_distance{};
+  // Everything the search writes is `mutable`, because `at` is a const query
+  // that learns: filling storage on demand changes nothing a reader can
+  // observe. That is the whole design, and the header essay defends it.
+  mutable std::vector<std::int32_t> m_distance{};
+  mutable std::vector<std::size_t> m_frontier{};
+  mutable std::size_t m_read{0};
+  mutable bool m_exhausted{true};
 };
 
 /// Breadth-first from every source at once, outward through `Level::walk`.
@@ -124,8 +246,9 @@ class DistanceField {
 /// handle.
 ///
 /// Deterministic: the frontier is a FIFO seeded in span order and expanded in
-/// `Dir` wire order, so the result depends on no container's iteration order —
-/// §5.1's third rule.
+/// `Dir` wire order WHENEVER A QUERY DRIVES IT, so the result depends on no
+/// container's iteration order and on no query pattern — §5.1's third rule,
+/// kept under the laziness the header essay describes.
 [[nodiscard]] auto propagate_distance(const Level& level, std::span<const Coord> sources)
     -> DistanceField;
 

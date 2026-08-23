@@ -12,6 +12,7 @@
 #include <catch2/catch_all.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <limits>
 #include <vector>
@@ -667,4 +668,77 @@ TEST_CASE("the trail gate agrees with perception about which tick is the eighth"
   advance(w, t);
   CHECK(w.monsters[0].mind.state == Awareness::LostTrack);
   CHECK(w.tick == static_cast<std::uint32_t>(t.hunting_lost_ticks));
+}
+
+// ── §6.1's SEARCHING exit, derived where the field is ───────────────────────
+
+TEST_CASE("an unreachable last known position exhausts the trail through advance",
+          "[pursuit]") {
+  // THE kUnreachable HALF OF THE DERIVATION, PINNED AT THE LEVEL IT IS DERIVED
+  // IN. `world.cpp` answers §6.1's "the trail ends here" out of the cached
+  // distance field — `trail_exhausted = reach == kUnreachable || reach == 0` —
+  // and until this case the suite covered it only from the other two sides:
+  // test/04perception/ hand-sets the bool, and the trail-gate case above
+  // exercises the `reach == 0` half by standing the monster on the remembered
+  // cell. A comparison that dropped the kUnreachable clause would leave a
+  // searcher walking toward a cell sealed behind a shut door for the rest of
+  // the session, and nothing here would have gone red.
+  //
+  // LAZY FIELD, BEHAVIOURAL READING. This is also the contract path.hpp's
+  // essay states, exercised at world scale: kUnreachable must mean the MAP,
+  // never the memo — it is produced only by a frontier that ran dry, which is
+  // exactly the eager field's answer.
+  const auto t = no_jitter();
+  auto level = corridor(10);
+  level.link(Coord{4, 1}, Dir::East, Edge{EdgeKind::Door, EdgeState::Closed, 0, 0});
+
+  Monster m{};
+  m.at = Coord{6, 1};
+  m.kind = MonsterKind{Acuity::Dull, false};  // deaf, and the lamp is doused: no hit moves the trail
+  m.mind = mind_at(Awareness::Searching, Coord{1, 1});  // on the far side of the shut door
+
+  // At, past, and SATURATED-past: perception.cpp's tick_up saturates
+  // ticks_since_hit at INT32_MAX, and world.cpp's gate adds 1 to it — the
+  // INT32_MAX row is the signed-overflow case the widened add exists for,
+  // driven here through `advance` rather than by a fuzzer.
+  // An index into a table, not the values inline: GENERATE's lambda takes no
+  // captures, so the runtime `t` cannot appear inside it (Clang rejects it,
+  // and every other GENERATE in the suite is over literals for the same
+  // reason).
+  const std::array<std::int32_t, 4> ripe{t.hunting_lost_ticks - 1, t.hunting_lost_ticks,
+                                         t.hunting_lost_ticks + 100,
+                                         std::numeric_limits<std::int32_t>::max()};
+  m.mind.ticks_since_hit = ripe[static_cast<std::size_t>(GENERATE(0, 1, 2, 3))];
+
+  auto w = world_with(std::move(level), m, Coord{9, 1});
+  REQUIRE_FALSE(w.level.walk(Coord{4, 1}, Dir::East).has_value());  // the door really is shut
+  INFO("ticks_since_hit " << w.monsters[0].mind.ticks_since_hit);
+
+  advance(w, t);
+  CHECK(w.monsters[0].mind.state == Awareness::LostTrack);
+}
+
+TEST_CASE("a searcher with trail left to walk is not exhausted on the ripe tick", "[pursuit]") {
+  // THE COMPANION HALF: the same ripe timer, the same silence, but a
+  // last_known that is reachable and is NOT the monster's cell, so the field
+  // answers a real distance and neither clause of the derivation fires. A
+  // `reach > 0` misread as exhausted would give up mid-corridor — which
+  // perception.cpp's own comment calls a monster losing interest rather than
+  // drawing a blank.
+  const auto t = no_jitter();
+
+  Monster m{};
+  m.at = Coord{6, 1};
+  m.kind = MonsterKind{Acuity::Dull, false};
+  m.mind = mind_at(Awareness::Searching, Coord{2, 1});  // four open cells away
+  m.mind.ticks_since_hit = t.hunting_lost_ticks - 1;    // the timer is ripe THIS tick
+
+  auto w = world_with(corridor(10), m, Coord{9, 1});
+  // Non-vacuity: there genuinely is trail left, so "not exhausted" is a
+  // property of the field's answer and not of a search that found nothing.
+  const auto field = propagate_distance(w.level, Coord{2, 1});
+  REQUIRE(field.at(w.level, Coord{6, 1}) == 4);
+
+  advance(w, t);
+  CHECK(w.monsters[0].mind.state == Awareness::Searching);
 }
