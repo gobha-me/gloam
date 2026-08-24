@@ -2,15 +2,16 @@
 # Reports leftover template artifacts and internal inconsistencies. It is
 # read-only: it never edits, moves or deletes anything. Two modes:
 #
-#     cmake -P cmake/check_artifacts.cmake                    # enforce  (a fork)
-#     cmake -DMODE=selftest -P cmake/check_artifacts.cmake    # selftest (this repo)
+#     cmake -P cmake/check_artifacts.cmake                    # enforce  (this repo; a fork)
+#     cmake -DMODE=selftest -P cmake/check_artifacts.cmake    # selftest (the template repo)
 #
 # (CMake requires -D *before* -P.)
 #
-# ENFORCE is what a project bootstrapped from this template runs: every rule
-# must report zero hits. SELFTEST is what *this* repo runs, and it inverts
-# Class A: each of those rules must report at LEAST ONE hit, because the
-# template legitimately contains every artifact they look for.
+# ENFORCE is what a project bootstrapped from the template runs — this repo
+# included: every rule must report zero hits. SELFTEST belongs to the
+# template's own repo, and it inverts Class A: each of those rules must report
+# at LEAST ONE hit, because the template legitimately contains every artifact
+# they look for.
 #
 # That inversion is the point. A "should be red here" check is untestable and
 # an advisory warning is one you learn to ignore; an inverted check is neither.
@@ -24,9 +25,10 @@
 # instead: break the thing on purpose, watch the rule go red, revert. Do that
 # whenever you touch one, and see the notes above each rule for what to break.
 #
-# test/CMakeLists.txt picks the mode by whether NEW_PROJECT.md still exists, so
-# a new project inherits enforcement the moment it finishes the checklist and
-# deletes that file. There is nothing to wire up.
+# The mode is chosen by whoever registers the test — an explicit -DMODE, not
+# anything keyed on the tree. GLOAM registers enforce: its template artifacts
+# are scrubbed, so selftest could only fail here. The template's own repo
+# registers selftest, where those artifacts legitimately exist.
 #
 # Exit status is the contract, same as cmake/version_selftest.cmake: any failed
 # rule -> message(FATAL_ERROR) -> non-zero exit -> ctest fails.
@@ -40,6 +42,15 @@ if(NOT DEFINED MODE)
 endif()
 if(NOT MODE STREQUAL "enforce" AND NOT MODE STREQUAL "selftest")
   message(FATAL_ERROR "check_artifacts: MODE must be 'enforce' or 'selftest', got '${MODE}'")
+endif()
+
+# Say which mode is running before any rule reports. A green ctest run shows no
+# output, so without this line the only record of what was asserted is the
+# registration — which is exactly how gloam#42 went unnoticed.
+if(MODE STREQUAL "selftest")
+  message(STATUS "mode : selftest — Class-A rules are inverted: each must MATCH something")
+else()
+  message(STATUS "mode : enforce — Class-A rules must report zero hits")
 endif()
 
 set(_fail_count 0)
@@ -91,7 +102,9 @@ endif()
 #     hit source that keeps Class-A rules green in selftest mode no matter what
 #     happened to the real artifact — which defeats the entire point of the
 #     inversion. This was caught by deliberately renaming template_lib and
-#     watching rule A2 pass anyway.
+#     watching rule A2 pass anyway. This repo no longer carries the file
+#     (gloam#42); the exclusion stays for a fork mid-bootstrap, where the
+#     checklist has not yet been deleted.
 #
 # Their *existence* is still checked (rule A11); only their contents are ignored.
 list(REMOVE_ITEM REPO_FILES "cmake/check_artifacts.cmake" "NEW_PROJECT.md")
@@ -236,13 +249,18 @@ report_a("A9" "template hand-wave prose in the docs" _h _r)
 _scan("C\\+\\+ project template" ".*" _h _r)
 report_a("A10" "AGENTS.md still self-identifies as the template" _h _r)
 
+# A11 lost its second job: test/CMakeLists.txt once keyed the check's mode on
+# this file's existence, making it the mode marker as well as a rule. That
+# keying is gone (gloam#42) — the mode is an explicit -DMODE at registration —
+# and the rule now only checks a bootstrap leftover: absent here (enforce),
+# still present in the template (selftest).
 set(_h 0)
 set(_r "")
 if(EXISTS "${REPO_ROOT}/NEW_PROJECT.md")
   set(_h 1)
   set(_r "\n           NEW_PROJECT.md")
 endif()
-report_a("A11" "NEW_PROJECT.md (the bootstrap checklist / mode marker)" _h _r)
+report_a("A11" "NEW_PROJECT.md (the bootstrap checklist)" _h _r)
 
 # ── Class B: internal consistency ───────────────────────────────────────────
 # Green in the template and in a fork. These stay useful for the life of the
@@ -501,6 +519,7 @@ report_b("B5" "shell scripts keep their exec bit" _b5 _r)
 if(_fail_count GREATER 0)
   message(FATAL_ERROR
     "check_artifacts (${MODE}): ${_fail_count} of ${_rule_count} rule(s) failed. "
-    "See the FAIL lines above; NEW_PROJECT.md explains each step.")
+    "See the FAIL lines above; the notes above each rule in this script say "
+    "what to remove or re-check, and AGENTS.md carries the rules themselves.")
 endif()
 message(STATUS "CLEAN — check_artifacts (${MODE}): all ${_rule_count} rules passed")

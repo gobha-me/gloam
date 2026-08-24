@@ -707,5 +707,4 @@ one-sided break is visible on the PR.
 project-specific — the project name is derived from the checkout directory, so
 copy `.github/workflows/ci.yml` verbatim, and keep `fetch-depth: 0` or
 `git describe` stops finding tags. The one edit a fork owes CI is the badge URL
-above; that step and everything else a new project must change live in
-[NEW_PROJECT.md](NEW_PROJECT.md).
+above.

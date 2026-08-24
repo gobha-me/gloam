@@ -10,22 +10,22 @@ add_test(
 )
 
 # Leftover-template-artifact check (cmake/check_artifacts.cmake), also standalone.
-# The mode is keyed on NEW_PROJECT.md, whose last checklist step is "delete this
-# file": while it exists we are the template, so the Class-A rules are inverted
-# and assert each still MATCHES something (a rule that matches nothing has rotted
-# and would wave every fork through). Once a bootstrapped project deletes it, the
-# same script becomes a plain enforcement check with nothing to wire up.
-if (EXISTS ${PROJECT_SOURCE_DIR}/NEW_PROJECT.md)
-  add_test(
-    NAME artifact-check-selftest
-    COMMAND ${CMAKE_COMMAND} -DMODE=selftest -P ${PROJECT_SOURCE_DIR}/cmake/check_artifacts.cmake
-  )
-else ()
-  add_test(
-    NAME artifact-check
-    COMMAND ${CMAKE_COMMAND} -P ${PROJECT_SOURCE_DIR}/cmake/check_artifacts.cmake
-  )
-endif ()
+# The mode was once keyed on NEW_PROJECT.md's existence: selftest while the
+# bootstrap checklist lived, plain enforcement once a bootstrapped project
+# deleted it. That file never existed in this repo's history, so the keying
+# silently registered the enforce branch and a green run gave no hint which mode
+# had run (gloam#42). A check that silently changes what it asserts is worse
+# than an explicit registration, so the registration names the mode's default
+# and the script announces the mode it runs in.
+#
+# Enforce is also the only mode that CAN pass here: this repo's template
+# artifacts are scrubbed, and selftest's inverted Class-A rules each demand at
+# least one hit. The script keeps -DMODE=selftest for the template's own repo,
+# where those artifacts legitimately exist.
+add_test(
+  NAME artifact-check
+  COMMAND ${CMAKE_COMMAND} -P ${PROJECT_SOURCE_DIR}/cmake/check_artifacts.cmake
+)
 
 # SPEC §19 step 2 — the below-background z threshold appears exactly once in the
 # shipped tree, inside the named layer API. A cmake -P script rather than a C++

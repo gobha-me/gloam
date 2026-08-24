@@ -161,7 +161,7 @@ you if you forget.
   means every function in that header has to become an `inline` definition, or
   nothing that calls it links. Keep both patterns present and buildable — the
   template teaches by having both. That is a rule for *this* repo; a project
-  bootstrapped from it picks one and deletes the other (see `NEW_PROJECT.md`).
+  bootstrapped from it picks one and deletes the other.
 - **Consumer-clean is a rule, not a nicety.** This project has to keep working
   when it is *not* the top-level one. Concretely:
   - Never `CMAKE_SOURCE_DIR` / `CMAKE_PROJECT_VERSION` / `CMAKE_PROJECT_NAME` —
@@ -284,22 +284,23 @@ and PRs note what was actually run to verify (per "How to verify" above).
   it. If you change the parsing, add a row to and re-run the self-test:
   `cmake -P cmake/version_selftest.cmake` (also runs in ctest as
   `version-parse-selftest`). Failure-matrix-first, like the other tests.
-- `NEW_PROJECT.md` is **fork-facing**: it instructs a project being bootstrapped
-  out of this template, not this repo. Don't put template-maintenance rules in
-  it, and don't let it drift from the file paths and line numbers it cites.
 - `cmake/check_artifacts.cmake` looks for leftover template artifacts. It runs
-  inverted here (ctest: `artifact-check-selftest`) — every Class-A rule must
-  still MATCH something, because this repo legitimately contains all of them.
-  Rename or delete an artifact that a rule targets and that rule matches
-  nothing, the self-test goes red, and you update the rule to match. A fork that
-  has deleted `NEW_PROJECT.md` runs the same script in plain enforcement mode
-  instead. Class-B rules check wiring that can drift, are never inverted, and
-  must stay green on both sides.
+  in plain enforcement mode here (ctest: `artifact-check`) — every Class-A rule
+  must report zero hits, and does, because the template artifacts it hunts are
+  scrubbed from this repo. The other mode, `-DMODE=selftest`, inverts Class A —
+  each of those rules must still MATCH something — and belongs to the
+  template's own repo, where the artifacts legitimately exist: rename or delete
+  one there and a rule that matches nothing goes red, so a rule cannot rot into
+  one that waves every fork through. Selftest could never pass in this repo —
+  its inverted rules each demand at least one hit. Class-B rules check wiring
+  that can drift, are never inverted, and must stay green on both sides.
   **Never write one of the searched-for tokens into prose.** A rule counts hits
   across all tracked files, so a doc that quotes the token it is hunting keeps
   that rule green forever, whatever happened to the real artifact. The checker
-  and `NEW_PROJECT.md` are excluded from the scan for exactly this reason; the
-  fix anywhere else is to describe the token, not spell it.
+  is excluded from the scan for exactly this reason — as is `NEW_PROJECT.md`,
+  which this repo no longer carries but a fork mid-bootstrap still does, quoting
+  artifacts by name; the fix anywhere else is to describe the token, not spell
+  it.
 - Build dirs (`build*/`) are gitignored — don't commit them.
 - The dep pins in `cmake/deps/` are only audited when something breaks on a
   supported compiler; bump deliberately and say why in the commit.
