@@ -214,9 +214,9 @@ class Core {
  public:
   /// What the shell needs to write the `.gloam` replay file with
   /// `replay::assemble`: the seed, the final world hash, and the `Expect` the
-  /// file's own load gate must be passed against. `pack_hash` is
-  /// `replay::kNoPackHash` \u2014 no pack is loaded until the compositor exists
-  /// (#7), which is exactly what that constant is for.
+  /// file's own load gate must be passed against. `pack_hash` is supplied at
+  /// `finish()` \u2014 the real truncation when the session ran with a pack,
+  /// `replay::kNoPackHash` otherwise.
   struct Outcome {
     std::uint64_t seed{0};
     hash::Digest world_hash{};
@@ -270,7 +270,13 @@ class Core {
   /// Seals the session: appends the final `Wait`, advances once, and returns
   /// the `Outcome` a replay file is written from. Idempotent \u2014 see the header
   /// comment for why the Wait exists and why the core seals.
-  auto finish() -> Outcome;
+  ///
+  /// `pack_hash` is `replay::pack_hash_from(manifest.pack_sha256)` when the
+  /// shell loaded a pack \u2014 which gloam#8's shell does \u2014 and `kNoPackHash`
+  /// when it did not. #16's rule applies unchanged: a file claiming no pack
+  /// never warns, and a file naming one warns when it differs. The default
+  /// keeps a packless caller (every test today) on the sentinel.
+  auto finish(std::uint64_t pack_hash = replay::kNoPackHash) -> Outcome;
 
   [[nodiscard]] auto world() const -> const World& { return m_world; }
   [[nodiscard]] auto mode() const -> PumpMode { return m_mode; }

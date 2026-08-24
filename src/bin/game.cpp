@@ -52,7 +52,7 @@ auto Core::tick() -> void {
   advance(m_world, m_tuning, m_voices);
 }
 
-auto Core::finish() -> Outcome {
+auto Core::finish(std::uint64_t pack_hash) -> Outcome {
   if (m_finished) return m_outcome;
 
   // An uncommitted pending action is discarded here: it never reached the
@@ -67,7 +67,7 @@ auto Core::finish() -> Outcome {
   advance(m_world, m_tuning, m_voices);
 
   m_outcome = Outcome{m_world.seed, world_hash(m_world),
-                      replay::Expect{ruleset_hash(m_tuning), replay::kNoPackHash}};
+                      replay::Expect{ruleset_hash(m_tuning), pack_hash}};
   m_finished = true;
   return m_outcome;
 }
