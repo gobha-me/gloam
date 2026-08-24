@@ -795,8 +795,11 @@ TEST_CASE("the light-field pack is byte-identical across two independent bakes",
   CHECK(hash::sha256(first) == hash::sha256(second));
   CHECK(gloam::pack::verify(first));
 
-  // The size the format arithmetic predicts: 48 + 6 * 52 + 6 * 64800.
-  CHECK(first.size() == 389'160);
+  // The size the format arithmetic predicts: 48 + 65 * 52 + the inventory's
+  // blob bytes. gloam#8 grew this from six light fields to the whole M0 plate
+  // inventory; the number is pinned against `assets`' own arithmetic rather
+  // than a hand-copied constant, and the digest below is the golden.
+  CHECK(first.size() == assets::image_bytes());
 
   // THE GOLDEN DIGEST. Two runs agreeing with each other only proves this
   // machine is consistent with itself; §19 step 5's real requirement is that a
@@ -806,23 +809,31 @@ TEST_CASE("the light-field pack is byte-identical across two independent bakes",
   // If this changes, something changed the ART. That is allowed — the falloff
   // band width in lightfield.hpp is explicitly a look decision — but it has to
   // be a deliberate line in a diff rather than a number that drifted.
-  CHECK(hex_of(first) == "f096b862e99be363ffe7d64454f5b8b1a973e8c01b6f73a90690065f82b33acc");
+  CHECK(hex_of(first) == "d9560201da4fa92c5e575a790c232e64f6b4003248fa0a4904feea3651f83051");
 
   // §11's residency cap. pack.hpp deliberately does not know about budgets —
   // emit.hpp's rule, "the sink reports, the budget judges" — so the comparison
   // is made here rather than inside the parser.
   gloam::pack::Header h{};
   REQUIRE(gloam::pack::read_header(first, h));
-  CHECK(h.plate_count == lightfield::kFieldCount);
+  CHECK(h.plate_count == static_cast<std::uint16_t>(assets::kPlateCount));
   CHECK(h.plate_count <= budget::kMaxResidentImages);
+  // Every record round-trips to exactly its inventory entry — the manifest is
+  // the single source the baker, the compositor and this test all read.
+  const auto specs = assets::inventory();
   for (std::uint16_t index = 0; index < h.plate_count; ++index) {
     pack::Record record{};
     REQUIRE(pack::read_record(
         std::span<const std::byte>{first}.subspan(
             pack::kHeaderBytes + pack::kRecordBytes * index, pack::kRecordBytes),
         record));
-    CHECK(record.role == pack::Role::LightField);
-    CHECK(record.variant == index);
+    CHECK(record.plate_id == index);
+    CHECK(record.role == specs[index].role);
+    CHECK(record.depth == specs[index].depth);
+    CHECK(record.lateral == specs[index].lateral);
+    CHECK(record.variant == specs[index].variant);
+    CHECK(record.w == static_cast<std::uint16_t>(specs[index].width));
+    CHECK(record.h == static_cast<std::uint16_t>(specs[index].height));
   }
 
   // A NECESSARY CONDITION, NOT §11's BUDGET. `kMaxColdStartPayloadBytes` is the
