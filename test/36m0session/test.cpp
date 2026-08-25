@@ -104,13 +104,25 @@ class Peer {
       }
       const auto sequence = std::string_view{wire_}.substr(body, end - body);
       scan_ = end + 2;
-      if (sequence.find("q=2") != std::string_view::npos) continue;  // quiet
+      // A real terminal answers QUERIES and nothing else: q=2 is "stay quiet",
+      // and a placement or bare transmit gets no reply at all. Answering
+      // everything with an i= in it — the rule this comment replaces — sprays
+      // the child's input channel with acknowledgements no terminal would send
+      // and intermittently wedged the session mid-run.
+      if (sequence.find("q=2") != std::string_view::npos) continue;
+      const bool query = sequence.find("q=0") != std::string_view::npos ||
+                         sequence.find("a=q") != std::string_view::npos;
+      if (!query) continue;
       const auto id = sequence.find("i=");
       if (id == std::string_view::npos) continue;
       const auto digits = sequence.substr(id + 2);
+      // The id is the leading decimal run and nothing past it: slicing to the
+      // end of the sequence would echo ",q=0" back inside the reply's id field.
+      const auto number = digits.substr(0, digits.find_first_not_of("0123456789"));
+      if (number.empty()) continue;
       // Replies are "\033_Gi=<id>;OK\033\\" — the terminal's whole half of the
       // pin and probe protocol.
-      const std::string reply = "\033_Gi=" + std::string{digits} + ";OK\033\\";
+      const std::string reply = "\033_Gi=" + std::string{number} + ";OK\033\\";
       (void)tty::write_all(master_, reply);
     }
   }
@@ -205,16 +217,31 @@ TEST_CASE("the M0 binary plays a session and its replay reproduces the world",
   bool script_started = false;
   int status = 0;
   bool exited = false;
+  const auto t0 = std::chrono::steady_clock::now();
+  std::string trace;
+  const auto note = [&](std::string_view what) {
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - t0)
+                        .count();
+    trace += std::to_string(ms) + "ms " + std::string{what} +
+             " wire=" + std::to_string(peer.wire().size()) + "\n";
+  };
 
   while (std::chrono::steady_clock::now() < deadline) {
     pollfd pfd{peer.master_, POLLIN, 0};
     const int polled = ::poll(&pfd, 1, 10);
-    if (polled < 0 && errno != EINTR) break;
+    if (polled < 0 && errno != EINTR) {
+      note("poll error " + std::to_string(errno));
+      break;
+    }
     if (polled > 0) {
       peer.pump();
       peer.answer_da1();
     }
-    if (peer.eof()) break;
+    if (peer.eof()) {
+      note("eof");
+      break;
+    }
 
     // The script starts once the app is RENDERING — not on a pin count, which
     // batching makes the wrong thing to wait for. Input is handled whether or
@@ -223,20 +250,24 @@ TEST_CASE("the M0 binary plays a session and its replay reproduces the world",
     if (!script_started && peer.rendering()) {
       script_started = true;
       next_stroke_at = std::chrono::steady_clock::now() + 400ms;
+      note("script starts");
     }
     if (script_started && stroke < std::size(kScript) &&
         std::chrono::steady_clock::now() >= next_stroke_at) {
       const auto& [key, settle_ms] = kScript[stroke++];
+      note(std::string{"stroke '"} + (key == '\t' ? "TAB" : std::string{key}) + "'");
       (void)tty::write_all(peer.master_, std::string_view{&key, 1});
       next_stroke_at = std::chrono::steady_clock::now() + settle_ms * 1ms;
     }
 
     const pid_t changed = ::waitpid(child, &status, WNOHANG);
     if (changed == child) {
+      note("child reaped");
       exited = true;
       break;
     }
   }
+  note(exited ? "loop done (exit)" : "loop done (deadline)");
 
   if (!exited) {
     // Pty EOF means the child closed its side — it may already be a zombie
@@ -257,6 +288,8 @@ TEST_CASE("the M0 binary plays a session and its replay reproduces the world",
   ::close(peer.master_);
   ::unlink(pack_path);
 
+  INFO("trace:\n" << trace);
+  INFO("wire head: " << peer.wire().substr(0, 160));
   INFO("wire tail: " << peer.wire().substr(peer.wire().size() > 200 ? peer.wire().size() - 200
                                                                     : 0));
   REQUIRE(exited);
