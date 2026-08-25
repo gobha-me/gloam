@@ -29,6 +29,7 @@
 #include <thread>
 #include <vector>
 
+#include "gloam/assets.hpp"
 #include "gloam/budgets.hpp"
 #include "gloam/deflate.hpp"
 #include "gloam/emit.hpp"
@@ -93,12 +94,15 @@ struct ColdStart {
 /// A clock is read, which nothing in `gloam::lib` may do — which is exactly why
 /// this function is in `src/bin/` and the thing it measures is not.
 [[nodiscard]] auto measure_cold_start() -> ColdStart {
-  const auto w = lightfield::kWidthPx;
-  const auto h = lightfield::kHeightPx;
-
-  std::vector<std::byte> blob(plate::blob_bytes(w, h));
-  std::vector<std::byte> scanlines(png::scratch_bytes(w, h));
-  std::vector<std::byte> encoded(png::bound(w, h));
+  // The full M0 inventory, baked through the same call gloam_bake runs. The
+  // buffers are sized for the LARGEST plate extent and reused across plates:
+  // the light fields are full-frame, everything else is smaller.
+  std::vector<std::byte> pixels(assets::pixel_bytes());
+  std::vector<pack::Record> records(static_cast<std::size_t>(assets::kPlateCount));
+  std::vector<std::span<const std::byte>> blobs(static_cast<std::size_t>(assets::kPlateCount));
+  std::vector<std::byte> scanlines(
+      png::scratch_bytes(lightfield::kWidthPx, lightfield::kHeightPx));
+  std::vector<std::byte> encoded(png::bound(lightfield::kWidthPx, lightfield::kHeightPx));
   // A quarter of a megabyte of match tables, on the heap and owned here: the
   // library never allocates one, and a local would be a quarter-megabyte stack
   // frame.
@@ -108,11 +112,14 @@ struct ColdStart {
   const auto started = std::chrono::steady_clock::now();
 
   ColdStart out;
-  for (int level = kLampLevelMin; level <= kLampLevelMax; ++level) {
-    if (!lightfield::bake(level, blob)) return out;
-    const auto image = png::encode(plate::PlateView{blob, w, h}, scanlines, *matcher, encoded);
+  if (!assets::bake_all(pixels, records, blobs)) return out;
+  for (std::size_t slot = 0; slot < records.size(); ++slot) {
+    const auto& record = records[slot];
+    const auto image =
+        png::encode(plate::PlateView{blobs[slot], record.w, record.h}, scanlines, *matcher,
+                    encoded);
     if (!image) return out;
-    const auto id = static_cast<std::uint32_t>(level - kLampLevelMin) + 1;
+    const auto id = static_cast<std::uint32_t>(record.plate_id) + 1;
     if (!kitty::emit_transmit(sink, std::span{encoded}.first(image.bytes), id)) return out;
     ++out.plates;
   }

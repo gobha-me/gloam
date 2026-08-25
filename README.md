@@ -17,8 +17,12 @@ whole thing playable over ssh.
 
 ## Status
 
-**Pre-M0.** There is no playable game yet, and the `gloam` binary is a headless
-diagnostic rather than a game. What exists is the deterministic simulation core:
+**M0, awaiting its gate.** `gloam_m0` plays the corridor slice — one
+patrolling monster under the full perception model, a lamp to carry and douse,
+and a pump that toggles real-time to step-timed mid-session. What remains is
+the gate itself: a human answering that question on a real kitty terminal. The
+`gloam` binary stays the headless diagnostic. Under it all sits the
+deterministic simulation core:
 
 | Built | SPEC |
 | --- | --- |
@@ -39,6 +43,7 @@ diagnostic rather than a game. What exists is the deterministic simulation core:
 | The audio device: the RtAudio stream, the resident arena, and the mixer | §9.1, §9.2, §9.3 |
 | The resident plate owner and the real-PTY terminal lifecycle matrix | §3.2, §4.5, §4.8 |
 | The fixed-slot compositor, placement diff and queued step transition | §4.1–§4.7 |
+| The corridor slice, playable: scene, game core, pump toggle, session replay | §15, §5.2 |
 
 The compositor is implemented against **termforge v0.56.0**. The library now
 supplies pinned encoded images, exact unscaled placement, named
@@ -57,12 +62,14 @@ suspend/resume and both reattach routes invalidate them and repin from the
 caller-owned payloads. `31imagelifecycle-test` drives all of that through real
 ptys, including actual SIGTSTP/SIGCONT and exception teardown.
 
-The binary remains a headless diagnostic because the shipped pack still contains
-only six procedural light fields. G-7 now builds and diffs real placement lists,
-maps pixels to native terminal cells, retains unchanged pins at zero wire, and
-queues inputs behind one 140 ms terminal-driven transition. The authored
-wall/monster/transition art and playable frame loop belong to
-[#8](https://github.com/gobha-me/gloam/issues/8)'s M0 gate.
+The playable frame loop has landed as `gloam_m0`; the `gloam` binary remains
+the headless diagnostic. The pack carries the full M0 slot inventory — 65
+plates painted by a deterministic integer rule at §3.1's exact slot extents,
+declared placeholder art until the authored kind exists. Against it, G-7
+builds and diffs real placement lists, maps pixels to native terminal cells,
+retains unchanged pins at zero wire, and queues inputs behind one 140 ms
+terminal-driven transition — whose frames are the one art the placeholder set
+does not carry, and the gate's question does not turn on 140 ms of tween.
 
 GLOAM's layer API remains deliberate: §16's mitigation for upstream risk is to
 keep every kitty sequence GLOAM authors behind its own boundary from day one,
@@ -76,19 +83,22 @@ termforge's typed driver API and authors none itself.
 The **asset pipeline** ([#1](https://github.com/gobha-me/gloam/issues/1)) has
 landed its first slice, and it is the one thing on the critical path that never
 needed termforge. `gloam_bake` writes a versioned, hashed `pack.gloam`: §12's
-manifest, §4.3's fixed ordered dither, §3.1's exact 2:1 downsample, and the six
+manifest, §4.3's fixed ordered dither, §3.1's exact 2:1 downsample, the six
 full-frame light fields §4.4 asks for — the one asset class §10 marks
-*procedural*, so it could be built before any art exists. Two runs produce a
+*procedural* — and the rest of the M0 slot inventory painted by deterministic
+rule, so the corridor can be seen before any art exists. Two runs produce a
 byte-identical pack, verified under GCC 13, GCC 14 and Clang 20; the
 `pack-reproducible` ctest case runs the binary twice and compares the files,
 because §10 makes that hash a build gate rather than a nicety.
 
-What that slice does **not** include is the authored depth-0 and depth-1 wall
-rings, because no art and no authoring format exist yet. #1 stays open for them.
+What the pipeline still does not carry is *authored* art — the depth-0 and
+depth-1 wall rings a human draws — because no authoring format exists yet. The
+golden digest is what makes swapping the stand-ins for the real thing a
+deliberate diff rather than a silent one.
 
 It also put a number on something uncomfortable: §11's 1.2 MB cold-start budget
 is for the **base64 transmit payload**, and a plate expands to RGBA before it
-goes on the wire. The six light fields are 388,800 B in the pack and would have
+goes on the wire. The six light fields were 388,800 B in the pack and would have
 been roughly 5.5 MB transmitted — **4.6× the budget**, from the six procedural
 plates alone. That was [#17](https://github.com/gobha-me/gloam/issues/17), and the
 transmit path below is what closes it.
@@ -192,19 +202,17 @@ GLOAM's own DEFLATE. Measured on the real stream, not projected from constants:
 
 | | Bytes | Against |
 | --- | --- | --- |
-| Six light fields, in the pack | 388,800 | — |
-| Encoded as PNG | 12,808 | — |
-| The whole APC stream, control data included | **17,284** | 1,200,000 |
-| The `f=32` route it replaces | 5,529,600 | 461% of budget |
+| The M0 inventory — 65 plates — in the pack | 748,542 | — |
+| The whole APC stream, control data included | **43,097** | 1,200,000 |
+| The `f=32` route #17 escaped | 5,529,600, for the six light fields alone | 461% of budget |
 
-A factor of 320, and the row now carries a **headroom band** at eight to one —
-because six plates are 6 of M0's 71, and a row that only just fits today is a row
-that has already failed. The other two cold-start rows are measured too:
-**78–109 ms** local against 800 (eight runs, GCC 14 Debug on the dev box; median
-82), and **216–247 ms** modelled against 12 s — that second figure is the local
-encode *plus* 138 ms of wire time at 1 Mbit/s, not wire time alone. Both are
-labelled in the case banner as GLOAM's half only: the terminal's own decode is
-upstream's problem and unmeasurable from here.
+The headroom band is now **twenty-seven to one** against a pack that is the
+whole M0 inventory rather than a sixth of it. The other two cold-start rows are
+measured too: **168–172 ms** local against 800 (eight runs, GCC 14 Debug on the
+dev box; median 169), and **~514 ms** modelled against 12 s — that second figure
+is the local encode *plus* 345 ms of wire time at 1 Mbit/s, not wire time alone.
+Both are labelled in the case banner as GLOAM's half only: the terminal's own
+decode is upstream's problem and unmeasurable from here.
 
 The compressor is GLOAM's rather than a linked zlib for the reason `test/25png/`
 pins a `sha256` over an encoded light field: that digest is worth something only
@@ -443,6 +451,21 @@ by the mixer, the arithmetic is asserted exactly over a synthetic clock, and the
 only term left is `RtAudio::getStreamLatency()` — the driver's own, which is
 hardware. The row is not met, and it says so.
 
+**And now you can play it.** `gloam_m0`
+([#8](https://github.com/gobha-me/gloam/issues/8)) is the binary the M0 gate is
+answered with: one corridor, four cells and an intersection, one patrolling
+monster under the full §6 perception model, one lamp to carry and douse —
+real-time or step-timed, toggled mid-session on Tab, against the same scene.
+It needs a kitty terminal and a `pack.gloam`, looked for beside the binary and
+then in the working directory, or named with `--pack PATH`. It ticks the
+device-free core at 10 Hz, draws through the compositor on the emit-on-change
+contract, and `q` seals the session into a replay that names the pack it ran
+against. `--seed N` varies the session, `--step` starts step-timed, `--mute`
+runs without the audio device, and `--record PATH` / `--no-record` steer the
+replay (default `m0-session.gloam`). `36m0session-test` is the capstone: the
+real binary on a real pty, a scripted session across the pump toggle, and the
+sealed file replayed in-process to the binary's own world hash.
+
 ## Design
 
 The full specification is [`design/SPEC.md`](design/SPEC.md), vendored from the
@@ -476,7 +499,8 @@ Three commitments shape almost every file:
 design/           the specification the code cites — a snapshot; see design/README.md
 include/gloam/    the deterministic core's public headers, plus sixteen off-umbrella
 src/lib/          its implementation — standard library only, no I/O, no clock
-src/bin/          the diagnostic binary, gloam_bake and gloam_replay; the SFX
+src/bin/          the diagnostic binary, gloam_bake, gloam_replay and gloam_m0;
+                  the SFX
                   synthesiser, mixer and one-file RtAudio boundary; the private
                   termforge sink and resident plate owner (§4.8, §9.1)
 test/             property tests, budget assertions, and the real-PTY lifecycle

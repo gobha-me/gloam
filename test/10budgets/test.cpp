@@ -285,36 +285,23 @@ TEST_CASE("§11's residency cap, measured against a real manifest", "[budget]") 
   // states the rule: "The sink reports; the budget judges; exactly one file can
   // relax a budget." A parser that knows the cap is a parser that can be
   // configured past it.
-  const auto field_bytes = plate::blob_bytes(lightfield::kWidthPx, lightfield::kHeightPx);
-  std::vector<std::byte> pixels(field_bytes * lightfield::kFieldCount);
-  std::vector<pack::Record> records;
-  std::vector<std::span<const std::byte>> blobs;
-
-  for (int level = kLampLevelMin; level <= kLampLevelMax; ++level) {
-    const auto slot = static_cast<std::size_t>(level - kLampLevelMin);
-    const auto blob = std::span{pixels}.subspan(slot * field_bytes, field_bytes);
-    REQUIRE(lightfield::bake(level, blob));
-
-    pack::Record r{};
-    r.plate_id = static_cast<std::uint16_t>(level);
-    r.role = pack::Role::LightField;
-    r.depth = pack::kDepthFullFrame;
-    r.lateral = pack::Lateral::FullFrame;
-    r.codec = pack::Codec::RawPlanes;
-    r.w = static_cast<std::uint16_t>(lightfield::kWidthPx);
-    r.h = static_cast<std::uint16_t>(lightfield::kHeightPx);
-    records.push_back(r);
-    blobs.push_back(blob);
-  }
-
-  std::vector<std::byte> image(pack::image_bytes(records));
-  REQUIRE(pack::assemble(records, blobs, image));
-  REQUIRE(pack::verify(image));
+  // The manifest is the REAL one — gloam#8 grew the pack from the six light
+  // fields to the whole M0 inventory, and a hand-built six-record manifest
+  // would keep passing a row about a pack nobody ships. This is
+  // `gloam_bake`'s own pipeline, the same path test/12pack's golden covers.
+  std::vector<std::byte> pixels(assets::pixel_bytes());
+  std::vector<pack::Record> records(static_cast<std::size_t>(assets::kPlateCount));
+  std::vector<std::span<const std::byte>> blobs(static_cast<std::size_t>(assets::kPlateCount));
+  std::vector<std::byte> image(assets::image_bytes());
+  REQUIRE(assets::build_pack(pixels, records, blobs, image));
 
   pack::Header header{};
   REQUIRE(pack::read_header(image, header));
   CHECK(header.plate_count <= budget::kMaxResidentImages);
-  CHECK(header.plate_count == budget::kLightFields.m0);
+  CHECK(header.plate_count == static_cast<std::uint16_t>(assets::kPlateCount));
+  // §4.2's M0 plan budgets 71 including six UI frames the corridor slice does
+  // not render; shipping 65 leaves that headroom intact rather than spent.
+  CHECK(header.plate_count == budget::resident_images_m0() - budget::kUiFramesAndGlyphs.m0);
   CHECK(header.total_bytes == image.size());
 
   // A necessary condition, not the budget: the pack cannot be under 1.2 MB on
@@ -339,9 +326,17 @@ TEST_CASE("§11's cold-start payload row, measured on the real stream", "[budget
   // What changed is the payload format, not the budget: `png.hpp` encodes the
   // plate as a 4-bit indexed PNG and `deflate.hpp` compresses it, so `f=100`
   // carries roughly a fiftieth of what `f=32` would have. The measurement below
-  // is not a projection from constants — it bakes the six real fields, encodes
-  // them, and transmits them through the real emitter into a real sink.
-  std::vector<std::byte> blob(plate::blob_bytes(lightfield::kWidthPx, lightfield::kHeightPx));
+  // is not a projection from constants — it bakes the whole M0 inventory
+  // through `assets::bake_all` (gloam#8: no longer only the six light fields),
+  // encodes every plate at its own extent, and transmits it through the real
+  // emitter into a real sink.
+  std::vector<std::byte> pixels(assets::pixel_bytes());
+  std::vector<pack::Record> records(static_cast<std::size_t>(assets::kPlateCount));
+  std::vector<std::span<const std::byte>> blobs(static_cast<std::size_t>(assets::kPlateCount));
+  REQUIRE(assets::bake_all(pixels, records, blobs));
+
+  // Sized for the largest plate extent in the inventory — the full-frame light
+  // fields — and reused across plates.
   std::vector<std::byte> scratch(png::scratch_bytes(lightfield::kWidthPx, lightfield::kHeightPx));
   std::vector<std::byte> encoded(png::bound(lightfield::kWidthPx, lightfield::kHeightPx));
 
@@ -350,15 +345,14 @@ TEST_CASE("§11's cold-start payload row, measured on the real stream", "[budget
   emit::ByteSink sink;
   std::size_t png_bytes = 0;
 
-  for (int level = kLampLevelMin; level <= kLampLevelMax; ++level) {
-    REQUIRE(lightfield::bake(level, blob));
-    const auto image = png::encode(plate::PlateView{blob, lightfield::kWidthPx,
-                                                    lightfield::kHeightPx},
-                                   scratch, matcher, encoded);
+  for (std::size_t slot = 0; slot < records.size(); ++slot) {
+    const auto image = png::encode(
+        plate::PlateView{blobs[slot], records[slot].w, records[slot].h}, scratch, matcher,
+        encoded);
     REQUIRE(image.error == png::PngError::None);
     png_bytes += image.bytes;
 
-    const auto id = static_cast<std::uint32_t>(level - kLampLevelMin) + 1;
+    const auto id = static_cast<std::uint32_t>(records[slot].plate_id) + 1;
     REQUIRE(kitty::emit_transmit(sink, std::span{encoded}.first(image.bytes), id).error ==
             kitty::EmitError::None);
   }
@@ -370,18 +364,23 @@ TEST_CASE("§11's cold-start payload row, measured on the real stream", "[budget
   const auto stream_bytes = sink.size();
   const auto base64_bytes = base64::encoded_size(png_bytes);
 
-  const auto pixels = static_cast<std::size_t>(lightfield::kWidthPx) *
-                      static_cast<std::size_t>(lightfield::kHeightPx) *
-                      static_cast<std::size_t>(assets::kPlateCount);
-
-  // The blob really is 3 bits per pixel, and that is what makes the pack small.
-  CHECK(assets::pixel_bytes() * 8 == pixels * 3);
+  // The blobs really are 3 bits per pixel plus row alignment, and that is
+  // what makes the pack small. With per-slot extents the identity is no longer
+  // exact — a 36-wide stencil row pads to five bytes — so the check is a BAND:
+  // at or above the raw bit count, and within 2% of it. Padding larger than
+  // that would be an extent bug, not alignment.
+  std::size_t raw_bits = 0;
+  for (const auto& record : records) {
+    raw_bits += static_cast<std::size_t>(record.w) * record.h * 3;
+  }
+  CHECK(assets::pixel_bytes() * 8 >= raw_bits);
+  CHECK(assets::pixel_bytes() * 8 <= raw_bits + raw_bits / 50);
 
   INFO("pack " << assets::image_bytes() << " B, PNG " << png_bytes << " B, base64 "
                << base64_bytes << " B, whole stream " << stream_bytes << " B, budget "
                << budget::kMaxColdStartPayloadBytes << " B");
-  // Tenths, not integer percent: the true figure is 1.4%, and a percentage
-  // truncated to 1% reads LOWER than the claim the prose makes from it.
+  // Tenths, not integer percent: the true figure is 3.5%, and a percentage
+  // truncated to 3% reads LOWER than the claim the prose makes from it.
   WARN("cold-start payload: " << stream_bytes << " B on the wire ("
                               << stream_bytes * 1000 / budget::kMaxColdStartPayloadBytes / 10 << "."
                               << stream_bytes * 1000 / budget::kMaxColdStartPayloadBytes % 10
@@ -391,20 +390,22 @@ TEST_CASE("§11's cold-start payload row, measured on the real stream", "[budget
   CHECK(base64_bytes <= budget::kMaxColdStartPayloadBytes);
   CHECK(stream_bytes <= budget::kMaxColdStartPayloadBytes);
 
-  // A HEADROOM BAND, not decoration. §11's cap is for the whole resident set and
-  // M0's inventory is 71 plates (`budget::resident_images_m0()`), of which these
-  // six are the largest — they are the only FULL-FRAME plates. A row that passed
-  // at 90% of budget with six of seventy-one plates would be a row that has
-  // already failed and does not know it yet. Eight-to-one is what the encoder
-  // delivers today with an order of magnitude to spare; if a change halves that,
-  // this goes red while there is still time to do something about it.
+  // A HEADROOM BAND, not decoration. The measurement above now covers the whole
+  // M0 inventory — 65 plates, every wall, band and monster pose the corridor
+  // slice renders (gloam#8) — so the band's job is no longer "six of
+  // seventy-one": it is margin against the authored art that will REPLACE the
+  // placeholders, byte for byte in the worst case. Eight-to-one is what the
+  // encoder delivers today with an order of magnitude to spare; if a change
+  // halves that, this goes red while there is still time to do something about it.
   CHECK(stream_bytes * 8 <= budget::kMaxColdStartPayloadBytes);
 
   // And what it would have cost the naive way, kept as an assertion rather than
   // as a remark: this is the arithmetic gloam#17 recorded, and it is the reason
   // `f=100` is not an optimisation but the thing that made the row reachable.
+  // Pixels, not raw bytes: raw_bits / 3 is the pixel count, each expands to
+  // 4 B of RGBA on the wire, and base64 adds a third.
   constexpr std::size_t kBytesPerWirePixel = 4;  // kitty f=32 RGBA
-  const auto naive_base64 = pixels * kBytesPerWirePixel * 4 / 3;
+  const auto naive_base64 = raw_bits / 3 * kBytesPerWirePixel * 4 / 3;
   CHECK(naive_base64 > budget::kMaxColdStartPayloadBytes);
   CHECK(naive_base64 / stream_bytes >= 8);
 }
@@ -430,7 +431,9 @@ TEST_CASE("§11's two cold-start timing rows, one measured and one modelled",
   // The throttled row is arithmetic over the measured byte count — 1 Mbit/s of
   // wire time plus the measured local cost. A test that actually slept for the
   // wire time would spend twelve seconds of CI proving that division works.
-  std::vector<std::byte> blob(plate::blob_bytes(lightfield::kWidthPx, lightfield::kHeightPx));
+  std::vector<std::byte> pixels(assets::pixel_bytes());
+  std::vector<pack::Record> records(static_cast<std::size_t>(assets::kPlateCount));
+  std::vector<std::span<const std::byte>> blobs(static_cast<std::size_t>(assets::kPlateCount));
   std::vector<std::byte> scratch(png::scratch_bytes(lightfield::kWidthPx, lightfield::kHeightPx));
   std::vector<std::byte> encoded(png::bound(lightfield::kWidthPx, lightfield::kHeightPx));
   deflate::Scratch matcher;
@@ -441,14 +444,14 @@ TEST_CASE("§11's two cold-start timing rows, one measured and one modelled",
 
   const auto started = std::chrono::steady_clock::now();
 
-  for (int level = kLampLevelMin; level <= kLampLevelMax; ++level) {
-    REQUIRE(lightfield::bake(level, blob));
+  REQUIRE(assets::bake_all(pixels, records, blobs));
+  for (std::size_t slot = 0; slot < records.size(); ++slot) {
     const auto image =
-        png::encode(plate::PlateView{blob, lightfield::kWidthPx, lightfield::kHeightPx}, scratch,
+        png::encode(plate::PlateView{blobs[slot], records[slot].w, records[slot].h}, scratch,
                     matcher, encoded);
     REQUIRE(image.error == png::PngError::None);
     REQUIRE(kitty::emit_transmit(sink, std::span{encoded}.first(image.bytes),
-                                 static_cast<std::uint32_t>(level - kLampLevelMin) + 1)
+                                 static_cast<std::uint32_t>(records[slot].plate_id) + 1)
                 .error == kitty::EmitError::None);
   }
 
@@ -481,8 +484,8 @@ TEST_CASE("§11's two cold-start timing rows, one measured and one modelled",
 #endif
 
   // A headroom band on the modelled row, for the reason the payload row has one:
-  // these six plates are 6 of M0's 71, and a row that only just fits today is a
-  // row that has already failed.
+  // the placeholders will be REPLACED by authored art at the same extents, and a
+  // row that only just fits today is a row that has already failed.
   CHECK(throttled_ms * 4 <= budget::kMaxColdStartThrottledMs);
 }
 

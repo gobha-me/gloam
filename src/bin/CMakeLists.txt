@@ -52,6 +52,43 @@ target_link_libraries(${PROJECT_NAME}
   PRIVATE termforge::lib
 )
 
+# ─── The M0 corridor, playable (gloam#8) ─────────────────────────────────────
+#
+# A SEPARATE EXECUTABLE, and deliberately not flags on ${PROJECT_NAME}: the
+# diagnostic is build-order step 4's instrument and CI's audio-device probe
+# consumes its trace exactly as it stands, while this target is the thing a
+# playtester runs. When the M0 gate passes, which of them is named `gloam` is
+# a decision to take THEN, in a commit that says so — not something to back
+# into.
+#
+# scene.cpp and game.cpp are compiled here AND into test/34gamecore/ — the
+# test/27sfxarena/ pattern: device-free translation units the suite compiles
+# directly, so the scene and both pump policies sit under all eight sanitizer
+# legs on machines with no terminal and no sound card. Everything terminal-,
+# clock- or device-facing lives in m0.cpp or the shared shells beside it.
+add_executable(${PROJECT_NAME}_m0
+  m0.cpp
+  scene.cpp
+  game.cpp
+  tty_writer.cpp
+  terminal_sink.cpp
+  resident_plates.cpp
+  terminal_compositor.cpp
+  sfx.cpp
+  voice_mixer.cpp
+  audio_device.cpp
+)
+
+target_include_directories(${PROJECT_NAME}_m0
+  PRIVATE ${PROJECT_SOURCE_DIR}/include
+)
+
+target_link_libraries(${PROJECT_NAME}_m0
+  PRIVATE ${PROJECT_NAME}::lib
+  PRIVATE RtAudio::rtaudio
+  PRIVATE termforge::lib
+)
+
 # ── The offline asset pipeline (SPEC §10) ───────────────────────────────────
 #
 # A SEPARATE EXECUTABLE, not a flag on the game. §10 is explicit that nothing is

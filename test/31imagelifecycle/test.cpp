@@ -417,11 +417,15 @@ class PlateApp : public termforge::App {
     }
     rects.push_back(*cells);
     for (std::uint16_t id = 0; id < plates_.size(); ++id) {
+      // band_rank is per-BAND and stride-limited (layer.hpp's kBandStride):
+      // with the full 65-plate M0 pack, the id no longer fits the rank field.
+      // This harness exercises pin/place/retain lifecycle, not visual order,
+      // so wrapping the rank is legal and loses nothing it asserts.
       const auto result = plates_.draw(
           driver(), Placement{.plate_id = id,
                               .cells = *cells,
                               .band = gloam::layer::Band::Light,
-                              .band_rank = id});
+                              .band_rank = id % gloam::layer::kBandStride});
       if (!result) {
         failed_ = result.error().code;
         return false;
