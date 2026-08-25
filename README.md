@@ -443,6 +443,21 @@ by the mixer, the arithmetic is asserted exactly over a synthetic clock, and the
 only term left is `RtAudio::getStreamLatency()` — the driver's own, which is
 hardware. The row is not met, and it says so.
 
+**And now you can play it.** `gloam_m0`
+([#8](https://github.com/gobha-me/gloam/issues/8)) is the binary the M0 gate is
+answered with: one corridor, four cells and an intersection, one patrolling
+monster under the full §6 perception model, one lamp to carry and douse —
+real-time or step-timed, toggled mid-session on Tab, against the same scene.
+It needs a kitty terminal and a `pack.gloam`, looked for beside the binary and
+then in the working directory, or named with `--pack PATH`. It ticks the
+device-free core at 10 Hz, draws through the compositor on the emit-on-change
+contract, and `q` seals the session into a replay that names the pack it ran
+against. `--seed N` varies the session, `--step` starts step-timed, `--mute`
+runs without the audio device, and `--record PATH` / `--no-record` steer the
+replay (default `m0-session.gloam`). `36m0session-test` is the capstone: the
+real binary on a real pty, a scripted session across the pump toggle, and the
+sealed file replayed in-process to the binary's own world hash.
+
 ## Design
 
 The full specification is [`design/SPEC.md`](design/SPEC.md), vendored from the
@@ -476,7 +491,8 @@ Three commitments shape almost every file:
 design/           the specification the code cites — a snapshot; see design/README.md
 include/gloam/    the deterministic core's public headers, plus sixteen off-umbrella
 src/lib/          its implementation — standard library only, no I/O, no clock
-src/bin/          the diagnostic binary, gloam_bake and gloam_replay; the SFX
+src/bin/          the diagnostic binary, gloam_bake, gloam_replay and gloam_m0;
+                  the SFX
                   synthesiser, mixer and one-file RtAudio boundary; the private
                   termforge sink and resident plate owner (§4.8, §9.1)
 test/             property tests, budget assertions, and the real-PTY lifecycle
