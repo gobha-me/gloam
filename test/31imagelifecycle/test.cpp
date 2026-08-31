@@ -46,6 +46,8 @@
 #include "gloam/geometry.hpp"
 #include "gloam/pack.hpp"
 #include "gloam/plate.hpp"
+
+#include "sfx.hpp"  // the shipped pack carries the audio arena (gloam#23), so the real PCM
 #include "resident_plates.hpp"
 #include "terminal_sink.hpp"
 #include "tty_writer.hpp"
@@ -93,10 +95,22 @@ auto small_pack(std::size_t count) -> PackImage {
 auto shipped_pack() -> const std::vector<std::byte>& {
   static const std::vector<std::byte> image = [] {
     std::vector<std::byte> pixels(gloam::assets::pixel_bytes());
-    std::vector<gloam::pack::Record> records(gloam::assets::kPlateCount);
-    std::vector<std::span<const std::byte>> blobs(gloam::assets::kPlateCount);
+    std::vector<std::int16_t> pcm(gloam::assets::kAudioArenaFrames);
+    std::array<gloam::sfx::Clip, gloam::audio::kSoundIdCount> clips{};
+    if (!gloam::sfx::synthesise_i16(gloam::sfx::kArenaSeed, pcm, clips)) {
+      throw std::runtime_error{"could not synthesise the audio arena"};
+    }
+    std::array<gloam::assets::AudioSource, gloam::assets::kAudioCount> audio{};
+    if (!gloam::sfx::pack_sources(pcm, clips, audio)) {
+      throw std::runtime_error{"the synthesiser and the audio inventory disagree"};
+    }
+    std::vector<std::byte> audio_bytes(gloam::assets::kAudioBlobBytes);
+    const auto record_count =
+        static_cast<std::size_t>(gloam::assets::kPlateCount) + gloam::assets::kAudioCount;
+    std::vector<gloam::pack::Record> records(record_count);
+    std::vector<std::span<const std::byte>> blobs(record_count);
     std::vector<std::byte> out(gloam::assets::image_bytes());
-    const auto built = gloam::assets::build_pack(pixels, records, blobs, out);
+    const auto built = gloam::assets::build_pack(pixels, records, blobs, audio, audio_bytes, out);
     if (!built) throw std::runtime_error{"could not build the shipped plate pack"};
     out.resize(built.bytes);
     return out;

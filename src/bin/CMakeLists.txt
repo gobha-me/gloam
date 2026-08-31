@@ -23,6 +23,12 @@
 # tty_writer.cpp, which puts the entire float half of §9 under all eight
 # sanitizer legs on machines that have no sound card — which is every machine
 # this project builds on.
+#
+# pack_audio.cpp (gloam#23) is the arena's way BACK: the records-only launch
+# gate and the s16le -> float expansion that load the pack's audio run. It is
+# bin-side for sfx.cpp's two reasons — it produces float (rule 2) and owns no
+# storage — and device-free the same way, so the pack-audio suite compiles it
+# directly beside sfx.cpp.
 add_executable(${PROJECT_NAME}
   main.cpp
   tty_writer.cpp
@@ -30,6 +36,7 @@ add_executable(${PROJECT_NAME}
   resident_plates.cpp
   terminal_compositor.cpp
   sfx.cpp
+  pack_audio.cpp
   voice_mixer.cpp
   audio_device.cpp
 )
@@ -75,6 +82,7 @@ add_executable(${PROJECT_NAME}_m0
   resident_plates.cpp
   terminal_compositor.cpp
   sfx.cpp
+  pack_audio.cpp
   voice_mixer.cpp
   audio_device.cpp
 )
@@ -96,8 +104,15 @@ target_link_libraries(${PROJECT_NAME}_m0
 # ${PROJECT_NAME} would make that a convention rather than a fact. This target
 # holds the only file descriptor in the pipeline — everything it calls in
 # ${PROJECT_NAME}::lib works on caller-owned spans.
+#
+# sfx.cpp joins it for gloam#23: the pack carries the resident PCM arena, so
+# the bake runs the synthesiser's integer stage. sfx.cpp is bin-side rather
+# than in the library for the float half's reason (AGENTS.md rule 2); the
+# integer stage the bake uses shares that translation unit and its
+# no-libm, Ambience-only determinism, which is what `pack-reproducible` gates.
 add_executable(${PROJECT_NAME}_bake
   bake.cpp
+  sfx.cpp
 )
 
 target_include_directories(${PROJECT_NAME}_bake

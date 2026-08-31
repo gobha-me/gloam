@@ -11,6 +11,10 @@
 // blob, a record, the header, and the PADDING BETWEEN BLOBS. That last one is
 // the assertion which says the gaps are hashed rather than merely written.
 //
+// A third subject has since joined the two: the audio run of gloam#23, tested
+// the same way and hand-built from synthetic blobs — never sfx.cpp or the
+// real bake, which would make a format unit depend on a synthesizer.
+//
 // Failure matrix first, per AGENTS.md. The round trip and the golden header
 // prefix are last, and prove the least.
 
@@ -21,6 +25,7 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "gloam/assets.hpp"
@@ -30,6 +35,8 @@
 #include "gloam/pack.hpp"
 #include "gloam/plate.hpp"
 #include "gloam/sha256.hpp"
+
+#include "sfx.hpp"  // the golden covers the audio records too, so the real PCM (gloam#23)
 
 using namespace gloam;
 using gloam::pack::PackError;
@@ -112,6 +119,95 @@ auto poke_u32(std::vector<std::byte>& image, std::size_t at, std::uint32_t v) ->
 auto poke_u16(std::vector<std::byte>& image, std::size_t at, std::uint16_t v) -> void {
   image[at + 0] = static_cast<std::byte>(v & 0xFFU);
   image[at + 1] = static_cast<std::byte>((v >> 8) & 0xFFU);
+}
+
+// ── A small mixed pack: two plates, then two sounds ──
+//
+// The audio failure matrix's somewhere to bite. The plate half is make_pack()
+// byte-for-byte, so a plate failure means the same thing in both fixtures.
+
+// The numbers, named once. Blob A is 300 frames × 2 channels × 2 bytes =
+// 1200 B, a multiple of four; blob B is 441 × 1 × 2 = 882 B, which is not —
+// the run keeps an inter-blob gap either way, but the asymmetric one is the
+// interesting case. Sound id 1 sits behind plate id 1 ON PURPOSE: the audio
+// run's id chain is its own, and overlapping the plate run's ids is exactly
+// what must NOT be called out of order.
+constexpr std::uint16_t kSoundA = 1;
+constexpr std::uint16_t kSoundB = 9;
+constexpr std::uint16_t kRateA = 22050;
+constexpr std::uint8_t kChannelsA = 2;
+constexpr std::uint32_t kFramesA = 300;
+constexpr std::uint16_t kRateB = 8000;
+constexpr std::uint8_t kChannelsB = 1;
+constexpr std::uint32_t kFramesB = 441;
+
+struct MixedFixture {
+  std::vector<gloam::pack::Record> records;
+  std::vector<std::byte> plate_bytes;
+  std::vector<std::byte> audio_bytes;  ///< both sound blobs, concatenated
+  std::vector<std::byte> image;
+};
+
+/// Deterministic arithmetic noise. The format under test cannot tell a sine
+/// from a sawtooth, and a test that needed real synthesis would be testing
+/// sfx.cpp at the wrong distance.
+[[nodiscard]] auto make_audio_blob(std::uint32_t frames, std::uint8_t channels,
+                                   std::uint8_t seed) -> std::vector<std::byte> {
+  std::vector<std::byte> blob(static_cast<std::size_t>(gloam::pack::audio_blob_bytes(
+      frames, channels, gloam::pack::SampleFormat::S16Le)));
+  for (std::size_t i = 0; i < blob.size(); ++i) {
+    blob[i] = static_cast<std::byte>((i * 37 + seed * 11 + 5) & 0xFF);
+  }
+  return blob;
+}
+
+/// The record→blob pairing, factored out so a test that has reordered records
+/// can rebuild the spans to match.
+[[nodiscard]] auto blobs_of(const MixedFixture& f) -> std::vector<std::span<const std::byte>> {
+  const auto blob_bytes = plate::blob_bytes(kW, kH);
+  const auto a_bytes = static_cast<std::size_t>(
+      gloam::pack::audio_blob_bytes(kFramesA, kChannelsA, gloam::pack::SampleFormat::S16Le));
+  return {std::span<const std::byte>{f.plate_bytes}.subspan(0, blob_bytes),
+          std::span<const std::byte>{f.plate_bytes}.subspan(blob_bytes, blob_bytes),
+          std::span<const std::byte>{f.audio_bytes}.subspan(0, a_bytes),
+          std::span<const std::byte>{f.audio_bytes}.subspan(a_bytes)};
+}
+
+[[nodiscard]] auto make_mixed_pack() -> MixedFixture {
+  MixedFixture f;
+  const auto plates = make_pack();  // the plate run, byte-for-byte the plate fixture's
+  f.plate_bytes = plates.plate_bytes;
+  f.records = plates.records;
+
+  gloam::pack::Record a{};
+  a.plate_id = kSoundA;  // the plate_id field doubles as the sound id
+  a.role = gloam::pack::Role::Audio;
+  a.sample_rate = kRateA;
+  a.channels = kChannelsA;
+  a.sample_format = gloam::pack::SampleFormat::S16Le;
+  a.frame_count = kFramesA;
+
+  gloam::pack::Record b{};
+  b.plate_id = kSoundB;
+  b.role = gloam::pack::Role::Audio;
+  b.sample_rate = kRateB;
+  b.channels = kChannelsB;
+  b.sample_format = gloam::pack::SampleFormat::S16Le;
+  b.frame_count = kFramesB;
+
+  const auto blob_a = make_audio_blob(kFramesA, kChannelsA, 1);
+  const auto blob_b = make_audio_blob(kFramesB, kChannelsB, 2);
+  f.audio_bytes.assign(blob_a.begin(), blob_a.end());
+  f.audio_bytes.insert(f.audio_bytes.end(), blob_b.begin(), blob_b.end());
+
+  f.records.push_back(a);
+  f.records.push_back(b);
+
+  f.image.assign(gloam::pack::image_bytes(f.records), std::byte{0});
+  const auto res = gloam::pack::assemble(f.records, blobs_of(f), f.image);
+  REQUIRE(res);
+  REQUIRE(res.bytes == f.image.size());
+  return f;
 }
 
 }  // namespace
@@ -241,14 +337,13 @@ TEST_CASE("an unsupported version is refused", "[pack]") {
 TEST_CASE("a nonzero reserved field is refused", "[pack]") {
   // Reserved bytes inside the digest's coverage are a place to smuggle a byte
   // past a reader that ignores them, so they are checked rather than skipped.
+  // Header bytes +42-43 are no longer such a byte — the audio record kind
+  // claimed them as audio_count (gloam#23), and that field has its own matrix
+  // below. reserved0 and the record's +7 stay reserved, +7 under BOTH readings.
   auto a = make_pack();
   poke_u16(a.image, 6, 1);
   gloam::pack::Header h{};
   CHECK(gloam::pack::read_header(a.image, h).error == PackError::ReservedNotZero);
-
-  auto b = make_pack();
-  poke_u16(b.image, 42, 0x8000);
-  CHECK(gloam::pack::read_header(b.image, h).error == PackError::ReservedNotZero);
 
   auto c = make_pack();
   c.image[record_at(0) + 7] = std::byte{1};
@@ -653,21 +748,46 @@ TEST_CASE("write_record and read_record are inverses over everything assemble em
           "[pack]") {
   // The other half of the same property: if assemble only ever writes values
   // read_record accepts, the two are inverses, and a round trip cannot lose a
-  // field. Swept over every legal enumerator combination.
+  // field. Swept over every legal enumerator combination of the PLATE reading.
+  // Role::Audio rides exactly once: it is a different reading of the same
+  // bytes — its sample_rate occupies the depth/lateral slots, sweeping those
+  // would be sweeping another field's bytes, and an audio-only pack is
+  // ZeroPlates — so one legal sound whose extent matches the fixture blob
+  // (3 frames × 1 channel × 2 bytes) stands in for it here, and the
+  // byte-exact pin for the reading lives in the audio section below.
+  static_assert(static_cast<std::uint8_t>(gloam::pack::Role::Audio) ==
+                    static_cast<std::uint8_t>(gloam::pack::Role::Rune) + 1,
+                "Audio must stay the first non-plate role, or this sweep silently drifts");
   const auto blob_bytes = plate::blob_bytes(kW, kH);
   auto f = make_pack();
 
   for (std::uint8_t role = 0; role <= gloam::pack::kRoleMax; ++role) {
+    const auto is_audio = static_cast<gloam::pack::Role>(role) == gloam::pack::Role::Audio;
     for (std::uint8_t lateral = 0; lateral <= gloam::pack::kLateralMax; ++lateral) {
       for (const std::uint8_t depth :
            {std::uint8_t{0}, static_cast<std::uint8_t>(geometry::kDepthCount - 1),
             gloam::pack::kDepthFullFrame}) {
+        if (is_audio && (lateral != 0 || depth != 0)) continue;  // not fields under this reading
         auto records = f.records;
-        for (auto& r : records) {
-          r.role = static_cast<gloam::pack::Role>(role);
-          r.lateral = static_cast<gloam::pack::Lateral>(lateral);
-          r.depth = depth;
-          r.variant = 3;
+        if (is_audio) {
+          auto& a = records[1];  // records[0] stays a plate: the run needs one
+          a.role = gloam::pack::Role::Audio;
+          // The plate-side fields are never serialized under Audio, so they
+          // must sit at their defaults for the round trip to compare equal —
+          // see the Record doc in pack.hpp.
+          a.w = 0;
+          a.h = 0;
+          a.sample_rate = 8000;
+          a.channels = 1;
+          a.sample_format = gloam::pack::SampleFormat::S16Le;
+          a.frame_count = 3;
+        } else {
+          for (auto& r : records) {
+            r.role = static_cast<gloam::pack::Role>(role);
+            r.lateral = static_cast<gloam::pack::Lateral>(lateral);
+            r.depth = depth;
+            r.variant = 3;
+          }
         }
         std::vector<std::span<const std::byte>> blobs{
             std::span<const std::byte>{f.plate_bytes}.subspan(0, blob_bytes),
@@ -678,11 +798,14 @@ TEST_CASE("write_record and read_record are inverses over everything assemble em
         REQUIRE(gloam::pack::assemble(records, blobs, out));
         REQUIRE(gloam::pack::verify(out));
 
-        gloam::pack::Record back{};
-        REQUIRE(gloam::pack::read_record(
-            std::span<const std::byte>{out}.subspan(record_at(0), gloam::pack::kRecordBytes),
-            back));
-        REQUIRE(back == records[0]);
+        for (const std::uint16_t index : {0, 1}) {
+          gloam::pack::Record back{};
+          REQUIRE(gloam::pack::read_record(
+              std::span<const std::byte>{out}.subspan(record_at(index),
+                                                      gloam::pack::kRecordBytes),
+              back));
+          REQUIRE(back == records[index]);
+        }
       }
     }
   }
@@ -700,6 +823,354 @@ TEST_CASE("assemble refuses records that are not in plate_id order", "[pack]") {
   const auto res = gloam::pack::assemble(records, blobs, out);
   CHECK(res.error == PackError::RecordsOutOfOrder);
   CHECK(res.plate_index == 1);
+}
+
+// ── The audio run (gloam#23, UPSTREAM.md item 10) ──
+//
+// The record table's second kind: the same 52-byte envelope, the same blob
+// rules and the same digest gate, with a different reading of the descriptive
+// middle and a two-run ordering rule. Failure matrix first, as everywhere
+// else in this file.
+
+TEST_CASE("an unknown sample format is refused rather than cast", "[pack][audio]") {
+  // The +6 slot's audio-side enumerator, under the same discipline as codec:
+  // a value this version has never heard of is refused by value, so a future
+  // format lands as a new enumerator rather than a silent misread.
+  auto f = make_mixed_pack();
+  f.image[record_at(2) + 6] = std::byte{gloam::pack::kSampleFormatMax + 1};
+
+  gloam::pack::Record r{};
+  CHECK(gloam::pack::read_record(
+            std::span<const std::byte>{f.image}.subspan(record_at(2), gloam::pack::kRecordBytes),
+            r)
+            .error == PackError::UnknownSampleFormat);
+
+  const auto res = gloam::pack::verify(f.image);
+  CHECK(res.error == PackError::UnknownSampleFormat);
+  CHECK(res.plate_index == 2);
+}
+
+TEST_CASE("a sound with no rate, no channels or no frames is refused", "[pack][audio]") {
+  // Each zero trips its own name. The mutations are minimal — one field,
+  // zeroed — so the error that fires is the check that field owns, not a
+  // downstream consequence of it (a zero channel count would ALSO make the
+  // blob length wrong; the channels check runs first and names it).
+  auto rate = make_mixed_pack();
+  poke_u16(rate.image, record_at(2) + 3, 0);
+  const auto rate_res = gloam::pack::verify(rate.image);
+  CHECK(rate_res.error == PackError::ZeroSampleRate);
+  CHECK(rate_res.plate_index == 2);
+
+  auto channels = make_mixed_pack();
+  channels.image[record_at(2) + 5] = std::byte{0};
+  const auto channels_res = gloam::pack::verify(channels.image);
+  CHECK(channels_res.error == PackError::ZeroChannels);
+  CHECK(channels_res.plate_index == 2);
+
+  auto frames = make_mixed_pack();
+  poke_u32(frames.image, record_at(2) + 8, 0);
+  const auto frames_res = gloam::pack::verify(frames.image);
+  CHECK(frames_res.error == PackError::ZeroFrames);
+  CHECK(frames_res.plate_index == 2);
+}
+
+TEST_CASE("an audio blob whose length disagrees with its frame count is refused",
+          "[pack][audio]") {
+  // The audio reading of BlobLengthWrongForExtent: under S16Le the length is a
+  // pure function of frames × channels, so a mismatch is a record describing a
+  // different sound than the one stored.
+  auto f = make_mixed_pack();
+  gloam::pack::Record r{};
+  REQUIRE(gloam::pack::read_record(
+      std::span<const std::byte>{f.image}.subspan(record_at(2), gloam::pack::kRecordBytes), r));
+  REQUIRE(r.length == 1200);
+  poke_u32(f.image, record_at(2) + 16, r.length - 1);
+  const auto res = gloam::pack::verify(f.image);
+  CHECK(res.error == PackError::BlobLengthWrongForFrames);
+  CHECK(res.plate_index == 2);
+}
+
+TEST_CASE("an audio record ahead of the plate run is refused", "[pack][audio]") {
+  // The two-run rule: every plate record precedes every audio record. The
+  // mutation rewrites the table as [plate, SOUND, plate, sound] using the
+  // library's own writer — the moved sound takes over the second plate's blob
+  // slot (6 bytes = 3 frames × 1 channel × 2, digest and all), so every check
+  // that is not the run order passes, and the error names the run order.
+  auto f = make_mixed_pack();
+  gloam::pack::Record plate1{};
+  REQUIRE(gloam::pack::read_record(
+      std::span<const std::byte>{f.image}.subspan(record_at(1), gloam::pack::kRecordBytes),
+      plate1));
+
+  gloam::pack::Record moved{};
+  moved.plate_id = 7;  // a sound id, on the audio run's own chain
+  moved.role = gloam::pack::Role::Audio;
+  moved.sample_rate = 8000;
+  moved.channels = 1;
+  moved.sample_format = gloam::pack::SampleFormat::S16Le;
+  moved.frame_count = 3;
+  moved.offset = plate1.offset;
+  moved.length = plate1.length;
+  moved.sha256 = plate1.sha256;  // the digest of the bytes actually there
+
+  REQUIRE(gloam::pack::write_record(
+      std::span<std::byte>{f.image}.subspan(record_at(1), gloam::pack::kRecordBytes), moved));
+  REQUIRE(gloam::pack::write_record(
+      std::span<std::byte>{f.image}.subspan(record_at(2), gloam::pack::kRecordBytes), plate1));
+
+  const auto res = gloam::pack::verify(f.image);
+  CHECK(res.error == PackError::AudioBeforePlates);
+  CHECK(res.plate_index == 2);
+}
+
+TEST_CASE("assemble refuses an audio record ahead of the plate run", "[pack][audio]") {
+  // The producer/consumer agreement, two-run edition: what verify refuses,
+  // assemble must refuse first — a baker that emitted this order would move a
+  // build failure to the player.
+  auto f = make_mixed_pack();
+  auto records = f.records;             // [plate, plate, sound, sound]
+  std::swap(records[1], records[2]);    // [plate, sound, plate, sound]
+  auto blobs = blobs_of(f);
+  std::swap(blobs[1], blobs[2]);        // each record keeps its own blob
+  std::vector<std::byte> out(f.image.size());
+  const auto res = gloam::pack::assemble(records, blobs, out);
+  CHECK(res.error == PackError::AudioBeforePlates);
+  CHECK(res.plate_index == 2);
+}
+
+TEST_CASE("sound ids must strictly increase within the audio run", "[pack][audio]") {
+  // The plate run's rule, applied to the audio run's own chain. That the chain
+  // IS its own is pinned by the fixture itself: sound id 1 sits behind plate
+  // id 1 in a pack that verifies.
+  auto f = make_mixed_pack();
+  poke_u16(f.image, record_at(3) + 0, kSoundA);  // the same sound id twice
+  const auto res = gloam::pack::verify(f.image);
+  CHECK(res.error == PackError::RecordsOutOfOrder);
+  CHECK(res.plate_index == 3);
+}
+
+TEST_CASE("a nonzero reserved byte in an audio record is refused", "[pack][audio]") {
+  // +7 is reserved under BOTH readings — the one descriptive byte the two
+  // readings share — and it stays a place nothing may be smuggled through.
+  auto f = make_mixed_pack();
+  f.image[record_at(2) + 7] = std::byte{1};
+
+  gloam::pack::Record r{};
+  CHECK(gloam::pack::read_record(
+            std::span<const std::byte>{f.image}.subspan(record_at(2), gloam::pack::kRecordBytes),
+            r)
+            .error == PackError::ReservedNotZero);
+
+  const auto res = gloam::pack::verify(f.image);
+  CHECK(res.error == PackError::ReservedNotZero);
+  CHECK(res.plate_index == 2);
+}
+
+TEST_CASE("the header's audio_count must agree with the records present", "[pack][audio]") {
+  // The claim against the table. The pokes keep plate_count + audio_count at
+  // four, so the table still parses end to end — what breaks is that the roles
+  // in it no longer tally with the header's claim. Both directions, because a
+  // claim can drift either way.
+  auto fewer = make_mixed_pack();
+  poke_u16(fewer.image, 40, 3);  // claims three plates…
+  poke_u16(fewer.image, 42, 1);  // …and one sound, where two of each sit
+  CHECK(gloam::pack::verify(fewer.image).error == PackError::AudioCountMismatch);
+
+  auto more = make_mixed_pack();
+  poke_u16(more.image, 40, 1);
+  poke_u16(more.image, 42, 3);
+  CHECK(gloam::pack::verify(more.image).error == PackError::AudioCountMismatch);
+}
+
+TEST_CASE("the plate run's rules still bind in a pack that has an audio run", "[pack][audio]") {
+  // Regression guard: growing a second reading must not have softened the
+  // first. The same minimal mutations as the plate-only matrix above, applied
+  // to the plate run of a mixed pack — plus one flipped audio blob, because
+  // the blob checks never knew what a plate was.
+  {
+    auto f = make_mixed_pack();
+    poke_u16(f.image, record_at(0) + 8, 0);  // width 0
+    CHECK(gloam::pack::verify(f.image).error == PackError::ExtentInvalid);
+  }
+  {
+    auto f = make_mixed_pack();
+    gloam::pack::Record r{};
+    REQUIRE(gloam::pack::read_record(
+        std::span<const std::byte>{f.image}.subspan(record_at(0), gloam::pack::kRecordBytes), r));
+    poke_u32(f.image, record_at(0) + 16, r.length - 1);
+    CHECK(gloam::pack::verify(f.image).error == PackError::BlobLengthWrongForExtent);
+  }
+  {
+    auto f = make_mixed_pack();
+    poke_u16(f.image, record_at(1) + 0, 0);  // a plate id seen before
+    CHECK(gloam::pack::verify(f.image).error == PackError::RecordsOutOfOrder);
+  }
+  {
+    auto f = make_mixed_pack();
+    f.image[record_at(0) + 4] = std::byte{gloam::pack::kLateralMax + 1};
+    CHECK(gloam::pack::verify(f.image).error == PackError::UnknownLateral);
+  }
+  {
+    auto f = make_mixed_pack();
+    gloam::pack::Record r{};
+    REQUIRE(gloam::pack::read_record(
+        std::span<const std::byte>{f.image}.subspan(record_at(3), gloam::pack::kRecordBytes), r));
+    flip(f.image, r.offset + 100);
+    const auto res = gloam::pack::verify(f.image);
+    CHECK(res.error == PackError::PlateDigestMismatch);
+    CHECK(res.plate_index == 3);
+  }
+}
+
+TEST_CASE("assemble refuses every audio reading verify would refuse", "[pack][audio]") {
+  // The producer/consumer agreement extended to the second kind. These
+  // mutations are in-memory, so read_record's refusals never get a turn —
+  // which is exactly the gap the agreement exists to close.
+  struct Case {
+    const char* what;
+    PackError want;
+    void (*spoil)(gloam::pack::Record&);
+  };
+  const std::array<Case, 4> cases{{
+      {"sample rate", PackError::ZeroSampleRate,
+       [](gloam::pack::Record& r) { r.sample_rate = 0; }},
+      {"channels", PackError::ZeroChannels, [](gloam::pack::Record& r) { r.channels = 0; }},
+      {"frame count", PackError::ZeroFrames, [](gloam::pack::Record& r) { r.frame_count = 0; }},
+      {"sample format", PackError::UnknownSampleFormat,
+       [](gloam::pack::Record& r) {
+         r.sample_format =
+             static_cast<gloam::pack::SampleFormat>(gloam::pack::kSampleFormatMax + 1);
+       }},
+  }};
+
+  for (const auto& c : cases) {
+    auto f = make_mixed_pack();
+    auto records = f.records;
+    c.spoil(records[2]);
+    std::vector<std::byte> out(f.image.size());
+    INFO("spoiled field: " << c.what);
+    const auto res = gloam::pack::assemble(records, blobs_of(f), out);
+    CHECK(res.error == c.want);
+    CHECK(res.plate_index == 2);
+  }
+}
+
+TEST_CASE("assemble refuses a blob whose size disagrees with an audio record", "[pack][audio]") {
+  auto f = make_mixed_pack();
+  auto blobs = blobs_of(f);
+  blobs[2] = blobs[2].first(blobs[2].size() - 1);
+  std::vector<std::byte> out(f.image.size());
+  const auto res = gloam::pack::assemble(f.records, blobs, out);
+  CHECK(res.error == PackError::BlobLengthWrongForFrames);
+  CHECK(res.plate_index == 2);
+}
+
+TEST_CASE("an audio record round trips, every field pinned to its own bytes", "[pack][audio]") {
+  // The inverse-map check for the second reading. Every byte is distinct (and
+  // nonzero wherever the format allows a value at all — S16Le is 0, and +7 is
+  // reserved), so a serializer that swapped two fields would move a literal
+  // this test is watching.
+  gloam::pack::Record in{};
+  in.plate_id = 0x0102;  // the sound id under the audio reading
+  in.role = gloam::pack::Role::Audio;
+  in.sample_rate = 0x0304;
+  in.channels = 0x05;
+  in.sample_format = gloam::pack::SampleFormat::S16Le;
+  in.frame_count = 0x1718191A;
+  in.offset = 0x1D1E1F20;
+  in.length = 0x21222324;
+  for (std::size_t i = 0; i < in.sha256.size(); ++i) {
+    in.sha256[i] = static_cast<std::uint8_t>(0x80 + i);
+  }
+
+  std::array<std::byte, gloam::pack::kRecordBytes> buf{};
+  REQUIRE(gloam::pack::write_record(buf, in));
+
+  CHECK(buf[0] == std::byte{0x02});  // the sound id, little-endian
+  CHECK(buf[1] == std::byte{0x01});
+  CHECK(buf[2] == std::byte{0x08});  // Role::Audio
+  CHECK(buf[3] == std::byte{0x04});  // sample_rate, little-endian
+  CHECK(buf[4] == std::byte{0x03});
+  CHECK(buf[5] == std::byte{0x05});  // channels
+  CHECK(buf[6] == std::byte{0x00});  // S16Le
+  CHECK(buf[7] == std::byte{0x00});  // reserved
+  CHECK(buf[8] == std::byte{0x1A});  // frame_count, little-endian
+  CHECK(buf[9] == std::byte{0x19});
+  CHECK(buf[10] == std::byte{0x18});
+  CHECK(buf[11] == std::byte{0x17});
+  CHECK(buf[12] == std::byte{0x20});  // offset, little-endian
+  CHECK(buf[13] == std::byte{0x1F});
+  CHECK(buf[14] == std::byte{0x1E});
+  CHECK(buf[15] == std::byte{0x1D});
+  CHECK(buf[16] == std::byte{0x24});  // length, little-endian
+  CHECK(buf[17] == std::byte{0x23});
+  CHECK(buf[18] == std::byte{0x22});
+  CHECK(buf[19] == std::byte{0x21});
+  for (std::size_t i = 0; i < 32; ++i) {
+    INFO("digest byte " << i);
+    CHECK(buf[20 + i] == static_cast<std::byte>(0x80 + i));
+  }
+
+  gloam::pack::Record out{};
+  REQUIRE(gloam::pack::read_record(buf, out));
+  CHECK(out == in);
+}
+
+TEST_CASE("a pack of plates and sounds assembles, verifies and reads back", "[pack][audio]") {
+  auto f = make_mixed_pack();
+  REQUIRE(gloam::pack::verify(f.image));
+
+  gloam::pack::Header h{};
+  REQUIRE(gloam::pack::read_header(f.image, h));
+  CHECK(h.version == gloam::pack::kVersion);
+  CHECK(h.plate_count == 2);
+  CHECK(h.audio_count == 2);
+  CHECK(h.total_bytes == f.image.size());
+
+  // The layout, predicted by hand: 48 + 4 × 52 = 256 of manifest, then blobs
+  // in record order — 6 + 2 pad + 6 + 2 pad + 1200 + 882 = 2354.
+  CHECK(f.image.size() == 2354);
+  CHECK(f.image.size() == gloam::pack::image_bytes(f.records));
+
+  const std::array<std::uint32_t, 4> want_offsets{{256, 264, 272, 1472}};
+  for (std::uint32_t i = 0; i < 4; ++i) {
+    gloam::pack::Record r{};
+    REQUIRE(gloam::pack::read_record(
+        std::span<const std::byte>{f.image}.subspan(record_at(static_cast<std::uint16_t>(i)),
+                                                    gloam::pack::kRecordBytes),
+        r));
+    INFO("record " << i);
+    CHECK(r == f.records[i]);
+    CHECK(r.offset == want_offsets[i]);
+  }
+
+  const auto a_bytes = static_cast<std::size_t>(
+      gloam::pack::audio_blob_bytes(kFramesA, kChannelsA, gloam::pack::SampleFormat::S16Le));
+  const auto stored_a = std::span<const std::byte>{f.image}.subspan(272, a_bytes);
+  CHECK(std::equal(stored_a.begin(), stored_a.end(), f.audio_bytes.begin()));
+  const auto stored_b = std::span<const std::byte>{f.image}.subspan(1472, 882);
+  CHECK(std::equal(stored_b.begin(), stored_b.end(), f.audio_bytes.begin() + a_bytes));
+}
+
+TEST_CASE("a pack with no audio still reads — every pack baked before this format",
+          "[pack][audio]") {
+  // The backward-read half of claiming reserved1: audio_count comes back zero,
+  // the bytes ARE zero, and nothing else about the pack's shape moved. (The
+  // golden digest above pins the same fact against the REAL pack.)
+  auto f = make_pack();
+  CHECK(f.image[42] == std::byte{0});
+  CHECK(f.image[43] == std::byte{0});
+
+  gloam::pack::Header h{};
+  REQUIRE(gloam::pack::read_header(f.image, h));
+  CHECK(h.audio_count == 0);
+  CHECK(h.plate_count == 2);
+  CHECK(gloam::pack::verify(f.image));
+
+  // The other direction fails CLOSED and is not testable here: an old reader —
+  // any binary still checking reserved1 — refuses a pack with sounds as
+  // ReservedNotZero rather than half-loading it. That break is deliberate, and
+  // is the reason audio_count was given a claim instead of a version bump.
 }
 
 // ── Layout: the on-disk contract ────────────────────────────────────────────
@@ -735,8 +1206,7 @@ TEST_CASE("every padding byte is written zero", "[pack]") {
   auto f = make_pack();
   CHECK(f.image[6] == std::byte{0});
   CHECK(f.image[7] == std::byte{0});
-  CHECK(f.image[42] == std::byte{0});
-  CHECK(f.image[43] == std::byte{0});
+  // +42-43 are audio_count, not padding — the audio section pins them.
   CHECK(f.image[record_at(0) + 7] == std::byte{0});
   CHECK(f.image[record_at(1) + 7] == std::byte{0});
 }
@@ -748,6 +1218,7 @@ TEST_CASE("the layout constants are what the records and header occupy", "[pack]
   CHECK(gloam::pack::kDigestCoverageStart == 40);
   CHECK(gloam::pack::first_blob_offset(1) == 100);
   CHECK(gloam::pack::first_blob_offset(2) == 152);
+  CHECK(gloam::pack::first_blob_offset(4) == 256);  // the mixed fixture's manifest end
   CHECK(gloam::pack::first_blob_offset(6) == 360);
 
   CHECK(gloam::pack::align_up(0) == 0);
@@ -781,11 +1252,22 @@ TEST_CASE("the light-field pack is byte-identical across two independent bakes",
   // only `cmake/check_pack_repro.cmake` would be left — and that compares a run
   // against a run, never against the golden.
   const auto build = []() {
+    // Plates AND the audio arena — the golden is over the pack gloam_bake
+    // ships, and since gloam#23 that pack has a second record kind. The PCM
+    // is the real synthesised arena at the one shared seed.
     std::vector<std::byte> pixels(assets::pixel_bytes());
-    std::vector<pack::Record> records(assets::kPlateCount);
-    std::vector<std::span<const std::byte>> blobs(assets::kPlateCount);
+    std::vector<std::int16_t> pcm(assets::kAudioArenaFrames);
+    std::array<sfx::Clip, audio::kSoundIdCount> clips{};
+    REQUIRE(sfx::synthesise_i16(sfx::kArenaSeed, pcm, clips));
+    std::array<assets::AudioSource, assets::kAudioCount> audio{};
+    REQUIRE(sfx::pack_sources(pcm, clips, audio));
+    std::vector<std::byte> audio_bytes(assets::kAudioBlobBytes);
+    std::vector<pack::Record> records(static_cast<std::size_t>(assets::kPlateCount) +
+                                      assets::kAudioCount);
+    std::vector<std::span<const std::byte>> blobs(static_cast<std::size_t>(assets::kPlateCount) +
+                                                  assets::kAudioCount);
     std::vector<std::byte> image(assets::image_bytes());
-    REQUIRE(assets::build_pack(pixels, records, blobs, image));
+    REQUIRE(assets::build_pack(pixels, records, blobs, audio, audio_bytes, image));
     return image;
   };
 
@@ -795,10 +1277,11 @@ TEST_CASE("the light-field pack is byte-identical across two independent bakes",
   CHECK(hash::sha256(first) == hash::sha256(second));
   CHECK(gloam::pack::verify(first));
 
-  // The size the format arithmetic predicts: 48 + 65 * 52 + the inventory's
-  // blob bytes. gloam#8 grew this from six light fields to the whole M0 plate
-  // inventory; the number is pinned against `assets`' own arithmetic rather
-  // than a hand-copied constant, and the digest below is the golden.
+  // The size the format arithmetic predicts: 48 + 68 * 52 + the inventory's
+  // blob bytes + the arena's s16le. gloam#8 grew this from six light fields to
+  // the whole M0 plate inventory, and gloam#23 added the three audio records;
+  // the number is pinned against `assets`' own arithmetic rather than a
+  // hand-copied constant, and the digest below is the golden.
   CHECK(first.size() == assets::image_bytes());
 
   // THE GOLDEN DIGEST. Two runs agreeing with each other only proves this
@@ -809,7 +1292,10 @@ TEST_CASE("the light-field pack is byte-identical across two independent bakes",
   // If this changes, something changed the ART. That is allowed — the falloff
   // band width in lightfield.hpp is explicitly a look decision — but it has to
   // be a deliberate line in a diff rather than a number that drifted.
-  CHECK(hex_of(first) == "d9560201da4fa92c5e575a790c232e64f6b4003248fa0a4904feea3651f83051");
+  // gloam#23 moved this once, deliberately: the pack gained the audio arena
+  // (UPSTREAM.md item 10 resolved). Any other move is the same rule as ever —
+  // a deliberate line in a diff, or a bug.
+  CHECK(hex_of(first) == "9b138a78b9b6a10003e069ad1e8e962a320b7b64038ff103d1eb90a2cb1d7519");
 
   // §11's residency cap. pack.hpp deliberately does not know about budgets —
   // emit.hpp's rule, "the sink reports, the budget judges" — so the comparison
@@ -817,6 +1303,7 @@ TEST_CASE("the light-field pack is byte-identical across two independent bakes",
   gloam::pack::Header h{};
   REQUIRE(gloam::pack::read_header(first, h));
   CHECK(h.plate_count == static_cast<std::uint16_t>(assets::kPlateCount));
+  CHECK(h.audio_count == static_cast<std::uint16_t>(assets::kAudioCount));
   CHECK(h.plate_count <= budget::kMaxResidentImages);
   // Every record round-trips to exactly its inventory entry — the manifest is
   // the single source the baker, the compositor and this test all read.
@@ -834,6 +1321,26 @@ TEST_CASE("the light-field pack is byte-identical across two independent bakes",
     CHECK(record.variant == specs[index].variant);
     CHECK(record.w == static_cast<std::uint16_t>(specs[index].width));
     CHECK(record.h == static_cast<std::uint16_t>(specs[index].height));
+  }
+
+  // The audio run round-trips the same way, against the audio inventory: ids
+  // are the SoundIds, the descriptive middle reads as rate / channels /
+  // format / frames, and the blob lengths agree with the frame counts.
+  for (std::uint16_t i = 0; i < h.audio_count; ++i) {
+    const auto& spec = assets::kAudioInventory[i];
+    pack::Record record{};
+    REQUIRE(pack::read_record(
+        std::span<const std::byte>{first}.subspan(
+            pack::kHeaderBytes + pack::kRecordBytes * (h.plate_count + i),
+            pack::kRecordBytes),
+        record));
+    CHECK(record.plate_id == spec.sound_id);
+    CHECK(record.role == pack::Role::Audio);
+    CHECK(record.sample_rate == static_cast<std::uint16_t>(audio::kSampleRateHz));
+    CHECK(record.channels == 1);
+    CHECK(record.sample_format == pack::SampleFormat::S16Le);
+    CHECK(record.frame_count == spec.frame_count);
+    CHECK(record.length == spec.frame_count * 2);
   }
 
   // A NECESSARY CONDITION, NOT §11's BUDGET. `kMaxColdStartPayloadBytes` is the

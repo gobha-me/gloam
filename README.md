@@ -65,7 +65,11 @@ ptys, including actual SIGTSTP/SIGCONT and exception teardown.
 The playable frame loop has landed as `gloam_m0`; the `gloam` binary remains
 the headless diagnostic. The pack carries the full M0 slot inventory — 65
 plates painted by a deterministic integer rule at §3.1's exact slot extents,
-declared placeholder art until the authored kind exists. Against it, G-7
+declared placeholder art until the authored kind exists — and, since gloam#23,
+the resident audio arena: three sounds as s16le PCM records, covered by
+`pack_sha256`, gated at launch (a pack without its sounds refuses; a missing
+audio *device* still degrades to silence), and expanded back to float
+bit-exactly at load. Against it, G-7
 builds and diffs real placement lists, maps pixels to native terminal cells,
 retains unchanged pins at zero wire, and queues inputs behind one 140 ms
 terminal-driven transition — whose frames are the one art the placeholder set
@@ -85,8 +89,9 @@ landed its first slice, and it is the one thing on the critical path that never
 needed termforge. `gloam_bake` writes a versioned, hashed `pack.gloam`: §12's
 manifest, §4.3's fixed ordered dither, §3.1's exact 2:1 downsample, the six
 full-frame light fields §4.4 asks for — the one asset class §10 marks
-*procedural* — and the rest of the M0 slot inventory painted by deterministic
-rule, so the corridor can be seen before any art exists. Two runs produce a
+*procedural* — the rest of the M0 slot inventory painted by deterministic
+rule, so the corridor can be seen before any art exists, and the audio arena
+as a second record kind (one s16le PCM record per `SoundId`). Two runs produce a
 byte-identical pack, verified under GCC 13, GCC 14 and Clang 20; the
 `pack-reproducible` ctest case runs the binary twice and compares the files,
 because §10 makes that hash a build gate rather than a nicety.
@@ -202,7 +207,7 @@ GLOAM's own DEFLATE. Measured on the real stream, not projected from constants:
 
 | | Bytes | Against |
 | --- | --- | --- |
-| The M0 inventory — 65 plates — in the pack | 748,542 | — |
+| The M0 inventory — 65 plates, 3 sounds — in the pack | 825,500 | — |
 | The whole APC stream, control data included | **43,097** | 1,200,000 |
 | The `f=32` route #17 escaped | 5,529,600, for the six light fields alone | 461% of budget |
 

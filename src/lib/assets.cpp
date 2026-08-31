@@ -1,10 +1,29 @@
 #include "gloam/assets.hpp"
 
 #include <algorithm>
+#include <bit>
 
+#include "bytes.hpp"
 #include "gloam/dither.hpp"
 
 namespace gloam::assets {
+
+// The audio inventory is the SoundId table minus `None`, in id order: the
+// pack's audio run and the mixer's clip table must describe the same sounds,
+// or the launch gate and the mixer disagree about what a pack holds. The
+// pack order is ID order; the synthesis arena's in-memory order (party,
+// monster, sting) is a generation-order accident `sfx::pack_sources`
+// reconciles.
+static_assert(kAudioInventory.size() + 1 == audio::kSoundIdCount,
+              "every real SoundId carries a pack record");
+static_assert(kAudioInventory[0].sound_id ==
+                  static_cast<std::uint16_t>(audio::SoundId::PartyFootfall) &&
+              kAudioInventory[1].sound_id ==
+                  static_cast<std::uint16_t>(audio::SoundId::HuntingSting) &&
+              kAudioInventory[2].sound_id ==
+                  static_cast<std::uint16_t>(audio::SoundId::MonsterFootfall),
+              "the audio inventory is id-ordered and covers every sound");
+
 namespace {
 
 // ─── The placeholder painters (see assets.hpp's header for what they are) ───
@@ -228,6 +247,22 @@ void paint(const plate::PlateSpan& p, const PlateSpec& spec) {
   return r;
 }
 
+/// The audio reading of the same 52-byte envelope (pack.hpp's `Record` doc
+/// has the byte map): the id field carries the sound id, and the descriptive
+/// middle is rate, channels, format and frame count. Mono — the mixer pans
+/// at play time, so a stereo clip would be re-panned per voice at twice the
+/// resident cost (sfx.hpp's layout decision, UPSTREAM.md item 20).
+[[nodiscard]] auto record_for_audio(const AudioSpec& spec) -> pack::Record {
+  pack::Record r{};
+  r.plate_id = spec.sound_id;
+  r.role = pack::Role::Audio;
+  r.sample_rate = static_cast<std::uint16_t>(audio::kSampleRateHz);
+  r.channels = 1;
+  r.sample_format = pack::SampleFormat::S16Le;
+  r.frame_count = spec.frame_count;
+  return r;
+}
+
 }  // namespace
 
 auto bake_all(std::span<std::byte> pixels, std::span<pack::Record> records,
@@ -269,8 +304,16 @@ auto bake_all(std::span<std::byte> pixels, std::span<pack::Record> records,
 }
 
 auto build_pack(std::span<std::byte> pixels, std::span<pack::Record> records,
-                std::span<std::span<const std::byte>> blobs, std::span<std::byte> image)
-    -> pack::PackResult {
+                std::span<std::span<const std::byte>> blobs,
+                std::span<const AudioSource> audio, std::span<std::byte> audio_bytes,
+                std::span<std::byte> image) -> pack::PackResult {
+  constexpr auto kTotalRecords = static_cast<std::size_t>(kPlateCount) + kAudioCount;
+  if (audio.size() != kAudioCount) return {pack::PackError::BlobCountMismatch, 0, 0};
+  if (records.size() < kTotalRecords || blobs.size() < kTotalRecords ||
+      audio_bytes.size() < kAudioBlobBytes) {
+    return {pack::PackError::BufferTooSmall, 0, 0};
+  }
+
   if (const auto baked = bake_all(pixels, records, blobs); !baked) {
     // A bake failure is a buffer failure by the time it reaches here — the lamp
     // levels are ours, not the caller's — so it maps to the pack's own name for
@@ -278,15 +321,42 @@ auto build_pack(std::span<std::byte> pixels, std::span<pack::Record> records,
     return {pack::PackError::BufferTooSmall, 0, 0};
   }
 
-  const auto plates = records.first(static_cast<std::size_t>(kPlateCount));
-  const auto sources = blobs.first(static_cast<std::size_t>(kPlateCount));
+  // The audio run, after the whole plate run: the two-run ordering is
+  // assemble()'s and verify()'s rule, so the baker holds it by construction.
+  // Serialisation is a byte at a time, little-endian — pack.hpp's law reaches
+  // blob payloads: the pack's bytes are defined independent of the host, and
+  // a reinterpret_cast of the int16 arena would make them the host's.
+  std::size_t at = 0;
+  for (std::size_t i = 0; i < kAudioInventory.size(); ++i) {
+    const auto& spec = kAudioInventory[i];
+    const auto& source = audio[i];
+    if (source.sound_id != spec.sound_id || source.samples.size() != spec.frame_count) {
+      // The caller handed over a clip that is not the inventory entry it sits
+      // under — the same disagreement verify() names between a record and its
+      // blob, caught one step earlier.
+      return {pack::PackError::BlobLengthWrongForFrames, 0,
+              static_cast<std::uint16_t>(kPlateCount + i)};
+    }
+    const auto blob_bytes = static_cast<std::size_t>(spec.frame_count) * 2;
+    const auto blob = audio_bytes.subspan(at, blob_bytes);
+    for (std::uint32_t frame = 0; frame < spec.frame_count; ++frame) {
+      le::put_u16(blob, static_cast<std::size_t>(frame) * 2,
+                  std::bit_cast<std::uint16_t>(source.samples[frame]));
+    }
+    records[static_cast<std::size_t>(kPlateCount) + i] = record_for_audio(spec);
+    blobs[static_cast<std::size_t>(kPlateCount) + i] = blob;
+    at += blob_bytes;
+  }
 
-  if (const auto assembled = pack::assemble(plates, sources, image); !assembled) {
+  const auto in_use = records.first(kTotalRecords);
+  const auto in_use_blobs = blobs.first(kTotalRecords);
+
+  if (const auto assembled = pack::assemble(in_use, in_use_blobs, image); !assembled) {
     return assembled;
   }
 
   // §10: the pack has to survive its own gate before anyone sees it.
-  const auto total = pack::image_bytes(plates);
+  const auto total = pack::image_bytes(in_use);
   const auto res = pack::verify(std::span<const std::byte>{image}.first(total));
   if (!res) return res;
   return {pack::PackError::None, total, 0};
@@ -294,9 +364,12 @@ auto build_pack(std::span<std::byte> pixels, std::span<pack::Record> records,
 
 auto image_bytes() -> std::size_t {
   const auto specs = inventory();
-  std::array<pack::Record, 65> records{};
+  std::array<pack::Record, static_cast<std::size_t>(kPlateCount) + kAudioCount> records{};
   for (std::size_t slot = 0; slot < specs.size(); ++slot) {
     records[slot] = record_for(slot, specs[slot]);
+  }
+  for (std::size_t i = 0; i < kAudioInventory.size(); ++i) {
+    records[specs.size() + i] = record_for_audio(kAudioInventory[i]);
   }
   return pack::image_bytes(records);
 }

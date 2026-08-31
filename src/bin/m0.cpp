@@ -50,6 +50,7 @@
 #include "gloam/pack.hpp"
 #include "gloam/replay.hpp"
 #include "gloam/sha256.hpp"
+#include "pack_audio.hpp"
 #include "resident_plates.hpp"
 #include "scene.hpp"
 #include "sfx.hpp"
@@ -373,19 +374,42 @@ auto main(int argc, char** argv) -> int {
     pack_hash = replay::pack_hash_from(pack_header.pack_sha256);
   }
 
+  // §9.2's OTHER launch gate, and it runs ALWAYS — muted or not. The
+  // degradation clause covers a missing audio DEVICE, never missing audio
+  // CONTENT: a pack without its sounds refuses to launch, and --mute mutes
+  // output, not integrity. The check is records-only — no float arena, no
+  // device — so it costs the muted path nothing.
+  if (const auto gate = pack_audio::check(*pack_image); !gate) {
+    const auto error_name = pack_audio::name(gate.error);
+    std::fprintf(stderr,
+                 "gloam_m0: %s failed the audio gate — %.*s (sound %u). A pack without\n"
+                 "its sounds refuses to launch: SPEC 9.2's degradation covers a missing\n"
+                 "audio DEVICE, never missing audio CONTENT, and --mute mutes output, not\n"
+                 "integrity.\n",
+                 pack_path->c_str(), static_cast<int>(error_name.size()), error_name.data(),
+                 static_cast<unsigned>(gate.sound_id));
+    return 1;
+  }
+
   // §9.2: a missing or refused device is a degradation, not a crash. The
-  // arena is synthesised from a FIXED seed — the same bytes on every run of
-  // every build, so audio content can never be a determinism variable
-  // (Stream::Ambience is excluded from world_hash; world.hpp says why).
-  std::vector<float> arena(sfx::kArenaFrames);
+  // arena is LOADED FROM THE PACK (gloam#23) rather than synthesised — the
+  // bake's s16le PCM expanded to float exactly, so the samples are covered by
+  // pack_sha256 and a retuned sting is a re-bake, not a rebuild. The gate
+  // above has already vouched for the coverage; this fills the caller-owned
+  // arena and clip table, and is the only thing here that needs the floats.
+  std::vector<float> arena;
   std::array<sfx::Clip, audio::kSoundIdCount> clips{};
   std::optional<device::DeviceSink> sink;
   audio::Sink* voices = nullptr;
   bool device_running = false;
   if (!cli.muted) {
-    constexpr std::uint64_t kArenaSeed = 0x9105A3ULL;  // main.cpp's, deliberately
-    if (!sfx::synthesise(kArenaSeed, arena, clips)) {
-      std::fprintf(stderr, "gloam_m0: could not synthesise the audio arena\n");
+    arena.resize(sfx::kArenaFrames);
+    if (const auto loaded = pack_audio::load(*pack_image, arena, clips); !loaded) {
+      const auto error_name = pack_audio::name(loaded.error);
+      std::fprintf(stderr,
+                   "gloam_m0: %s passed the audio gate but would not load — %.*s (sound %u)\n",
+                   pack_path->c_str(), static_cast<int>(error_name.size()), error_name.data(),
+                   static_cast<unsigned>(loaded.sound_id));
       return 1;
     }
     sink.emplace(std::span<const float>{arena},

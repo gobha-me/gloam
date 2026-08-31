@@ -96,6 +96,21 @@ TEST_CASE("an oversized span is accepted and the tail is left alone", "[sfx]") {
   for (std::size_t i = sfx::kArenaFrames; i < arena.size(); ++i) CHECK(arena[i] == 3.0F);
 }
 
+TEST_CASE("the integer entry point refuses a short arena the same way", "[sfx]") {
+  // Same rule, same reason as the float refusal above: a short arena is a
+  // caller that disagrees with this header about a compile-time constant, and
+  // a bake that ran on a truncated arena would store a truncated sting.
+  std::vector<std::int16_t> arena(sfx::kArenaFrames - 1, std::int16_t{7});
+  Clips clips{};
+
+  REQUIRE_FALSE(
+      sfx::synthesise_i16(kSeed, arena, std::span<sfx::Clip, audio::kSoundIdCount>{clips}));
+
+  // Nothing written, exactly as the float refusal promises.
+  for (const std::int16_t sample : arena) CHECK(sample == 7);
+  for (const auto& clip : clips) CHECK(clip.frames == 0);
+}
+
 TEST_CASE("every clip lands inside the arena and no two overlap", "[sfx]") {
   std::vector<float> arena;
   Clips clips{};
@@ -227,6 +242,51 @@ TEST_CASE("a different seed produces a different arena", "[sfx]") {
   CHECK(std::memcmp(first.data(), second.data(), first.size() * sizeof(float)) != 0);
   // The LAYOUT is seed-independent, though; only the samples move.
   CHECK(std::memcmp(a.data(), b.data(), sizeof(a)) == 0);
+}
+
+TEST_CASE("the integer stage is the float arena before the scale, bit-exactly", "[sfx]") {
+  // THE CASE gloam#23's BAKE STANDS ON. The pack stores s16le; the runtime
+  // expands each sample by exactly 1.0f / 32768.0f. That expansion must
+  // reproduce the arena `synthesise` writes — BYTES, not approximately — or
+  // the bake and the startup synthesis are two different sounds waiting to
+  // diverge the first time someone retunes a filter on one path only.
+  std::vector<float> arena;
+  Clips clips{};
+  REQUIRE(fill(kSeed, arena, clips));
+
+  std::vector<std::int16_t> ints(sfx::kArenaFrames, std::int16_t{0});
+  Clips ints_clips{};
+  REQUIRE(sfx::synthesise_i16(kSeed, ints, std::span<sfx::Clip, audio::kSoundIdCount>{ints_clips}));
+
+  // Same seed, same clip table — a bake that stored one layout while the
+  // runtime indexed another would play the sting's bytes as a footfall.
+  CHECK(std::memcmp(clips.data(), ints_clips.data(), sizeof(clips)) == 0);
+
+  // Expand and compare bytes. The memcmp is honest because 32768 is a power
+  // of two: every int16 is exactly representable in float and the scale is
+  // exact, so int16 -> float is INJECTIVE here and equality really is an
+  // equality claim rather than a tolerance.
+  const auto expand = [](const std::vector<std::int16_t>& in) {
+    std::vector<float> out(in.size());
+    for (std::size_t i = 0; i < in.size(); ++i) {
+      out[i] = static_cast<float>(in[i]) * (1.0F / 32'768.0F);
+    }
+    return out;
+  };
+
+  const std::vector<float> expanded = expand(ints);
+  REQUIRE(expanded.size() == arena.size());
+  CHECK(std::memcmp(expanded.data(), arena.data(), arena.size() * sizeof(float)) == 0);
+
+  // Failure direction: the case above is only evidence if a difference would
+  // be SEEN. Perturb one integer sample by one LSB — the xor always changes
+  // the value, and injectivity always changes the expanded float — and the
+  // expanded bytes must no longer match. If this CHECK ever failed, the
+  // equivalence above would be passing vacuously.
+  const std::size_t poke = sfx::kArenaFrames / 2;
+  ints[poke] = static_cast<std::int16_t>(ints[poke] ^ 0x1);
+  const std::vector<float> perturbed = expand(ints);
+  CHECK(std::memcmp(perturbed.data(), arena.data(), arena.size() * sizeof(float)) != 0);
 }
 
 TEST_CASE("the arena is drawn from Stream::Ambience and no other stream", "[sfx]") {

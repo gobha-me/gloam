@@ -35,6 +35,8 @@
 #include "gloam/plate.hpp"
 #include "gloam/sha256.hpp"
 
+#include "sfx.hpp"  // the arena's integer stage; the bake is a sink-side caller (gloam#23)
+
 namespace {
 
 constexpr auto kDefaultOutput = "pack.gloam";
@@ -114,8 +116,8 @@ auto verify_file(const std::string& path, bool quiet) -> int {
   (void)gloam::pack::read_header(image, header);
   const auto hex = gloam::hash::to_hex(gloam::hash::sha256(image));
   if (!quiet) {
-    std::cout << "ok  " << path << "  " << header.plate_count << " plates, " << image.size()
-              << " B\n";
+    std::cout << "ok  " << path << "  " << header.plate_count << " plates, "
+              << header.audio_count << " sounds, " << image.size() << " B\n";
   }
   std::cout.write(hex.data(), static_cast<std::streamsize>(hex.size()));
   std::cout << '\n';
@@ -163,12 +165,32 @@ auto main(int argc, char** argv) -> int {
   // Every buffer is owned here. `gloam::assets` says what goes in the pack and
   // how big each buffer has to be; the library allocates nothing, and this is
   // the only translation unit in the pipeline that does.
+  constexpr auto kTotalRecords =
+      static_cast<std::size_t>(gloam::assets::kPlateCount) + gloam::assets::kAudioCount;
   std::vector<std::byte> pixels(gloam::assets::pixel_bytes());
-  std::vector<gloam::pack::Record> records(gloam::assets::kPlateCount);
-  std::vector<std::span<const std::byte>> blobs(gloam::assets::kPlateCount);
+  std::vector<gloam::pack::Record> records(kTotalRecords);
+  std::vector<std::span<const std::byte>> blobs(kTotalRecords);
   std::vector<std::byte> image(gloam::assets::image_bytes());
 
-  const auto built = gloam::assets::build_pack(pixels, records, blobs, image);
+  // §9.2's resident arena, baked in (gloam#23): the synthesiser's integer
+  // stage at the one shared seed, so the pack's PCM and a startup synthesis
+  // are the same samples. Deterministic — no clock, no libm, Ambience stream
+  // only — which is what keeps `pack-reproducible` a gate and not a hope.
+  std::vector<std::int16_t> audio_arena(gloam::assets::kAudioArenaFrames);
+  std::array<gloam::sfx::Clip, gloam::audio::kSoundIdCount> clips{};
+  if (!gloam::sfx::synthesise_i16(gloam::sfx::kArenaSeed, audio_arena, clips)) {
+    std::cerr << "gloam_bake: could not synthesise the audio arena\n";
+    return EXIT_FAILURE;
+  }
+  std::array<gloam::assets::AudioSource, gloam::assets::kAudioCount> audio{};
+  if (!gloam::sfx::pack_sources(audio_arena, clips, audio)) {
+    std::cerr << "gloam_bake: the synthesiser and the audio inventory disagree\n";
+    return EXIT_FAILURE;
+  }
+  std::vector<std::byte> audio_bytes(gloam::assets::kAudioBlobBytes);
+
+  const auto built =
+      gloam::assets::build_pack(pixels, records, blobs, audio, audio_bytes, image);
   if (!built) {
     std::cerr << "gloam_bake: building the pack failed with error "
               << static_cast<int>(built.error) << " at plate " << built.plate_index << '\n';
@@ -177,17 +199,25 @@ auto main(int argc, char** argv) -> int {
 
   // §11's residency cap. `pack.hpp` deliberately does not know about budgets
   // (the parser reports, the budget judges — `emit.hpp`'s rule), so the
-  // comparison is made here and in `test/10budgets/`.
-  if (records.size() > static_cast<std::size_t>(gloam::budget::kMaxResidentImages)) {
-    std::cerr << "gloam_bake: " << records.size() << " plates exceeds §11's cap of "
+  // comparison is made here and in `test/10budgets/`. PLATE records only:
+  // the cap counts resident kitty images, and a sound is never uploaded.
+  if (static_cast<std::size_t>(gloam::assets::kPlateCount) >
+      static_cast<std::size_t>(gloam::budget::kMaxResidentImages)) {
+    std::cerr << "gloam_bake: " << gloam::assets::kPlateCount << " plates exceeds §11's cap of "
               << gloam::budget::kMaxResidentImages << '\n';
     return EXIT_FAILURE;
   }
 
   if (!quiet) {
     for (const auto& record : records) {
-      std::cout << "plate " << record.plate_id << "  " << record.w << "x" << record.h << "  "
-                << record.length << " B  at " << record.offset << '\n';
+      if (record.role == gloam::pack::Role::Audio) {
+        std::cout << "sound " << record.plate_id << "  " << record.sample_rate << " Hz, "
+                  << static_cast<int>(record.channels) << "ch, " << record.frame_count
+                  << " frames  " << record.length << " B  at " << record.offset << '\n';
+      } else {
+        std::cout << "plate " << record.plate_id << "  " << record.w << "x" << record.h << "  "
+                  << record.length << " B  at " << record.offset << '\n';
+      }
     }
   }
 
@@ -211,7 +241,8 @@ auto main(int argc, char** argv) -> int {
 
   if (!quiet) {
     std::cout << "\n"
-              << records.size() << " plates, " << image.size() << " B -> " << output << '\n'
+              << gloam::assets::kPlateCount << " plates, " << gloam::assets::kAudioCount
+              << " sounds, " << image.size() << " B -> " << output << '\n'
               << "pack sha256  ";
   }
   std::cout.write(hex.data(), static_cast<std::streamsize>(hex.size()));

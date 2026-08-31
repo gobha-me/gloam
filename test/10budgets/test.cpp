@@ -290,15 +290,25 @@ TEST_CASE("§11's residency cap, measured against a real manifest", "[budget]") 
   // would keep passing a row about a pack nobody ships. This is
   // `gloam_bake`'s own pipeline, the same path test/12pack's golden covers.
   std::vector<std::byte> pixels(assets::pixel_bytes());
-  std::vector<pack::Record> records(static_cast<std::size_t>(assets::kPlateCount));
-  std::vector<std::span<const std::byte>> blobs(static_cast<std::size_t>(assets::kPlateCount));
+  std::vector<std::int16_t> pcm(assets::kAudioArenaFrames);
+  std::array<sfx::Clip, audio::kSoundIdCount> clips{};
+  REQUIRE(sfx::synthesise_i16(sfx::kArenaSeed, pcm, clips));
+  std::array<assets::AudioSource, assets::kAudioCount> audio{};
+  REQUIRE(sfx::pack_sources(pcm, clips, audio));
+  std::vector<std::byte> audio_bytes(assets::kAudioBlobBytes);
+  const auto record_count = static_cast<std::size_t>(assets::kPlateCount) + assets::kAudioCount;
+  std::vector<pack::Record> records(record_count);
+  std::vector<std::span<const std::byte>> blobs(record_count);
   std::vector<std::byte> image(assets::image_bytes());
-  REQUIRE(assets::build_pack(pixels, records, blobs, image));
+  REQUIRE(assets::build_pack(pixels, records, blobs, audio, audio_bytes, image));
 
   pack::Header header{};
   REQUIRE(pack::read_header(image, header));
   CHECK(header.plate_count <= budget::kMaxResidentImages);
   CHECK(header.plate_count == static_cast<std::uint16_t>(assets::kPlateCount));
+  // gloam#23: the pack carries the audio arena too, and the cap above counts
+  // PLATES only — a sound is never a resident kitty image.
+  CHECK(header.audio_count == static_cast<std::uint16_t>(assets::kAudioCount));
   // §4.2's M0 plan budgets 71 including six UI frames the corridor slice does
   // not render; shipping 65 leaves that headroom intact rather than spent.
   CHECK(header.plate_count == budget::resident_images_m0() - budget::kUiFramesAndGlyphs.m0);

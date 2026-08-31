@@ -359,6 +359,42 @@ Two more, which are design questions rather than factual errors:
     the pack was built against", which stays unanswerable while there is no
     record to put it in. gloam#23 remains open.
 
+    **Resolved on the pack side (the design-owner's sentence is still the
+    issue's to close).** The three questions the issue asked were ruled in
+    its own thread and landed together:
+
+    - **(3) first: the audio content gates launch.** §9.2's degradation
+      clause covers a missing audio DEVICE, never missing audio CONTENT —
+      a pack without its sounds refuses to launch, and `--mute` mutes
+      output, not integrity. `src/bin/pack_audio.cpp`'s `check` is the
+      gate: records-only, no float arena, so m0 runs it always, before
+      terminal entry.
+    - **(1) a role in the existing manifest**, `Role::Audio = 8` appended —
+      not a fifth format. "Shares §10's manifest hash" was always the
+      stronger requirement, and a second file reintroduces exactly the
+      manifest-fresher-than-payload problem item 6 rejected two files for.
+    - **(2) a second READING of the same 52-byte record**, discriminated by
+      the role byte: the id field carries the SoundId, bytes +3-4 the
+      sample rate, +5 the channel count, +6 a sample format (the codec
+      slot's audio-side occupant), +8-11 a u32 frame count, and the
+      header's reserved1 is claimed as `audio_count` — an old reader
+      handed a pack with sounds refuses it as ReservedNotZero, which is
+      the fail-closed direction, and no byte moved so `kVersion` stays 1.
+      The payload is s16le mono at 48 kHz: the synthesiser builds int16
+      and scales by exactly 1/32768, so the baked bytes expand back to the
+      float arena bit-identically, and `pack_sha256` now covers every
+      sample — the loss named above is closed, not worked around.
+
+    The bake synthesises the arena's integer stage at the one shared seed
+    and appends the three records after the plate run; the runtime loads
+    rather than synthesises (`gloam_m0`) or assembles the pack in memory
+    and loads out of it (the `gloam` diagnostic). The pack grew 748,542 →
+    825,500 B and the golden digest moved once, deliberately —
+    test/12pack/'s pin says so. §11's residency cap counts plates only: a
+    sound is never a resident kitty image. test/37packaudio/ owns the
+    gate/load failure matrix, including the cases verify accepts and the
+    gate refuses — the layering made concrete.
+
 11. **§11 judges a frame against a per-frame budget and never says how a frame's
     CLASS is determined.** Mirrored as
     [#24](https://github.com/gobha-me/gloam/issues/24). `BUDGETS.md`'s per-frame

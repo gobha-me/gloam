@@ -66,6 +66,7 @@
 #include <cstdint>
 #include <span>
 
+#include "gloam/assets.hpp"
 #include "gloam/audio.hpp"
 
 namespace gloam::sfx {
@@ -73,9 +74,20 @@ namespace gloam::sfx {
 /// §9.2's stream format. The device may be granted something else — see
 /// `audio_device.hpp` — but the arena is synthesised at this rate and these are
 /// the numbers §11's latency arithmetic is written against.
-inline constexpr int kSampleRateHz = 48'000;
+/// The rate's canonical spelling moved to `audio.hpp` when the bake made it
+/// pack content (gloam#23); the alias keeps the sink-side call sites reading
+/// as they did, and there is still exactly one definition of the number.
+inline constexpr int kSampleRateHz = audio::kSampleRateHz;
 inline constexpr int kBufferFrames = 256;
 inline constexpr int kChannels = 2;
+
+/// The one seed the arena is ever synthesised from — the same bytes on every
+/// run of every build, so audio content can never be a determinism variable
+/// (Stream::Ambience is excluded from world_hash; world.hpp says why). The
+/// bake synthesises from it too (gloam#23), so the pack's PCM and a startup
+/// synthesis are the same samples; main.cpp and m0.cpp's local copies of the
+/// numeral fold into this one when the runtime-load unit rewires them.
+inline constexpr std::uint64_t kArenaSeed = 0x9105A3ULL;
 
 /// One sound's extent in the arena.
 ///
@@ -94,9 +106,13 @@ struct Clip {
 /// distinguishes them: a listener hears the difference in the tail, and the
 /// spectral-tilt case in `test/27sfxarena/` is what keeps that true if someone
 /// retunes the filters.
-inline constexpr std::uint32_t kPartyFootfallFrames = 4'320;    ///< 90 ms
-inline constexpr std::uint32_t kMonsterFootfallFrames = 5'280;  ///< 110 ms
-inline constexpr std::uint32_t kHuntingStingFrames = 28'800;    ///< 600 ms
+/// The canonical spellings moved to `audio.hpp`, beside the SoundIds they
+/// belong to, when the bake's audio inventory needed to read them (gloam#23);
+/// these aliases keep the sink-side call sites and the tilt test reading as
+/// they did, and there is still exactly one definition of each number.
+inline constexpr std::uint32_t kPartyFootfallFrames = audio::kPartyFootfallFrames;
+inline constexpr std::uint32_t kMonsterFootfallFrames = audio::kMonsterFootfallFrames;
+inline constexpr std::uint32_t kHuntingStingFrames = audio::kHuntingStingFrames;
 
 inline constexpr std::size_t kArenaFrames =
     std::size_t{kPartyFootfallFrames} + kMonsterFootfallFrames + kHuntingStingFrames;
@@ -125,5 +141,50 @@ inline constexpr std::uint32_t kNoiseDraws =
 /// sting to be helpful would turn that into a sound bug nobody traces back here.
 [[nodiscard]] auto synthesise(std::uint64_t seed, std::span<float> arena,
                               std::span<Clip, audio::kSoundIdCount> clips) -> bool;
+
+/// The same generator, one stage earlier: the 16-bit integer samples BEFORE
+/// the `1.0f / 32768.0f` scale, through the same seed, the same draws and the
+/// same clip table.
+///
+/// This is the stage gloam#23's bake stores. The pack record is s16le PCM —
+/// half the bytes of the float arena, and a reader does not have to reproduce
+/// the synthesis to load it. Expansion back to float is one multiply by
+/// `1.0f / 32768.0f`, and it is EXACT, not approximate: every `std::int16_t`
+/// is representable in `float` and 32768 is a power of two, so the baked and
+/// re-expanded arena is bit-identical to the one `synthesise` produces, on
+/// every IEEE-754 target. `test/27sfxarena/` proves that by memcmp.
+///
+/// Same refusal rule: false, having written nothing, when `arena` is shorter
+/// than `kArenaFrames`.
+[[nodiscard]] auto synthesise_i16(std::uint64_t seed, std::span<std::int16_t> arena,
+                                  std::span<Clip, audio::kSoundIdCount> clips) -> bool;
+
+/// The freshly synthesised arena, sliced per sound and in ID order — exactly
+/// the shape `assets::build_pack` takes for its `audio` parameter (gloam#23).
+/// The arena's in-memory layout is generation order (party, monster, sting);
+/// the pack's audio run is id order; this is the one place the two are
+/// reconciled.
+///
+/// Every clip is checked against the inventory BEFORE anything is written, so
+/// a refusal means the synthesiser and the pack's spec drifted apart, caught
+/// at build time with nothing half-handed-over.
+[[nodiscard]] inline auto pack_sources(std::span<const std::int16_t> arena,
+                                       std::span<const Clip, audio::kSoundIdCount> clips,
+                                       std::span<assets::AudioSource> out) -> bool {
+  if (out.size() < assets::kAudioCount) return false;
+  for (const auto& spec : assets::kAudioInventory) {
+    const auto& clip = clips[spec.sound_id];
+    if (clip.frames != spec.frame_count ||
+        static_cast<std::size_t>(clip.offset) + clip.frames > arena.size()) {
+      return false;
+    }
+  }
+  for (std::size_t i = 0; i < assets::kAudioInventory.size(); ++i) {
+    const auto& spec = assets::kAudioInventory[i];
+    const auto& clip = clips[spec.sound_id];
+    out[i] = assets::AudioSource{spec.sound_id, arena.subspan(clip.offset, clip.frames)};
+  }
+  return true;
+}
 
 }  // namespace gloam::sfx
