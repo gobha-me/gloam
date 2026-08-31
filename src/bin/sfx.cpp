@@ -104,23 +104,45 @@ inline constexpr std::uint32_t kAttackFrames = 48;  // 1 ms
                                            16U);
 }
 
-[[nodiscard]] constexpr auto to_float(std::int32_t sample) noexcept -> float {
-  // The exactness rule from sfx.hpp, in one line. Clamp first: a filter can
-  // overshoot its input range, and a sample outside [-1, 1] would be the mixer's
-  // limiter's problem instead of this file's.
+/// The last stage of every sample, and the seam gloam#23 exposes.
+///
+/// Clamp first: a filter can overshoot its input range, and a sample outside
+/// [-1, 1] would be the mixer's limiter's problem instead of this file's.
+/// `to_i16` IS the synthesised sample; `to_float` only scales it, by the
+/// exactness rule from sfx.hpp. The pack's s16le bake therefore stores the
+/// output of `to_i16`, and expanding it back reproduces the float arena
+/// bit-for-bit.
+[[nodiscard]] constexpr auto to_i16(std::int32_t sample) noexcept -> std::int16_t {
   const std::int32_t clamped = sample > 32'767 ? 32'767 : (sample < -32'768 ? -32'768 : sample);
-  return static_cast<float>(static_cast<std::int16_t>(clamped)) * (1.0F / 32'768.0F);
+  return static_cast<std::int16_t>(clamped);
+}
+
+[[nodiscard]] constexpr auto to_float(std::int32_t sample) noexcept -> float {
+  return static_cast<float>(to_i16(sample)) * (1.0F / 32'768.0F);
+}
+
+/// One store per arena element type. These two overloads are the whole
+/// template surface below: `Sample` is only ever `float` or `std::int16_t`,
+/// and instantiating the renders with anything else fails HERE, at the store,
+/// rather than somewhere downstream.
+constexpr auto store_sample(std::int16_t& dst, std::int32_t sample) noexcept -> void {
+  dst = to_i16(sample);
+}
+
+constexpr auto store_sample(float& dst, std::int32_t sample) noexcept -> void {
+  dst = to_float(sample);
 }
 
 /// A filtered noise burst — both footfalls, and the sting's attack.
 ///
-/// `headroom_q16` scales the finished sample. It exists because `to_float`
+/// `headroom_q16` scales the finished sample. It exists because `to_i16`
 /// CLAMPS, and a clip that reaches the clamp is flat-topped at the source —
 /// distortion baked into the arena, which no amount of care in the mixer can
 /// undo. The mixer's limiter is for the SUM of up to sixteen voices; a single
 /// clip arriving at full scale has already lost information. `test/27sfxarena/`
 /// asserts every clip peaks strictly below 1.0 for exactly this reason.
-auto render_thud(Rng& noise, std::span<float> out, std::int32_t cutoff_q16,
+template <typename Sample>
+auto render_thud(Rng& noise, std::span<Sample> out, std::int32_t cutoff_q16,
                  std::uint32_t envelope_power, std::uint32_t body_millihertz,
                  std::int32_t body_weight_q16, std::int32_t headroom_q16) -> void {
   const auto total = static_cast<std::uint32_t>(out.size());
@@ -141,7 +163,7 @@ auto render_thud(Rng& noise, std::span<float> out, std::int32_t cutoff_q16,
     const std::int64_t env = envelope_q16(i, total, envelope_power);
     const std::int64_t voiced =
         ((static_cast<std::int64_t>(filter) + body) * headroom_q16) >> 16U;
-    out[i] = to_float(static_cast<std::int32_t>((voiced * env) >> 16U));
+    store_sample(out[i], static_cast<std::int32_t>((voiced * env) >> 16U));
   }
 }
 
@@ -155,7 +177,8 @@ auto render_thud(Rng& noise, std::span<float> out, std::int32_t cutoff_q16,
 /// two 100 ms transients, and matching their peak would make it dominate every
 /// buffer it appears in. Its EMISSION (90 against a footfall's 14) is what makes
 /// it carry; that is §6.2's number, applied before this waveform is ever read.
-auto render_sting(Rng& noise, std::span<float> out) -> void {
+template <typename Sample>
+auto render_sting(Rng& noise, std::span<Sample> out) -> void {
   const auto total = static_cast<std::uint32_t>(out.size());
 
   // Two partials a shade under a fifth apart — 587/392 = 1.4974, against a just
@@ -200,14 +223,19 @@ auto render_sting(Rng& noise, std::span<float> out) -> void {
     // the longest thing in the arena, so leaving headroom here costs less than
     // the limiter costs in test/28voicemix/.
     const std::int64_t voiced = ((tone * 21'800) >> 16U) + (air >> 1U);
-    out[i] = to_float(static_cast<std::int32_t>((voiced * env) >> 16U));
+    store_sample(out[i], static_cast<std::int32_t>((voiced * env) >> 16U));
   }
 }
 
-}  // namespace
-
-auto synthesise(std::uint64_t seed, std::span<float> arena,
-                std::span<Clip, audio::kSoundIdCount> clips) -> bool {
+/// The whole synthesis, written ONCE, over an output span of either sample
+/// type. `synthesise` and `synthesise_i16` are the two instantiations of this
+/// and nothing else: one integer construction, one draw sequence (kNoiseDraws,
+/// Stream::Ambience only), two skins. The float skin differs only at the final
+/// store, where each int16 sample is scaled by exactly 1.0f / 32768.0f — which
+/// is why a baked s16le arena expands back to the same bytes.
+template <typename Sample>
+auto synthesise_core(std::uint64_t seed, std::span<Sample> arena,
+                     std::span<Clip, audio::kSoundIdCount> clips) -> bool {
   if (arena.size() < kArenaFrames) return false;
 
   // `SoundId::None` is index 0 and stays {0, 0}. That is what lets the mixer
@@ -218,7 +246,7 @@ auto synthesise(std::uint64_t seed, std::span<float> arena,
   auto noise = rng(seed, Stream::Ambience);
 
   std::uint32_t cursor = 0;
-  const auto place = [&](audio::SoundId id, std::uint32_t frames) -> std::span<float> {
+  const auto place = [&](audio::SoundId id, std::uint32_t frames) -> std::span<Sample> {
     clips[static_cast<std::size_t>(id)] = Clip{cursor, frames};
     auto slice = arena.subspan(cursor, frames);
     cursor += frames;
@@ -248,6 +276,18 @@ auto synthesise(std::uint64_t seed, std::span<float> arena,
   render_sting(noise, place(audio::SoundId::HuntingSting, kHuntingStingFrames));
 
   return cursor == kArenaFrames;
+}
+
+}  // namespace
+
+auto synthesise(std::uint64_t seed, std::span<float> arena,
+                std::span<Clip, audio::kSoundIdCount> clips) -> bool {
+  return synthesise_core(seed, arena, clips);
+}
+
+auto synthesise_i16(std::uint64_t seed, std::span<std::int16_t> arena,
+                    std::span<Clip, audio::kSoundIdCount> clips) -> bool {
+  return synthesise_core(seed, arena, clips);
 }
 
 }  // namespace gloam::sfx

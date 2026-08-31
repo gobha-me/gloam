@@ -126,4 +126,21 @@ inline constexpr std::uint32_t kNoiseDraws =
 [[nodiscard]] auto synthesise(std::uint64_t seed, std::span<float> arena,
                               std::span<Clip, audio::kSoundIdCount> clips) -> bool;
 
+/// The same generator, one stage earlier: the 16-bit integer samples BEFORE
+/// the `1.0f / 32768.0f` scale, through the same seed, the same draws and the
+/// same clip table.
+///
+/// This is the stage gloam#23's bake stores. The pack record is s16le PCM —
+/// half the bytes of the float arena, and a reader does not have to reproduce
+/// the synthesis to load it. Expansion back to float is one multiply by
+/// `1.0f / 32768.0f`, and it is EXACT, not approximate: every `std::int16_t`
+/// is representable in `float` and 32768 is a power of two, so the baked and
+/// re-expanded arena is bit-identical to the one `synthesise` produces, on
+/// every IEEE-754 target. `test/27sfxarena/` proves that by memcmp.
+///
+/// Same refusal rule: false, having written nothing, when `arena` is shorter
+/// than `kArenaFrames`.
+[[nodiscard]] auto synthesise_i16(std::uint64_t seed, std::span<std::int16_t> arena,
+                                  std::span<Clip, audio::kSoundIdCount> clips) -> bool;
+
 }  // namespace gloam::sfx
