@@ -9,11 +9,15 @@
 find_package(Threads REQUIRED)
 find_library(GLOAM_UTIL_LIBRARY util REQUIRED)
 
+# sfx.cpp joins for gloam#23: the shipped pack the fixture builds carries the
+# audio arena, and the PCM comes from the synthesiser's integer stage — the
+# same bin-side, device-free TU test/27sfxarena/ compiles.
 add_executable(31imagelifecycle-test
   ${CMAKE_CURRENT_LIST_DIR}/../main.cpp
   ${PROJECT_SOURCE_DIR}/src/bin/tty_writer.cpp
   ${PROJECT_SOURCE_DIR}/src/bin/terminal_sink.cpp
   ${PROJECT_SOURCE_DIR}/src/bin/resident_plates.cpp
+  ${PROJECT_SOURCE_DIR}/src/bin/sfx.cpp
   ${SRCS}
 )
 

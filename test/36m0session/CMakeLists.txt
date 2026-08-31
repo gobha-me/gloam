@@ -15,10 +15,15 @@
 #
 # It is POSIX-only by the same licence as test/31imagelifecycle's pty work.
 
+# sfx.cpp joins for gloam#23: the pack the child is handed is baked
+# in-process, and it carries the audio arena — the PCM comes from the
+# synthesiser's integer stage, the same bin-side, device-free TU
+# test/27sfxarena/ compiles.
 add_executable(36m0session-test
   ${CMAKE_CURRENT_LIST_DIR}/../main.cpp
   ${PROJECT_SOURCE_DIR}/src/bin/scene.cpp
   ${PROJECT_SOURCE_DIR}/src/bin/tty_writer.cpp
+  ${PROJECT_SOURCE_DIR}/src/bin/sfx.cpp
   ${SRCS}
 )
 

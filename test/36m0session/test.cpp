@@ -35,6 +35,8 @@
 #include "gloam/sha256.hpp"
 #include "gloam/tuning.hpp"
 #include "gloam/world.hpp"
+
+#include "sfx.hpp"  // the pack the child is handed carries the audio arena (gloam#23)
 #include "scene.hpp"
 #include "tty_writer.hpp"
 
@@ -167,10 +169,17 @@ TEST_CASE("the M0 binary plays a session and its replay reproduces the world",
   // The pack, baked in-process through the pipeline gloam_bake runs, written
   // where the child can read it. tmpnam would race; mkstemp does not.
   std::vector<std::byte> pixels(assets::pixel_bytes());
-  std::vector<pack::Record> records(static_cast<std::size_t>(assets::kPlateCount));
-  std::vector<std::span<const std::byte>> blobs(static_cast<std::size_t>(assets::kPlateCount));
+  std::vector<std::int16_t> pcm(assets::kAudioArenaFrames);
+  std::array<sfx::Clip, audio::kSoundIdCount> clips{};
+  REQUIRE(sfx::synthesise_i16(sfx::kArenaSeed, pcm, clips));
+  std::array<assets::AudioSource, assets::kAudioCount> audio{};
+  REQUIRE(sfx::pack_sources(pcm, clips, audio));
+  std::vector<std::byte> audio_bytes(assets::kAudioBlobBytes);
+  const auto record_count = static_cast<std::size_t>(assets::kPlateCount) + assets::kAudioCount;
+  std::vector<pack::Record> records(record_count);
+  std::vector<std::span<const std::byte>> blobs(record_count);
   std::vector<std::byte> pack_image(assets::image_bytes());
-  REQUIRE(assets::build_pack(pixels, records, blobs, pack_image));
+  REQUIRE(assets::build_pack(pixels, records, blobs, audio, audio_bytes, pack_image));
 
   char pack_path[] = "/tmp/gloam-m0-pack-XXXXXX";
   const int pack_fd = ::mkstemp(pack_path);

@@ -112,6 +112,25 @@ enum class SoundId : std::uint8_t {
 /// How many ids exist. A mixer sizes its arena by this.
 inline constexpr std::size_t kSoundIdCount = 4;
 
+/// §9.2's stream format, and the durations §9 never wrote.
+///
+/// The rate is the one number §9.2 does state ("48 kHz mono") and the three
+/// frame counts are the ones it does not — gloam#40, UPSTREAM.md item 20: the
+/// durations were DECIDED in `src/bin/sfx.cpp` (90 ms / 600 ms / 110 ms — the
+/// sting is §6.1's SEARCHING→HUNTING edge and must read as an event; a
+/// footfall must feel co-incident with its tick), and the decision record
+/// lives there and in that item. The CONSTANTS live here, beside the SoundIds
+/// they belong to, because gloam#23 made them pack content: the bake's audio
+/// inventory (`assets.hpp`) reads them, and a lib header is the one place both
+/// the pipeline and the bin-side synthesiser can see them. They are audio
+/// content, not simulation tunables — `kStingEmission`'s argument applies to
+/// every one: nothing in the simulation reads them, so they must never reach
+/// `ruleset_hash`.
+inline constexpr int kSampleRateHz = 48'000;
+inline constexpr std::uint32_t kPartyFootfallFrames = 4'320;    ///< 90 ms
+inline constexpr std::uint32_t kHuntingStingFrames = 28'800;    ///< 600 ms
+inline constexpr std::uint32_t kMonsterFootfallFrames = 5'280;  ///< 110 ms
+
 // ── Gain and pan ────────────────────────────────────────────────────────────
 
 /// Loudness at the listener, `kGainSilent` .. `kGainUnity`.

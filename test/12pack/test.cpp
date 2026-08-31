@@ -36,6 +36,8 @@
 #include "gloam/plate.hpp"
 #include "gloam/sha256.hpp"
 
+#include "sfx.hpp"  // the golden covers the audio records too, so the real PCM (gloam#23)
+
 using namespace gloam;
 using gloam::pack::PackError;
 
@@ -1250,11 +1252,22 @@ TEST_CASE("the light-field pack is byte-identical across two independent bakes",
   // only `cmake/check_pack_repro.cmake` would be left — and that compares a run
   // against a run, never against the golden.
   const auto build = []() {
+    // Plates AND the audio arena — the golden is over the pack gloam_bake
+    // ships, and since gloam#23 that pack has a second record kind. The PCM
+    // is the real synthesised arena at the one shared seed.
     std::vector<std::byte> pixels(assets::pixel_bytes());
-    std::vector<pack::Record> records(assets::kPlateCount);
-    std::vector<std::span<const std::byte>> blobs(assets::kPlateCount);
+    std::vector<std::int16_t> pcm(assets::kAudioArenaFrames);
+    std::array<sfx::Clip, audio::kSoundIdCount> clips{};
+    REQUIRE(sfx::synthesise_i16(sfx::kArenaSeed, pcm, clips));
+    std::array<assets::AudioSource, assets::kAudioCount> audio{};
+    REQUIRE(sfx::pack_sources(pcm, clips, audio));
+    std::vector<std::byte> audio_bytes(assets::kAudioBlobBytes);
+    std::vector<pack::Record> records(static_cast<std::size_t>(assets::kPlateCount) +
+                                      assets::kAudioCount);
+    std::vector<std::span<const std::byte>> blobs(static_cast<std::size_t>(assets::kPlateCount) +
+                                                  assets::kAudioCount);
     std::vector<std::byte> image(assets::image_bytes());
-    REQUIRE(assets::build_pack(pixels, records, blobs, image));
+    REQUIRE(assets::build_pack(pixels, records, blobs, audio, audio_bytes, image));
     return image;
   };
 
@@ -1264,10 +1277,11 @@ TEST_CASE("the light-field pack is byte-identical across two independent bakes",
   CHECK(hash::sha256(first) == hash::sha256(second));
   CHECK(gloam::pack::verify(first));
 
-  // The size the format arithmetic predicts: 48 + 65 * 52 + the inventory's
-  // blob bytes. gloam#8 grew this from six light fields to the whole M0 plate
-  // inventory; the number is pinned against `assets`' own arithmetic rather
-  // than a hand-copied constant, and the digest below is the golden.
+  // The size the format arithmetic predicts: 48 + 68 * 52 + the inventory's
+  // blob bytes + the arena's s16le. gloam#8 grew this from six light fields to
+  // the whole M0 plate inventory, and gloam#23 added the three audio records;
+  // the number is pinned against `assets`' own arithmetic rather than a
+  // hand-copied constant, and the digest below is the golden.
   CHECK(first.size() == assets::image_bytes());
 
   // THE GOLDEN DIGEST. Two runs agreeing with each other only proves this
@@ -1278,7 +1292,10 @@ TEST_CASE("the light-field pack is byte-identical across two independent bakes",
   // If this changes, something changed the ART. That is allowed — the falloff
   // band width in lightfield.hpp is explicitly a look decision — but it has to
   // be a deliberate line in a diff rather than a number that drifted.
-  CHECK(hex_of(first) == "d9560201da4fa92c5e575a790c232e64f6b4003248fa0a4904feea3651f83051");
+  // gloam#23 moved this once, deliberately: the pack gained the audio arena
+  // (UPSTREAM.md item 10 resolved). Any other move is the same rule as ever —
+  // a deliberate line in a diff, or a bug.
+  CHECK(hex_of(first) == "9b138a78b9b6a10003e069ad1e8e962a320b7b64038ff103d1eb90a2cb1d7519");
 
   // §11's residency cap. pack.hpp deliberately does not know about budgets —
   // emit.hpp's rule, "the sink reports, the budget judges" — so the comparison
@@ -1286,6 +1303,7 @@ TEST_CASE("the light-field pack is byte-identical across two independent bakes",
   gloam::pack::Header h{};
   REQUIRE(gloam::pack::read_header(first, h));
   CHECK(h.plate_count == static_cast<std::uint16_t>(assets::kPlateCount));
+  CHECK(h.audio_count == static_cast<std::uint16_t>(assets::kAudioCount));
   CHECK(h.plate_count <= budget::kMaxResidentImages);
   // Every record round-trips to exactly its inventory entry — the manifest is
   // the single source the baker, the compositor and this test all read.
@@ -1303,6 +1321,26 @@ TEST_CASE("the light-field pack is byte-identical across two independent bakes",
     CHECK(record.variant == specs[index].variant);
     CHECK(record.w == static_cast<std::uint16_t>(specs[index].width));
     CHECK(record.h == static_cast<std::uint16_t>(specs[index].height));
+  }
+
+  // The audio run round-trips the same way, against the audio inventory: ids
+  // are the SoundIds, the descriptive middle reads as rate / channels /
+  // format / frames, and the blob lengths agree with the frame counts.
+  for (std::uint16_t i = 0; i < h.audio_count; ++i) {
+    const auto& spec = assets::kAudioInventory[i];
+    pack::Record record{};
+    REQUIRE(pack::read_record(
+        std::span<const std::byte>{first}.subspan(
+            pack::kHeaderBytes + pack::kRecordBytes * (h.plate_count + i),
+            pack::kRecordBytes),
+        record));
+    CHECK(record.plate_id == spec.sound_id);
+    CHECK(record.role == pack::Role::Audio);
+    CHECK(record.sample_rate == static_cast<std::uint16_t>(audio::kSampleRateHz));
+    CHECK(record.channels == 1);
+    CHECK(record.sample_format == pack::SampleFormat::S16Le);
+    CHECK(record.frame_count == spec.frame_count);
+    CHECK(record.length == spec.frame_count * 2);
   }
 
   // A NECESSARY CONDITION, NOT §11's BUDGET. `kMaxColdStartPayloadBytes` is the

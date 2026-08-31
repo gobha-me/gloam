@@ -96,8 +96,15 @@ target_link_libraries(${PROJECT_NAME}_m0
 # ${PROJECT_NAME} would make that a convention rather than a fact. This target
 # holds the only file descriptor in the pipeline — everything it calls in
 # ${PROJECT_NAME}::lib works on caller-owned spans.
+#
+# sfx.cpp joins it for gloam#23: the pack carries the resident PCM arena, so
+# the bake runs the synthesiser's integer stage. sfx.cpp is bin-side rather
+# than in the library for the float half's reason (AGENTS.md rule 2); the
+# integer stage the bake uses shares that translation unit and its
+# no-libm, Ambience-only determinism, which is what `pack-reproducible` gates.
 add_executable(${PROJECT_NAME}_bake
   bake.cpp
+  sfx.cpp
 )
 
 target_include_directories(${PROJECT_NAME}_bake
