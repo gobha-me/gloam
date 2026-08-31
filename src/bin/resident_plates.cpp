@@ -48,6 +48,11 @@ auto PlateSet::from_pack(std::span<const std::byte> image)
   records.reserve(header.plate_count);
   auto matcher = std::make_unique<deflate::Scratch>();
 
+  // The loop reads exactly header.plate_count records — the plate run, which
+  // pack.hpp's two-run ordering guarantees comes first. The audio run that
+  // follows it (gloam#23) is deliberately NOT this class's business: the
+  // loader in pack_audio.cpp owns it, and a plate set that knew about sounds
+  // would mix §4.8's residency with §9.2's.
   for (std::uint16_t index = 0; index < header.plate_count; ++index) {
     pack::Record record{};
     const auto at = pack::kHeaderBytes + pack::kRecordBytes * static_cast<std::size_t>(index);

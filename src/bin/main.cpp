@@ -43,6 +43,7 @@
 #include "gloam/png.hpp"
 #include "gloam/replay.hpp"
 #include "audio_device.hpp"
+#include "pack_audio.hpp"
 #include "sfx.hpp"
 #include "tty_writer.hpp"
 #include "voice_mixer.hpp"
@@ -277,9 +278,9 @@ auto print_instruments() -> bool {
 /// THE ARENA DIGEST IS THE LOAD-BEARING ROW ON THIS MACHINE. Neither the dev box
 /// nor a CI runner has an output device, so `voices` and `latency` are
 /// structurally zero here and prove nothing on their own. The digest proves the
-/// synthesiser ran, and that two runs of the same binary produced the same
-/// 153,600 B — which is the one claim about §9.2's resident arena that a
-/// device-less machine can actually make.
+/// pack's audio run was loaded and expanded, and that two runs of the same
+/// binary produced the same 153,600 B — which is the one claim about §9.2's
+/// resident arena that a device-less machine can actually make.
 auto print_audio(const device::DeviceSink* sink, std::span<const float> arena) -> void {
   std::printf("\naudio (SPEC 9, build-order step 9)\n");
   std::printf("  stream        %d Hz float32, %d-frame buffer (%d us), %d ch\n",
@@ -288,14 +289,16 @@ auto print_audio(const device::DeviceSink* sink, std::span<const float> arena) -
 
   if (sink == nullptr) {
     std::printf("  device        muted (--audio opens a device; --mute is the default)\n");
-    std::printf("  arena         not synthesised - nothing would have read it\n");
+    std::printf("  arena         not loaded - nothing would have read it\n");
     return;
   }
 
-  // FNV-1a over the raw arena bytes. Not a cryptographic claim and not
-  // `pack_sha256` — this arena is deliberately outside that digest (gloam#23) —
-  // just enough to make "the same seed produced the same samples" observable
-  // from outside the process, which is what `audio-arena-deterministic` checks.
+  // FNV-1a over the raw arena bytes. Not a cryptographic claim — the pack's
+  // claim is pack_sha256's, and these bytes are inside it at one remove (the
+  // blob is s16le; this is its exact float expansion, gloam#23) — just enough
+  // to make "two runs loaded the same arena" observable from outside the
+  // process, which is what check_audio_device.cmake's determinism section
+  // (the audio-no-device-degrades gate) compares.
   std::uint64_t digest = 0xCBF29CE484222325ULL;
   const auto* bytes = reinterpret_cast<const unsigned char*>(arena.data());
   for (std::size_t i = 0; i < arena.size_bytes(); ++i) {
@@ -308,8 +311,9 @@ auto print_audio(const device::DeviceSink* sink, std::span<const float> arena) -
 
   std::printf("  arena         %zu B / %zu frames resident, digest %016llx\n", sfx::kArenaBytes,
               sfx::kArenaFrames, static_cast<unsigned long long>(digest));
-  std::printf("                synthesised at startup from Stream::Ambience; SCHEMAS.md 1\n"
-              "                has no audio record, so it is NOT in the pack     (gloam#23)\n");
+  std::printf("                loaded from the pack's audio records at startup and expanded\n"
+              "                s16le -> float, bit-exact; the PCM is IN the pack, covered by\n"
+              "                pack_sha256                                      (gloam#23)\n");
 
   const auto& mixer = sink->mixer();
   // Three ways a command ends, all named: the ring refused it, it sounded, or
@@ -619,19 +623,47 @@ auto main(int argc, char** argv) -> int {
   // Caller-owned, and on the heap, for deflate::Scratch's reason: gloam::lib
   // owns no plate and src/bin/ owns no exception to that. 153,600 B, allocated
   // once, only when something will read it.
-  std::vector<float> arena(audio ? sfx::kArenaFrames : 0);
+  std::vector<float> arena;
   std::array<sfx::Clip, audio::kSoundIdCount> clips{};
   std::optional<device::DeviceSink> sink;
   bool stream_started = false;
 
   if (audio) {
-    // A FIXED SEED, not a drawn one. The arena must be identical on every run of
-    // every build or `gloam --audio` twice is two different games — and
-    // Stream::Ambience is excluded from `world_hash` (world.cpp), so this cannot
-    // move a replay in either direction.
-    constexpr std::uint64_t kArenaSeed = 0x9105A3ULL;
-    if (!sfx::synthesise(kArenaSeed, arena, clips)) {
-      std::fprintf(stderr, "gloam: could not synthesise the audio arena\n");
+    // THE RUNTIME LOAD PATH (gloam#23), and this diagnostic has no pack on
+    // disk — so one is ASSEMBLED in memory through the same call gloam_bake
+    // runs, integer synthesis and all, and the arena is then loaded back out
+    // of it. What the digest row below measures is therefore the load, not a
+    // synthesis: the bytes the pack carries, expanded. Stream::Ambience is
+    // still excluded from `world_hash` (world.cpp), so none of this can move
+    // a replay in either direction.
+    std::vector<std::byte> pixels(assets::pixel_bytes());
+    std::vector<std::int16_t> pcm(assets::kAudioArenaFrames);
+    std::array<sfx::Clip, audio::kSoundIdCount> bake_clips{};
+    if (!sfx::synthesise_i16(sfx::kArenaSeed, pcm, bake_clips)) {
+      std::fprintf(stderr, "gloam: could not synthesise the audio arena for the pack\n");
+      return 1;
+    }
+    std::array<assets::AudioSource, assets::kAudioCount> sources{};
+    if (!sfx::pack_sources(pcm, bake_clips, sources)) {
+      std::fprintf(stderr, "gloam: the synthesiser and the audio inventory disagree\n");
+      return 1;
+    }
+    std::vector<std::byte> audio_bytes(assets::kAudioBlobBytes);
+    constexpr auto kRecordTotal =
+        static_cast<std::size_t>(assets::kPlateCount) + assets::kAudioCount;
+    std::vector<pack::Record> records(kRecordTotal);
+    std::vector<std::span<const std::byte>> blobs(kRecordTotal);
+    std::vector<std::byte> image(assets::image_bytes());
+    if (!assets::build_pack(pixels, records, blobs, sources, audio_bytes, image)) {
+      std::fprintf(stderr, "gloam: could not assemble the in-memory pack\n");
+      return 1;
+    }
+    arena.resize(sfx::kArenaFrames);
+    if (const auto loaded = pack_audio::load(image, arena, clips); !loaded) {
+      const auto error_name = pack_audio::name(loaded.error);
+      std::fprintf(stderr, "gloam: the pack's audio records would not load — %.*s (sound %u)\n",
+                   static_cast<int>(error_name.size()), error_name.data(),
+                   static_cast<unsigned>(loaded.sound_id));
       return 1;
     }
     sink.emplace(std::span<const float>{arena},

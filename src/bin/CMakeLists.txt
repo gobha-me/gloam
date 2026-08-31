@@ -23,6 +23,12 @@
 # tty_writer.cpp, which puts the entire float half of §9 under all eight
 # sanitizer legs on machines that have no sound card — which is every machine
 # this project builds on.
+#
+# pack_audio.cpp (gloam#23) is the arena's way BACK: the records-only launch
+# gate and the s16le -> float expansion that load the pack's audio run. It is
+# bin-side for sfx.cpp's two reasons — it produces float (rule 2) and owns no
+# storage — and device-free the same way, so the pack-audio suite compiles it
+# directly beside sfx.cpp.
 add_executable(${PROJECT_NAME}
   main.cpp
   tty_writer.cpp
@@ -30,6 +36,7 @@ add_executable(${PROJECT_NAME}
   resident_plates.cpp
   terminal_compositor.cpp
   sfx.cpp
+  pack_audio.cpp
   voice_mixer.cpp
   audio_device.cpp
 )
@@ -75,6 +82,7 @@ add_executable(${PROJECT_NAME}_m0
   resident_plates.cpp
   terminal_compositor.cpp
   sfx.cpp
+  pack_audio.cpp
   voice_mixer.cpp
   audio_device.cpp
 )
