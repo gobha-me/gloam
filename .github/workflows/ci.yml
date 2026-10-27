@@ -33,10 +33,13 @@ jobs:
       matrix:
         include:
           - { name: "gcc / default",   cxx: g++,     toolchain: default.cmake,   build_type: Debug }
+          # Optimized non-TSan legs exercise the allocation counter under -O3 (#57).
+          - { name: "gcc / release",   cxx: g++,     toolchain: default.cmake,   build_type: Release }
           - { name: "gcc / asan",      cxx: g++,     toolchain: address.cmake,   build_type: Debug }
           - { name: "gcc / tsan",      cxx: g++,     toolchain: thread.cmake,    build_type: RelWithDebInfo }
           - { name: "gcc / ubsan",     cxx: g++,     toolchain: undefined.cmake, build_type: Debug }
           - { name: "clang / default", cxx: clang++, toolchain: clang.cmake,     build_type: Debug }
+          - { name: "clang / release", cxx: clang++, toolchain: clang.cmake,     build_type: Release }
           - { name: "clang / asan",    cxx: clang++, toolchain: address.cmake,   build_type: Debug }
           - { name: "clang / tsan",    cxx: clang++, toolchain: thread.cmake,    build_type: RelWithDebInfo }
           - { name: "clang / ubsan",   cxx: clang++, toolchain: undefined.cmake, build_type: Debug }
@@ -72,7 +75,7 @@ jobs:
       # rather than a limitation. The whole audio slice is written to degrade
       # instead of crash on exactly this machine, and `audio-no-device-degrades`
       # is the ctest case that proves it here, on every leg. Building RtAudio on
-      # all eight is deliberate too: it is the only third-party code in the tree,
+      # every leg is deliberate too: it is the only third-party code in the tree,
       # and this is the one chance to put both compilers and four sanitizers over
       # it. The real-time path is never entered — open() bails at an empty
       # getDeviceIds() before a stream thread exists — so the sanitizers audit

@@ -22,6 +22,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <new>
 #include <span>
 #include <thread>
 #include <vector>
@@ -57,14 +58,14 @@ using namespace gloam;
 //
 // The guard below covers BOTH TSan implementations rather than only the one that
 // breaks. Narrowing it to `__clang__` would keep the case alive on the GCC TSan
-// leg, and was rejected: the claim is not compiler-specific, six other legs
+// leg, and was rejected: the claim is not compiler-specific, the non-TSan legs
 // prove it, and a workaround keyed on which vendor's runtime happens to use weak
 // symbols is exactly the kind of thing that rots without anyone noticing.
 //
 // The case below therefore SKIPs under TSan rather than compiling to nothing.
 // A vanished test that still reports green is the failure mode this project
 // spends most of its effort on; a skip says so in the ctest output. The claim
-// itself is not compiler-specific, so proving it on the other seven legs is
+// itself is not compiler-specific, so proving it on the non-TSan legs is
 // proof enough.
 #if defined(__has_feature)
 #if __has_feature(thread_sanitizer)
@@ -162,8 +163,8 @@ struct Rig {
 TEST_CASE("render allocates nothing", "[mix]") {
 #if GLOAM_TSAN_ACTIVE
   // Not silently compiled away — see the banner above the counter. TSan owns the
-  // global operators on this leg, so the instrument cannot exist here; the other
-  // seven legs run it.
+  // global operators on this leg, so the instrument cannot exist here; the
+  // non-TSan legs run it.
   SKIP("ThreadSanitizer defines the global operator new, so the counter cannot be installed");
 #else
   Rig rig;
@@ -185,12 +186,14 @@ TEST_CASE("render allocates nothing", "[mix]") {
   CHECK(allocations == 0);
   // The counter must be capable of firing, or the assertion above is a
   // statement about the counter rather than about the mixer.
+  // Call the allocation function explicitly: a new-expression's allocation
+  // may be elided even when operator new has observable side effects (#57).
   std::uint64_t control = 0;
   {
     const CountAllocations counting;
-    auto* probe = new int{7};
+    auto* probe = ::operator new(sizeof(int));
     control = CountAllocations::count();
-    delete probe;
+    ::operator delete(probe);
   }
   CHECK(control == 1);
 #endif
