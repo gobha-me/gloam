@@ -8,7 +8,8 @@
 // closed by `render`'s signature, which names no simulation type. "Never locks"
 // is closed by there being nothing to lock — plus the thread case at the bottom,
 // which is what TSan reads. "NEVER ALLOCATES" is closed by nothing at all unless
-// something counts, so this file replaces global operator new and counts.
+// something counts, so this file replaces the global allocation functions and
+// counts.
 //
 // The other half of the suite is arithmetic that has to be exact rather than
 // close: `audio.hpp` justifies `kGainUnity` being a power of two by claiming the
@@ -21,6 +22,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <limits>
 #include <new>
 #include <span>
@@ -45,6 +47,28 @@ using namespace gloam;
 //
 // This is also the second reason src/bin/audio_device.cpp is not in this target:
 // these operators are global, so anything else linked here would be counted too.
+//
+// ── EVERY FORM IS REPLACED, NOT ONLY THE SCALAR ONE ────────────────────────
+//
+// This file used to replace only `operator new(size_t)` and the two scalar
+// deletes, relying on the library to route everything else through them. That
+// holds for libstdc++, whose `operator new[](size_t)` is literally
+// `jmp operator new@plt`, and it is false under GCC's AddressSanitizer:
+// libasan.so exports all twenty allocation/deallocation functions itself, and
+// its `operator new[]` calls `__asan::asan_memalign` directly, never
+// `operator new`. libasan is first in the dynamic lookup order, so on the
+// gcc/asan leg `::operator new[](64)` resolved to the runtime and the counter
+// read 0 (#57, CI run 40549869087) — an array allocation in the callback would
+// have been invisible on exactly the leg that exists to catch memory misuse.
+//
+// So the counter owns the whole set: scalar and array, plain, nothrow and
+// align_val_t, and every matching delete. The deletes matter as much as the
+// news. Replacing `operator new[]` but leaving `operator delete[]` to ASan would
+// hand malloc'd memory to the runtime's `operator delete[]`, which ASan reports
+// as alloc-dealloc-mismatch; owning both halves keeps every pair on
+// malloc/aligned_alloc → free, which ASan checks and accepts. Nothing here
+// forwards to another replaced operator, so no form depends on a library's
+// choice of routing again.
 //
 // ── AND IT CANNOT EXIST UNDER ThreadSanitizer ──────────────────────────────
 //
@@ -99,18 +123,75 @@ struct CountAllocations {
 }  // namespace
 
 #if !GLOAM_TSAN_ACTIVE
-auto operator new(std::size_t size) -> void* {
+namespace {
+/// The one place an allocation is counted and made. Returns nullptr on failure;
+/// the throwing forms turn that into std::bad_alloc.
+auto counted_allocate(std::size_t size, std::size_t alignment) noexcept -> void* {
   if (g_counting.load(std::memory_order_relaxed)) {
     g_allocations.store(g_allocations.load(std::memory_order_relaxed) + 1,
                         std::memory_order_relaxed);
   }
-  void* memory = std::malloc(size == 0 ? 1 : size);
+  if (alignment <= __STDCPP_DEFAULT_NEW_ALIGNMENT__) {
+    return std::malloc(size == 0 ? 1 : size);
+  }
+  // aligned_alloc wants a size that is a non-zero multiple of the alignment.
+  if (size > std::numeric_limits<std::size_t>::max() - alignment) return nullptr;
+  const std::size_t rounded = (size + alignment - 1) / alignment * alignment;
+  return std::aligned_alloc(alignment, rounded == 0 ? alignment : rounded);
+}
+
+auto counted_allocate_or_throw(std::size_t size, std::size_t alignment) -> void* {
+  void* memory = counted_allocate(size, alignment);
   if (memory == nullptr) throw std::bad_alloc{};
   return memory;
 }
 
+constexpr std::size_t kPlain = __STDCPP_DEFAULT_NEW_ALIGNMENT__;
+}  // namespace
+
+auto operator new(std::size_t size) -> void* { return counted_allocate_or_throw(size, kPlain); }
+auto operator new[](std::size_t size) -> void* { return counted_allocate_or_throw(size, kPlain); }
+auto operator new(std::size_t size, const std::nothrow_t&) noexcept -> void* {
+  return counted_allocate(size, kPlain);
+}
+auto operator new[](std::size_t size, const std::nothrow_t&) noexcept -> void* {
+  return counted_allocate(size, kPlain);
+}
+auto operator new(std::size_t size, std::align_val_t alignment) -> void* {
+  return counted_allocate_or_throw(size, static_cast<std::size_t>(alignment));
+}
+auto operator new[](std::size_t size, std::align_val_t alignment) -> void* {
+  return counted_allocate_or_throw(size, static_cast<std::size_t>(alignment));
+}
+auto operator new(std::size_t size, std::align_val_t alignment, const std::nothrow_t&) noexcept
+    -> void* {
+  return counted_allocate(size, static_cast<std::size_t>(alignment));
+}
+auto operator new[](std::size_t size, std::align_val_t alignment, const std::nothrow_t&) noexcept
+    -> void* {
+  return counted_allocate(size, static_cast<std::size_t>(alignment));
+}
+
 auto operator delete(void* memory) noexcept -> void { std::free(memory); }
+auto operator delete[](void* memory) noexcept -> void { std::free(memory); }
 auto operator delete(void* memory, std::size_t) noexcept -> void { std::free(memory); }
+auto operator delete[](void* memory, std::size_t) noexcept -> void { std::free(memory); }
+auto operator delete(void* memory, const std::nothrow_t&) noexcept -> void { std::free(memory); }
+auto operator delete[](void* memory, const std::nothrow_t&) noexcept -> void { std::free(memory); }
+auto operator delete(void* memory, std::align_val_t) noexcept -> void { std::free(memory); }
+auto operator delete[](void* memory, std::align_val_t) noexcept -> void { std::free(memory); }
+auto operator delete(void* memory, std::size_t, std::align_val_t) noexcept -> void {
+  std::free(memory);
+}
+auto operator delete[](void* memory, std::size_t, std::align_val_t) noexcept -> void {
+  std::free(memory);
+}
+auto operator delete(void* memory, std::align_val_t, const std::nothrow_t&) noexcept -> void {
+  std::free(memory);
+}
+auto operator delete[](void* memory, std::align_val_t, const std::nothrow_t&) noexcept -> void {
+  std::free(memory);
+}
 #endif
 
 namespace {
@@ -295,6 +376,93 @@ TEST_CASE("the allocation counter observes every allocation shape, optimised or 
   CHECK(three == 3);
   CHECK(via_vector == 1);
   CHECK(via_new_expression == 1);
+#endif
+}
+
+TEST_CASE("the allocation counter observes the nothrow and over-aligned forms too",
+          "[mix][counter]") {
+#if GLOAM_TSAN_ACTIVE
+  SKIP("ThreadSanitizer defines the global operator new, so the counter cannot be installed");
+#else
+  // The forms the case above does not reach. Each one is a distinct symbol a
+  // runtime may define on its own terms — libasan defines all of them without
+  // forwarding, and libstdc++'s aligned forms call posix_memalign rather than
+  // `operator new` on every leg — so each needs its own observation. A callback
+  // reaching for `new (std::nothrow)` or an `alignas(64)` scratch block is no
+  // less an allocation for having taken a less common spelling.
+  constexpr std::size_t kOver = 64;
+  static_assert(kOver > __STDCPP_DEFAULT_NEW_ALIGNMENT__);
+  const auto over = std::align_val_t{kOver};
+
+  std::uint64_t nothrow_scalar = 0;
+  std::uint64_t nothrow_array = 0;
+  std::uint64_t aligned_scalar = 0;
+  std::uint64_t aligned_array = 0;
+  std::uint64_t aligned_nothrow_scalar = 0;
+  std::uint64_t aligned_nothrow_array = 0;
+  std::uintptr_t misalignment = 0;
+  bool any_null = false;
+  {
+    const CountAllocations counting;
+    void* a = ::operator new(16, std::nothrow);
+    escape(a);
+    nothrow_scalar = CountAllocations::count();
+    any_null = any_null || a == nullptr;
+    ::operator delete(a, std::nothrow);
+  }
+  {
+    const CountAllocations counting;
+    void* a = ::operator new[](16, std::nothrow);
+    escape(a);
+    nothrow_array = CountAllocations::count();
+    any_null = any_null || a == nullptr;
+    ::operator delete[](a, std::nothrow);
+  }
+  {
+    const CountAllocations counting;
+    void* a = ::operator new(16, over);
+    escape(a);
+    aligned_scalar = CountAllocations::count();
+    misalignment |= reinterpret_cast<std::uintptr_t>(a) % kOver;
+    ::operator delete(a, std::size_t{16}, over);
+  }
+  {
+    const CountAllocations counting;
+    void* a = ::operator new[](16, over);
+    escape(a);
+    aligned_array = CountAllocations::count();
+    misalignment |= reinterpret_cast<std::uintptr_t>(a) % kOver;
+    ::operator delete[](a, over);
+  }
+  {
+    const CountAllocations counting;
+    void* a = ::operator new(16, over, std::nothrow);
+    escape(a);
+    aligned_nothrow_scalar = CountAllocations::count();
+    any_null = any_null || a == nullptr;
+    misalignment |= reinterpret_cast<std::uintptr_t>(a) % kOver;
+    ::operator delete(a, over, std::nothrow);
+  }
+  {
+    const CountAllocations counting;
+    void* a = ::operator new[](16, over, std::nothrow);
+    escape(a);
+    aligned_nothrow_array = CountAllocations::count();
+    any_null = any_null || a == nullptr;
+    misalignment |= reinterpret_cast<std::uintptr_t>(a) % kOver;
+    ::operator delete[](a, std::size_t{16}, over);
+  }
+
+  CHECK(nothrow_scalar == 1);
+  CHECK(nothrow_array == 1);
+  CHECK(aligned_scalar == 1);
+  CHECK(aligned_array == 1);
+  CHECK(aligned_nothrow_scalar == 1);
+  CHECK(aligned_nothrow_array == 1);
+  // The replacement must still honour the contract it took over, or the suite
+  // would be counting allocations the rest of the binary cannot safely use.
+  CHECK_FALSE(any_null);
+  CHECK(misalignment == 0);
 #endif
 }
 
