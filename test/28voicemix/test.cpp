@@ -8,7 +8,8 @@
 // closed by `render`'s signature, which names no simulation type. "Never locks"
 // is closed by there being nothing to lock — plus the thread case at the bottom,
 // which is what TSan reads. "NEVER ALLOCATES" is closed by nothing at all unless
-// something counts, so this file replaces global operator new and counts.
+// something counts, so this file replaces the global allocation functions and
+// counts.
 //
 // The other half of the suite is arithmetic that has to be exact rather than
 // close: `audio.hpp` justifies `kGainUnity` being a power of two by claiming the
@@ -21,7 +22,9 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <limits>
+#include <new>
 #include <span>
 #include <thread>
 #include <vector>
@@ -45,6 +48,28 @@ using namespace gloam;
 // This is also the second reason src/bin/audio_device.cpp is not in this target:
 // these operators are global, so anything else linked here would be counted too.
 //
+// ── EVERY FORM IS REPLACED, NOT ONLY THE SCALAR ONE ────────────────────────
+//
+// This file used to replace only `operator new(size_t)` and the two scalar
+// deletes, relying on the library to route everything else through them. That
+// holds for libstdc++, whose `operator new[](size_t)` is literally
+// `jmp operator new@plt`, and it is false under GCC's AddressSanitizer:
+// libasan.so exports all twenty allocation/deallocation functions itself, and
+// its `operator new[]` calls `__asan::asan_memalign` directly, never
+// `operator new`. libasan is first in the dynamic lookup order, so on the
+// gcc/asan leg `::operator new[](64)` resolved to the runtime and the counter
+// read 0 (#57, CI run 40549869087) — an array allocation in the callback would
+// have been invisible on exactly the leg that exists to catch memory misuse.
+//
+// So the counter owns the whole set: scalar and array, plain, nothrow and
+// align_val_t, and every matching delete. The deletes matter as much as the
+// news. Replacing `operator new[]` but leaving `operator delete[]` to ASan would
+// hand malloc'd memory to the runtime's `operator delete[]`, which ASan reports
+// as alloc-dealloc-mismatch; owning both halves keeps every pair on
+// malloc/aligned_alloc → free, which ASan checks and accepts. Nothing here
+// forwards to another replaced operator, so no form depends on a library's
+// choice of routing again.
+//
 // ── AND IT CANNOT EXIST UNDER ThreadSanitizer ──────────────────────────────
 //
 // TSan's runtime replaces the global operators itself, and Clang's copy defines
@@ -57,14 +82,14 @@ using namespace gloam;
 //
 // The guard below covers BOTH TSan implementations rather than only the one that
 // breaks. Narrowing it to `__clang__` would keep the case alive on the GCC TSan
-// leg, and was rejected: the claim is not compiler-specific, six other legs
+// leg, and was rejected: the claim is not compiler-specific, the non-TSan legs
 // prove it, and a workaround keyed on which vendor's runtime happens to use weak
 // symbols is exactly the kind of thing that rots without anyone noticing.
 //
 // The case below therefore SKIPs under TSan rather than compiling to nothing.
 // A vanished test that still reports green is the failure mode this project
 // spends most of its effort on; a skip says so in the ctest output. The claim
-// itself is not compiler-specific, so proving it on the other seven legs is
+// itself is not compiler-specific, so proving it on the non-TSan legs is
 // proof enough.
 #if defined(__has_feature)
 #if __has_feature(thread_sanitizer)
@@ -98,18 +123,75 @@ struct CountAllocations {
 }  // namespace
 
 #if !GLOAM_TSAN_ACTIVE
-auto operator new(std::size_t size) -> void* {
+namespace {
+/// The one place an allocation is counted and made. Returns nullptr on failure;
+/// the throwing forms turn that into std::bad_alloc.
+auto counted_allocate(std::size_t size, std::size_t alignment) noexcept -> void* {
   if (g_counting.load(std::memory_order_relaxed)) {
     g_allocations.store(g_allocations.load(std::memory_order_relaxed) + 1,
                         std::memory_order_relaxed);
   }
-  void* memory = std::malloc(size == 0 ? 1 : size);
+  if (alignment <= __STDCPP_DEFAULT_NEW_ALIGNMENT__) {
+    return std::malloc(size == 0 ? 1 : size);
+  }
+  // aligned_alloc wants a size that is a non-zero multiple of the alignment.
+  if (size > std::numeric_limits<std::size_t>::max() - alignment) return nullptr;
+  const std::size_t rounded = (size + alignment - 1) / alignment * alignment;
+  return std::aligned_alloc(alignment, rounded == 0 ? alignment : rounded);
+}
+
+auto counted_allocate_or_throw(std::size_t size, std::size_t alignment) -> void* {
+  void* memory = counted_allocate(size, alignment);
   if (memory == nullptr) throw std::bad_alloc{};
   return memory;
 }
 
+constexpr std::size_t kPlain = __STDCPP_DEFAULT_NEW_ALIGNMENT__;
+}  // namespace
+
+auto operator new(std::size_t size) -> void* { return counted_allocate_or_throw(size, kPlain); }
+auto operator new[](std::size_t size) -> void* { return counted_allocate_or_throw(size, kPlain); }
+auto operator new(std::size_t size, const std::nothrow_t&) noexcept -> void* {
+  return counted_allocate(size, kPlain);
+}
+auto operator new[](std::size_t size, const std::nothrow_t&) noexcept -> void* {
+  return counted_allocate(size, kPlain);
+}
+auto operator new(std::size_t size, std::align_val_t alignment) -> void* {
+  return counted_allocate_or_throw(size, static_cast<std::size_t>(alignment));
+}
+auto operator new[](std::size_t size, std::align_val_t alignment) -> void* {
+  return counted_allocate_or_throw(size, static_cast<std::size_t>(alignment));
+}
+auto operator new(std::size_t size, std::align_val_t alignment, const std::nothrow_t&) noexcept
+    -> void* {
+  return counted_allocate(size, static_cast<std::size_t>(alignment));
+}
+auto operator new[](std::size_t size, std::align_val_t alignment, const std::nothrow_t&) noexcept
+    -> void* {
+  return counted_allocate(size, static_cast<std::size_t>(alignment));
+}
+
 auto operator delete(void* memory) noexcept -> void { std::free(memory); }
+auto operator delete[](void* memory) noexcept -> void { std::free(memory); }
 auto operator delete(void* memory, std::size_t) noexcept -> void { std::free(memory); }
+auto operator delete[](void* memory, std::size_t) noexcept -> void { std::free(memory); }
+auto operator delete(void* memory, const std::nothrow_t&) noexcept -> void { std::free(memory); }
+auto operator delete[](void* memory, const std::nothrow_t&) noexcept -> void { std::free(memory); }
+auto operator delete(void* memory, std::align_val_t) noexcept -> void { std::free(memory); }
+auto operator delete[](void* memory, std::align_val_t) noexcept -> void { std::free(memory); }
+auto operator delete(void* memory, std::size_t, std::align_val_t) noexcept -> void {
+  std::free(memory);
+}
+auto operator delete[](void* memory, std::size_t, std::align_val_t) noexcept -> void {
+  std::free(memory);
+}
+auto operator delete(void* memory, std::align_val_t, const std::nothrow_t&) noexcept -> void {
+  std::free(memory);
+}
+auto operator delete[](void* memory, std::align_val_t, const std::nothrow_t&) noexcept -> void {
+  std::free(memory);
+}
 #endif
 
 namespace {
@@ -162,8 +244,8 @@ struct Rig {
 TEST_CASE("render allocates nothing", "[mix]") {
 #if GLOAM_TSAN_ACTIVE
   // Not silently compiled away — see the banner above the counter. TSan owns the
-  // global operators on this leg, so the instrument cannot exist here; the other
-  // seven legs run it.
+  // global operators on this leg, so the instrument cannot exist here; the
+  // non-TSan legs run it.
   SKIP("ThreadSanitizer defines the global operator new, so the counter cannot be installed");
 #else
   Rig rig;
@@ -185,14 +267,357 @@ TEST_CASE("render allocates nothing", "[mix]") {
   CHECK(allocations == 0);
   // The counter must be capable of firing, or the assertion above is a
   // statement about the counter rather than about the mixer.
+  // Call the allocation function explicitly: a new-expression's allocation
+  // may be elided even when operator new has observable side effects (#57).
   std::uint64_t control = 0;
   {
     const CountAllocations counting;
-    auto* probe = new int{7};
+    auto* probe = ::operator new(sizeof(int));
     control = CountAllocations::count();
-    delete probe;
+    ::operator delete(probe);
   }
   CHECK(control == 1);
+#endif
+}
+
+// ── #57: is the counter itself falsifiable? ────────────────────────────────
+//
+// "render allocates nothing" is only as strong as the counter's ability to see an
+// allocation. #57 was the counter silently going blind under Clang -O2/-O3: the
+// control's `new int{7}` was elided, so the control read 0 and the suite failed —
+// the lucky direction. The cases below pin the other half: every allocation shape
+// that can reasonably appear in a callback is OBSERVED, through the same replaced
+// `operator new` the mixer case uses, and the exact measure-pattern the mixer
+// case uses (arm, call, read, disarm) reports an allocation injected beside a
+// real `render`.
+//
+// No CHECK/REQUIRE inside a counted region: Catch2 allocates, and a count taken
+// after an assertion would measure the framework. Counts are copied out first.
+//
+// Every pointer is passed through `escape` before the count is read. Without it
+// the *compiler* may delete an unused allocation (the #57 mechanism), and these
+// cases would be testing the optimiser instead of the counter.
+namespace {
+template <typename T>
+void escape(T* pointer) noexcept {
+  __asm__ volatile("" : : "g"(pointer) : "memory");
+}
+}  // namespace
+
+TEST_CASE("the allocation counter observes every allocation shape, optimised or not",
+          "[mix][counter]") {
+#if GLOAM_TSAN_ACTIVE
+  SKIP("ThreadSanitizer defines the global operator new, so the counter cannot be installed");
+#else
+  std::uint64_t scalar = 0;
+  std::uint64_t array_form = 0;
+  std::uint64_t zero_size = 0;
+  std::uint64_t three = 0;
+  std::uint64_t via_vector = 0;
+  std::uint64_t via_new_expression = 0;
+  {
+    const CountAllocations counting;
+    void* a = ::operator new(sizeof(int));
+    escape(a);
+    scalar = CountAllocations::count();
+    ::operator delete(a);
+  }
+  {
+    const CountAllocations counting;
+    void* a = ::operator new[](64);
+    escape(a);
+    array_form = CountAllocations::count();
+    ::operator delete[](a);
+  }
+  {
+    const CountAllocations counting;
+    void* a = ::operator new(0);
+    escape(a);
+    zero_size = CountAllocations::count();
+    ::operator delete(a);
+  }
+  {
+    const CountAllocations counting;
+    void* a = ::operator new(1);
+    void* b = ::operator new(2);
+    void* c = ::operator new(3);
+    escape(a);
+    escape(b);
+    escape(c);
+    three = CountAllocations::count();
+    ::operator delete(a);
+    ::operator delete(b);
+    ::operator delete(c);
+  }
+  {
+    // std::allocator, i.e. the route a stray std::vector in the callback takes.
+    const CountAllocations counting;
+    std::vector<float> v(64);
+    escape(v.data());
+    via_vector = CountAllocations::count();
+  }
+  {
+    // A new-expression whose result escapes cannot be elided, so this is the
+    // optimiser-proof spelling of the control that #57 replaced.
+    const CountAllocations counting;
+    int* p = new int{7};
+    escape(p);
+    via_new_expression = CountAllocations::count();
+    delete p;
+  }
+
+  CHECK(scalar == 1);
+  CHECK(array_form == 1);
+  // Zero-byte requests are still requests; a callback hiding behind `new T[0]`
+  // would otherwise be invisible.
+  CHECK(zero_size == 1);
+  // Exactly three, not "at least one": a counter that saturates at 1 or counts
+  // only the first allocation per arming would pass a weaker check.
+  CHECK(three == 3);
+  CHECK(via_vector == 1);
+  CHECK(via_new_expression == 1);
+#endif
+}
+
+TEST_CASE("the allocation counter observes the nothrow and over-aligned forms too",
+          "[mix][counter]") {
+#if GLOAM_TSAN_ACTIVE
+  SKIP("ThreadSanitizer defines the global operator new, so the counter cannot be installed");
+#else
+  // The forms the case above does not reach. Each one is a distinct symbol a
+  // runtime may define on its own terms — libasan defines all of them without
+  // forwarding, and libstdc++'s aligned forms call posix_memalign rather than
+  // `operator new` on every leg — so each needs its own observation. A callback
+  // reaching for `new (std::nothrow)` or an `alignas(64)` scratch block is no
+  // less an allocation for having taken a less common spelling.
+  constexpr std::size_t kOver = 64;
+  static_assert(kOver > __STDCPP_DEFAULT_NEW_ALIGNMENT__);
+  const auto over = std::align_val_t{kOver};
+
+  std::uint64_t nothrow_scalar = 0;
+  std::uint64_t nothrow_array = 0;
+  std::uint64_t aligned_scalar = 0;
+  std::uint64_t aligned_array = 0;
+  std::uint64_t aligned_nothrow_scalar = 0;
+  std::uint64_t aligned_nothrow_array = 0;
+  std::uintptr_t misalignment = 0;
+  bool any_null = false;
+  {
+    const CountAllocations counting;
+    void* a = ::operator new(16, std::nothrow);
+    escape(a);
+    nothrow_scalar = CountAllocations::count();
+    any_null = any_null || a == nullptr;
+    ::operator delete(a, std::nothrow);
+  }
+  {
+    const CountAllocations counting;
+    void* a = ::operator new[](16, std::nothrow);
+    escape(a);
+    nothrow_array = CountAllocations::count();
+    any_null = any_null || a == nullptr;
+    ::operator delete[](a, std::nothrow);
+  }
+  {
+    const CountAllocations counting;
+    void* a = ::operator new(16, over);
+    escape(a);
+    aligned_scalar = CountAllocations::count();
+    misalignment |= reinterpret_cast<std::uintptr_t>(a) % kOver;
+    ::operator delete(a, std::size_t{16}, over);
+  }
+  {
+    const CountAllocations counting;
+    void* a = ::operator new[](16, over);
+    escape(a);
+    aligned_array = CountAllocations::count();
+    misalignment |= reinterpret_cast<std::uintptr_t>(a) % kOver;
+    ::operator delete[](a, over);
+  }
+  {
+    const CountAllocations counting;
+    void* a = ::operator new(16, over, std::nothrow);
+    escape(a);
+    aligned_nothrow_scalar = CountAllocations::count();
+    any_null = any_null || a == nullptr;
+    misalignment |= reinterpret_cast<std::uintptr_t>(a) % kOver;
+    ::operator delete(a, over, std::nothrow);
+  }
+  {
+    const CountAllocations counting;
+    void* a = ::operator new[](16, over, std::nothrow);
+    escape(a);
+    aligned_nothrow_array = CountAllocations::count();
+    any_null = any_null || a == nullptr;
+    misalignment |= reinterpret_cast<std::uintptr_t>(a) % kOver;
+    ::operator delete[](a, std::size_t{16}, over);
+  }
+
+  CHECK(nothrow_scalar == 1);
+  CHECK(nothrow_array == 1);
+  CHECK(aligned_scalar == 1);
+  CHECK(aligned_array == 1);
+  CHECK(aligned_nothrow_scalar == 1);
+  CHECK(aligned_nothrow_array == 1);
+  // The replacement must still honour the contract it took over, or the suite
+  // would be counting allocations the rest of the binary cannot safely use.
+  CHECK_FALSE(any_null);
+  CHECK(misalignment == 0);
+#endif
+}
+
+TEST_CASE("the allocation counter is armed only inside its scope and re-arming resets it",
+          "[mix][counter]") {
+#if GLOAM_TSAN_ACTIVE
+  SKIP("ThreadSanitizer defines the global operator new, so the counter cannot be installed");
+#else
+  std::uint64_t before_arming = 0;
+  std::uint64_t inside = 0;
+  std::uint64_t after_disarm = 0;
+  std::uint64_t rearmed = 0;
+
+  // Outside any scope: allocations are not counted (Catch2 would swamp the number
+  // otherwise), and the leftover from a previous test must not leak into the next.
+  {
+    const CountAllocations first;
+    void* leftover = ::operator new(16);
+    escape(leftover);
+    ::operator delete(leftover);
+  }
+  void* outside = ::operator new(16);
+  escape(outside);
+  ::operator delete(outside);
+  before_arming = CountAllocations::count();  // still the 1 from `first`, not 2
+
+  {
+    const CountAllocations counting;
+    rearmed = CountAllocations::count();  // reset on arming
+    void* p = ::operator new(16);
+    escape(p);
+    inside = CountAllocations::count();
+    ::operator delete(p);
+  }
+  void* after = ::operator new(16);
+  escape(after);
+  ::operator delete(after);
+  after_disarm = CountAllocations::count();
+
+  CHECK(before_arming == 1);
+  CHECK(rearmed == 0);
+  CHECK(inside == 1);
+  // Disarming must stop the count: a counter that stays live would charge Catch2's
+  // own allocations to whatever `render` case runs next.
+  CHECK(after_disarm == 1);
+#endif
+}
+
+TEST_CASE("an allocation injected beside render is seen by the mixer case's own measurement",
+          "[mix][counter]") {
+#if GLOAM_TSAN_ACTIVE
+  SKIP("ThreadSanitizer defines the global operator new, so the counter cannot be installed");
+#else
+  // Falsifiability of "render allocates nothing": the identical arm/call/read
+  // pattern, with the allocation the mixer does not make supplied from outside,
+  // must read non-zero. If this stays at zero, `allocations == 0` in the mixer
+  // case proves nothing. (The same claim is proven against a mutated mixer, not
+  // only a bystander allocation, in gloam-work/agy-proof.md.)
+  Rig rig;
+  auto mixer = rig.make_mixer();
+  for (std::size_t i = 0; i < audio::Ring<>::capacity(); ++i) {
+    rig.push(audio::SoundId::MonsterFootfall, audio::kGainUnity, audio::kPanCentre, 1000);
+  }
+
+  std::uint64_t render_only = 0;
+  std::uint64_t render_then_alloc = 0;
+  {
+    const CountAllocations counting;
+    mixer.render(rig.ring, rig.out, kFrames, 2000);
+    render_only = CountAllocations::count();
+    void* injected = ::operator new(sizeof(int));
+    escape(injected);
+    render_then_alloc = CountAllocations::count();
+    ::operator delete(injected);
+  }
+
+  for (std::size_t i = 0; i < audio::Ring<>::capacity(); ++i) {
+    rig.push(audio::SoundId::HuntingSting, audio::kGainUnity, audio::kPanCentre, 3000);
+  }
+  std::uint64_t alloc_then_render = 0;
+  {
+    const CountAllocations counting;
+    void* injected = ::operator new(sizeof(int));
+    escape(injected);
+    mixer.render(rig.ring, rig.out, kFrames, 4000);
+    // render must not reset or mask a count already taken.
+    alloc_then_render = CountAllocations::count();
+    ::operator delete(injected);
+  }
+
+  CHECK(render_only == 0);
+  CHECK(render_then_alloc == 1);
+  CHECK(alloc_then_render == 1);
+#endif
+}
+
+TEST_CASE("render allocates nothing on any path, not only the full-ring one", "[mix][counter]") {
+#if GLOAM_TSAN_ACTIVE
+  SKIP("ThreadSanitizer defines the global operator new, so the counter cannot be installed");
+#else
+  // The original case counts one render of a full ring of one sound. The claim in
+  // §9.2 is about the callback, so cover the other paths it can take: an empty
+  // ring, a zero-frame buffer, a burst past kVoiceSlots (the steal and refuse
+  // paths), every SoundId, extreme pan/gain, and enough renders for voices to run
+  // out and be reused.
+  Rig rig;
+  auto mixer = rig.make_mixer();
+
+  std::uint64_t empty = 0;
+  std::uint64_t zero_frames = 0;
+  std::uint64_t burst = 0;
+  std::uint64_t tail = 0;
+  std::uint64_t extremes = 0;
+
+  {
+    const CountAllocations counting;
+    mixer.render(rig.ring, rig.out, kFrames, 1);
+    empty = CountAllocations::count();
+  }
+  {
+    rig.push(audio::SoundId::PartyFootfall, audio::kGainUnity, audio::kPanCentre, 1);
+    const CountAllocations counting;
+    mixer.render(rig.ring, rig.out, 0, 2);
+    zero_frames = CountAllocations::count();
+  }
+  {
+    // Seventeen-plus voices of rising loudness: steals; then equal loudness: refuses.
+    for (std::size_t i = 0; i < mix::kVoiceSlots + 8; ++i) {
+      const auto id = static_cast<audio::SoundId>(1 + (i % (audio::kSoundIdCount - 1)));
+      rig.push(id, static_cast<audio::Gain>(audio::kGainUnity / 4 + i), audio::kPanCentre, 5);
+    }
+    const CountAllocations counting;
+    mixer.render(rig.ring, rig.out, kFrames, 6);
+    burst = CountAllocations::count();
+  }
+  {
+    // Run the voices to completion and past it, so slots are freed and reused.
+    const CountAllocations counting;
+    for (int i = 0; i < 64; ++i) mixer.render(rig.ring, rig.out, kFrames, 10 + i);
+    tail = CountAllocations::count();
+  }
+  {
+    rig.push(audio::SoundId::HuntingSting, audio::kGainUnity, audio::kPanFull, 7);
+    rig.push(audio::SoundId::HuntingSting, audio::kGainUnity, -audio::kPanFull, 7);
+    rig.push(audio::SoundId::MonsterFootfall, audio::kGainSilent, audio::kPanCentre, 7);
+    const CountAllocations counting;
+    mixer.render(rig.ring, rig.out, kFrames, std::uint64_t{0} - 1U);
+    extremes = CountAllocations::count();
+  }
+
+  CHECK(empty == 0);
+  CHECK(zero_frames == 0);
+  CHECK(burst == 0);
+  CHECK(tail == 0);
+  CHECK(extremes == 0);
 #endif
 }
 
