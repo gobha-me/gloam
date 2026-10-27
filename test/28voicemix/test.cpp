@@ -199,6 +199,260 @@ TEST_CASE("render allocates nothing", "[mix]") {
 #endif
 }
 
+// ── #57: is the counter itself falsifiable? ────────────────────────────────
+//
+// "render allocates nothing" is only as strong as the counter's ability to see an
+// allocation. #57 was the counter silently going blind under Clang -O2/-O3: the
+// control's `new int{7}` was elided, so the control read 0 and the suite failed —
+// the lucky direction. The cases below pin the other half: every allocation shape
+// that can reasonably appear in a callback is OBSERVED, through the same replaced
+// `operator new` the mixer case uses, and the exact measure-pattern the mixer
+// case uses (arm, call, read, disarm) reports an allocation injected beside a
+// real `render`.
+//
+// No CHECK/REQUIRE inside a counted region: Catch2 allocates, and a count taken
+// after an assertion would measure the framework. Counts are copied out first.
+//
+// Every pointer is passed through `escape` before the count is read. Without it
+// the *compiler* may delete an unused allocation (the #57 mechanism), and these
+// cases would be testing the optimiser instead of the counter.
+namespace {
+template <typename T>
+void escape(T* pointer) noexcept {
+  __asm__ volatile("" : : "g"(pointer) : "memory");
+}
+}  // namespace
+
+TEST_CASE("the allocation counter observes every allocation shape, optimised or not",
+          "[mix][counter]") {
+#if GLOAM_TSAN_ACTIVE
+  SKIP("ThreadSanitizer defines the global operator new, so the counter cannot be installed");
+#else
+  std::uint64_t scalar = 0;
+  std::uint64_t array_form = 0;
+  std::uint64_t zero_size = 0;
+  std::uint64_t three = 0;
+  std::uint64_t via_vector = 0;
+  std::uint64_t via_new_expression = 0;
+  {
+    const CountAllocations counting;
+    void* a = ::operator new(sizeof(int));
+    escape(a);
+    scalar = CountAllocations::count();
+    ::operator delete(a);
+  }
+  {
+    const CountAllocations counting;
+    void* a = ::operator new[](64);
+    escape(a);
+    array_form = CountAllocations::count();
+    ::operator delete[](a);
+  }
+  {
+    const CountAllocations counting;
+    void* a = ::operator new(0);
+    escape(a);
+    zero_size = CountAllocations::count();
+    ::operator delete(a);
+  }
+  {
+    const CountAllocations counting;
+    void* a = ::operator new(1);
+    void* b = ::operator new(2);
+    void* c = ::operator new(3);
+    escape(a);
+    escape(b);
+    escape(c);
+    three = CountAllocations::count();
+    ::operator delete(a);
+    ::operator delete(b);
+    ::operator delete(c);
+  }
+  {
+    // std::allocator, i.e. the route a stray std::vector in the callback takes.
+    const CountAllocations counting;
+    std::vector<float> v(64);
+    escape(v.data());
+    via_vector = CountAllocations::count();
+  }
+  {
+    // A new-expression whose result escapes cannot be elided, so this is the
+    // optimiser-proof spelling of the control that #57 replaced.
+    const CountAllocations counting;
+    int* p = new int{7};
+    escape(p);
+    via_new_expression = CountAllocations::count();
+    delete p;
+  }
+
+  CHECK(scalar == 1);
+  CHECK(array_form == 1);
+  // Zero-byte requests are still requests; a callback hiding behind `new T[0]`
+  // would otherwise be invisible.
+  CHECK(zero_size == 1);
+  // Exactly three, not "at least one": a counter that saturates at 1 or counts
+  // only the first allocation per arming would pass a weaker check.
+  CHECK(three == 3);
+  CHECK(via_vector == 1);
+  CHECK(via_new_expression == 1);
+#endif
+}
+
+TEST_CASE("the allocation counter is armed only inside its scope and re-arming resets it",
+          "[mix][counter]") {
+#if GLOAM_TSAN_ACTIVE
+  SKIP("ThreadSanitizer defines the global operator new, so the counter cannot be installed");
+#else
+  std::uint64_t before_arming = 0;
+  std::uint64_t inside = 0;
+  std::uint64_t after_disarm = 0;
+  std::uint64_t rearmed = 0;
+
+  // Outside any scope: allocations are not counted (Catch2 would swamp the number
+  // otherwise), and the leftover from a previous test must not leak into the next.
+  {
+    const CountAllocations first;
+    void* leftover = ::operator new(16);
+    escape(leftover);
+    ::operator delete(leftover);
+  }
+  void* outside = ::operator new(16);
+  escape(outside);
+  ::operator delete(outside);
+  before_arming = CountAllocations::count();  // still the 1 from `first`, not 2
+
+  {
+    const CountAllocations counting;
+    rearmed = CountAllocations::count();  // reset on arming
+    void* p = ::operator new(16);
+    escape(p);
+    inside = CountAllocations::count();
+    ::operator delete(p);
+  }
+  void* after = ::operator new(16);
+  escape(after);
+  ::operator delete(after);
+  after_disarm = CountAllocations::count();
+
+  CHECK(before_arming == 1);
+  CHECK(rearmed == 0);
+  CHECK(inside == 1);
+  // Disarming must stop the count: a counter that stays live would charge Catch2's
+  // own allocations to whatever `render` case runs next.
+  CHECK(after_disarm == 1);
+#endif
+}
+
+TEST_CASE("an allocation injected beside render is seen by the mixer case's own measurement",
+          "[mix][counter]") {
+#if GLOAM_TSAN_ACTIVE
+  SKIP("ThreadSanitizer defines the global operator new, so the counter cannot be installed");
+#else
+  // Falsifiability of "render allocates nothing": the identical arm/call/read
+  // pattern, with the allocation the mixer does not make supplied from outside,
+  // must read non-zero. If this stays at zero, `allocations == 0` in the mixer
+  // case proves nothing. (The same claim is proven against a mutated mixer, not
+  // only a bystander allocation, in gloam-work/agy-proof.md.)
+  Rig rig;
+  auto mixer = rig.make_mixer();
+  for (std::size_t i = 0; i < audio::Ring<>::capacity(); ++i) {
+    rig.push(audio::SoundId::MonsterFootfall, audio::kGainUnity, audio::kPanCentre, 1000);
+  }
+
+  std::uint64_t render_only = 0;
+  std::uint64_t render_then_alloc = 0;
+  {
+    const CountAllocations counting;
+    mixer.render(rig.ring, rig.out, kFrames, 2000);
+    render_only = CountAllocations::count();
+    void* injected = ::operator new(sizeof(int));
+    escape(injected);
+    render_then_alloc = CountAllocations::count();
+    ::operator delete(injected);
+  }
+
+  for (std::size_t i = 0; i < audio::Ring<>::capacity(); ++i) {
+    rig.push(audio::SoundId::HuntingSting, audio::kGainUnity, audio::kPanCentre, 3000);
+  }
+  std::uint64_t alloc_then_render = 0;
+  {
+    const CountAllocations counting;
+    void* injected = ::operator new(sizeof(int));
+    escape(injected);
+    mixer.render(rig.ring, rig.out, kFrames, 4000);
+    // render must not reset or mask a count already taken.
+    alloc_then_render = CountAllocations::count();
+    ::operator delete(injected);
+  }
+
+  CHECK(render_only == 0);
+  CHECK(render_then_alloc == 1);
+  CHECK(alloc_then_render == 1);
+#endif
+}
+
+TEST_CASE("render allocates nothing on any path, not only the full-ring one", "[mix][counter]") {
+#if GLOAM_TSAN_ACTIVE
+  SKIP("ThreadSanitizer defines the global operator new, so the counter cannot be installed");
+#else
+  // The original case counts one render of a full ring of one sound. The claim in
+  // §9.2 is about the callback, so cover the other paths it can take: an empty
+  // ring, a zero-frame buffer, a burst past kVoiceSlots (the steal and refuse
+  // paths), every SoundId, extreme pan/gain, and enough renders for voices to run
+  // out and be reused.
+  Rig rig;
+  auto mixer = rig.make_mixer();
+
+  std::uint64_t empty = 0;
+  std::uint64_t zero_frames = 0;
+  std::uint64_t burst = 0;
+  std::uint64_t tail = 0;
+  std::uint64_t extremes = 0;
+
+  {
+    const CountAllocations counting;
+    mixer.render(rig.ring, rig.out, kFrames, 1);
+    empty = CountAllocations::count();
+  }
+  {
+    rig.push(audio::SoundId::PartyFootfall, audio::kGainUnity, audio::kPanCentre, 1);
+    const CountAllocations counting;
+    mixer.render(rig.ring, rig.out, 0, 2);
+    zero_frames = CountAllocations::count();
+  }
+  {
+    // Seventeen-plus voices of rising loudness: steals; then equal loudness: refuses.
+    for (std::size_t i = 0; i < mix::kVoiceSlots + 8; ++i) {
+      const auto id = static_cast<audio::SoundId>(1 + (i % (audio::kSoundIdCount - 1)));
+      rig.push(id, static_cast<audio::Gain>(audio::kGainUnity / 4 + i), audio::kPanCentre, 5);
+    }
+    const CountAllocations counting;
+    mixer.render(rig.ring, rig.out, kFrames, 6);
+    burst = CountAllocations::count();
+  }
+  {
+    // Run the voices to completion and past it, so slots are freed and reused.
+    const CountAllocations counting;
+    for (int i = 0; i < 64; ++i) mixer.render(rig.ring, rig.out, kFrames, 10 + i);
+    tail = CountAllocations::count();
+  }
+  {
+    rig.push(audio::SoundId::HuntingSting, audio::kGainUnity, audio::kPanFull, 7);
+    rig.push(audio::SoundId::HuntingSting, audio::kGainUnity, -audio::kPanFull, 7);
+    rig.push(audio::SoundId::MonsterFootfall, audio::kGainSilent, audio::kPanCentre, 7);
+    const CountAllocations counting;
+    mixer.render(rig.ring, rig.out, kFrames, std::uint64_t{0} - 1U);
+    extremes = CountAllocations::count();
+  }
+
+  CHECK(empty == 0);
+  CHECK(zero_frames == 0);
+  CHECK(burst == 0);
+  CHECK(tail == 0);
+  CHECK(extremes == 0);
+#endif
+}
+
 TEST_CASE("a full ring drains in one render", "[mix]") {
   Rig rig;
   auto mixer = rig.make_mixer();
